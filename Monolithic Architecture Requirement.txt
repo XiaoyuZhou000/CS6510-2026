@@ -1,0 +1,39 @@
+This assignment introduces you to the problem you will implement each week using a different software architecture style. 
+
+Self Checkout Supermarket
+Your task is to build a backend for a supermarket self-checkout system. Customers start a 'transaction', scan N items, then pay. Each scanned item is looked up, the price returned, and when the customer payment is complete, the inventory for all bought items is decremented.
+
+By default there are 10 self-checkout stations that can be used concurrently. Each customer buys between 1 and 20 items, and the store has 2K items in its inventory, each with 10000 items in stock at the start of each test.
+
+The checkout system must implement an API for starting a transaction, scanning an item, and completing the transaction. The inventory system would track stock items in a database and report low stock levels when the endpoint  /inventory/low-stock is called.
+
+There also needs to be functionality to track the most popular items being purchased, based on a sliding window of purchased items - eg the last 1000 items with a sliding window of 500. The 10 most popular items in the sliding window results should be written to a database and at the end of the test the latest window can be retrieved by the client calling /analytics/popular-items and listed in the client window. 
+
+/analytics/popular-items
+
+You are provided with a client that has 10 threads representing checkout stations, with each simulating a customer concurrently buying items. The client tracks response times and generates a report at the end of a test showing response time statistics for starting a transaction, scanning an item, and completing a transaction. 
+
+Use the following resources to understand the problem:
+
+Github repo: https://github.com/gortonator/CS6510-2026 Links to an external site.
+Clone this repo and build the load-client and mockserver. Run the mockserver in one window and the load-client in another, and you should see results appear after 60 seconds
+Examine the OpenAPI spec in the /spec folder. This gives you a precise API specification
+Your task this week is to build a monolithic implementation of this API/server. Think SpringBoot, Flask, Node.js. You can use any language you like, and store the data in any database you like - the stock items and popular items must be persisted in a database that you can easily reinitialize after each test run. Choose wisely as you will be working from parts of this code base over the next few weeks
+
+Feel free to use any LLM you like to build this system. Github SpecKit might be a good way to go too - steeper learning curve but good to know.
+
+You can run the client and server on your laptop to get results. If you want to have more fun, deploy your server on a remote resource. Make sure it is physically close by if you run the client on your laptop. Or run the client in the same place as your server. 
+
+Submit:
+
+Quality Attributes/Architectural Characteristics Analysis:
+
+Create a .md file in your repo that contains a brief architectural charateristics analysis. (2 points)
+
+First, list the architectural characteristics that the supermarket self checkout system must have. List each characteristic and one or more concrete requirements (eg: performance: it must take less than 1 second to start a tranasction) for that charateristic.
+Next list the 3 top charateristics you will prioritize in your implementation. Be explicit about any trade-offs this prioritzation introduces  (eg  caching items in a transaction improves performance and trades off against reliability because scanned items can be lost if a station crashes).
+Then upload the results from 2 runs of the load-client against your monolithic server implementation:
+
+with default parameters (1 points)
+from using stress mode, ie java -cp out Main --stations=100 --duration=120 (2 points)
+Submit a URL for your repo that contains these 2 json files and the quality attributes analysis
