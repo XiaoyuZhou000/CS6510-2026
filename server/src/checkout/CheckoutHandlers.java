@@ -1,6 +1,5 @@
 package checkout;
 
-import api.ApiErrors;
 import api.HttpSupport;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -16,9 +15,7 @@ import java.util.regex.Matcher;
 /**
  * Routes all /transactions/... requests to CheckoutService and serializes results.
  *
- * Phase 4 covers: POST /transactions, POST /transactions/{id}/items,
- *                 POST /transactions/{id}/complete.
- * Phase 7 (T040) will add GET /transactions/{id}.
+ * Routes the transaction lifecycle and lookup endpoints from the fixed API contract.
  */
 public final class CheckoutHandlers implements HttpHandler {
 
@@ -97,18 +94,15 @@ public final class CheckoutHandlers implements HttpHandler {
         }
     }
 
-    // ------------------------------------------------------------------ GET /transactions/{id} (T039/T040)
+    // ------------------------------------------------------------------ GET /transactions/{id}
 
     private void handleGet(HttpExchange ex, String transactionId) throws IOException, SQLException {
-        // Serve in-memory data for OPEN transactions.
-        // T039/T040 will add the DB fallback for completed transactions.
-        CheckoutService.TransactionView inMem = service.getInMemory(transactionId);
-        if (inMem != null) {
-            HttpSupport.respond(ex, 200, serializeTransaction(inMem));
-            return;
+        try {
+            CheckoutService.TransactionView transaction = service.get(transactionId);
+            HttpSupport.respond(ex, 200, serializeTransaction(transaction));
+        } catch (CheckoutException e) {
+            HttpSupport.respondError(ex, e.httpStatus, e.errorCode, e.getMessage());
         }
-        HttpSupport.respondError(ex, 404, ApiErrors.TRANSACTION_NOT_FOUND,
-            "Transaction not found: " + transactionId);
     }
 
     // ------------------------------------------------------------------ serializers

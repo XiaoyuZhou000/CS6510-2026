@@ -186,7 +186,7 @@ public final class CheckoutService {
         if (basket != null) return basket;
 
         // Completed baskets are evicted, but their durable status still determines the error.
-        TransactionDao.TransactionRow stored = transactionDao.readCompleted(transactionId);
+        TransactionDao.TransactionRow stored = transactionDao.readById(transactionId);
         if (stored != null && !"OPEN".equals(stored.status())) {
             throw new CheckoutException(409, ApiErrors.TRANSACTION_NOT_OPEN,
                 "Transaction is not open: " + transactionId);
@@ -196,19 +196,36 @@ public final class CheckoutService {
     }
 
     /**
-     * Returns an in-memory TransactionView for an OPEN transaction,
-     * or null if the transaction is not currently held in memory (evicted after completion).
+     * GET /transactions/{id} — reads a live basket while OPEN and falls back to
+     * durable transaction_line aggregates after the basket has been evicted.
      */
-    public TransactionView getInMemory(String transactionId) {
+    public TransactionView get(String transactionId) throws SQLException {
         Basket basket = baskets.get(transactionId);
-        if (basket == null) return null;
+        if (basket != null) {
+            synchronized (basket) {
+                return new TransactionView(
+                    transactionId,
+                    basket.stationId(),
+                    basket.status().name(),
+                    basket.itemCount(),
+                    basket.runningTotal(),
+                    basket.startedAt()
+                );
+            }
+        }
+
+        TransactionDao.TransactionRow stored = transactionDao.readById(transactionId);
+        if (stored == null) {
+            throw new CheckoutException(404, ApiErrors.TRANSACTION_NOT_FOUND,
+                "Transaction not found: " + transactionId);
+        }
         return new TransactionView(
-            transactionId,
-            basket.stationId(),
-            basket.status().name(),
-            basket.itemCount(),
-            basket.runningTotal(),
-            basket.startedAt()
+            stored.transactionId(),
+            stored.stationId(),
+            stored.status(),
+            stored.itemCount(),
+            stored.runningTotal(),
+            stored.startedAt()
         );
     }
 }

@@ -14,12 +14,10 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public final class AnalyticsRecorder {
 
-    private static final int WINDOW_SIZE    = 1000;
-    private static final int SLIDE_INTERVAL = 500;
     private static final int MAX_RETRIES    = 2;
 
     private final AtomicLong globalScanCounter;
-    private final String[]   ringBuffer = new String[WINDOW_SIZE];
+    private final String[]   ringBuffer = new String[WindowMath.WINDOW_SIZE];
 
     // guards: counter increment + ring-buffer write + boundary snapshot + task submission
     private final Object lock = new Object();
@@ -53,19 +51,18 @@ public final class AnalyticsRecorder {
     public void recordScan(String sku) {
         synchronized (lock) {
             long count = globalScanCounter.incrementAndGet();
-            int  index = (int) ((count - 1) % WINDOW_SIZE);
+            int  index = WindowMath.ringIndex(count);
             ringBuffer[index] = sku;
 
-            if (count % SLIDE_INTERVAL == 0) {
-                if (skipNextCheckpoint) {
-                    skipNextCheckpoint = false;
-                    return;
-                }
+            WindowMath.CheckpointDecision decision =
+                    WindowMath.checkpointDecision(count, skipNextCheckpoint);
+            skipNextCheckpoint = decision.skipNextCheckpoint();
+            if (decision.checkpoint()) {
                 // Snapshot under the lock, then submit outside it
-                String[] snapshot = new String[WINDOW_SIZE];
-                System.arraycopy(ringBuffer, 0, snapshot, 0, WINDOW_SIZE);
+                String[] snapshot = new String[WindowMath.WINDOW_SIZE];
+                System.arraycopy(ringBuffer, 0, snapshot, 0, WindowMath.WINDOW_SIZE);
                 long windowEnd   = count;
-                long windowStart = windowEnd - WINDOW_SIZE + 1;
+                long windowStart = WindowMath.windowStart(windowEnd);
 
                 checkpointExecutor.submit(() -> runCheckpoint(snapshot, windowStart, windowEnd));
             }

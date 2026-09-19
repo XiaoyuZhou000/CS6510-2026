@@ -100,6 +100,7 @@ public final class PopularWindowDao {
      * Returns null if no window has been persisted yet.
      */
     public WindowRow readLatestWindow(int limit) throws SQLException {
+        if (limit < 0) throw new IllegalArgumentException("limit must be non-negative");
         Connection conn = pool.borrow();
         try {
             long windowId;
@@ -125,7 +126,7 @@ public final class PopularWindowDao {
                     "FROM popular_item pi JOIN catalog_item ci ON pi.sku = ci.sku " +
                     "WHERE pi.window_id = ? ORDER BY pi.rank_pos LIMIT ?")) {
                 ps.setLong(1, windowId);
-                ps.setInt(2, limit);
+                ps.setInt(2, Math.min(limit, 10));
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         items.add(new RankedItem(

@@ -9,12 +9,10 @@ public final class TransactionDao {
 
     public record TransactionLine(String sku, int quantity, BigDecimal unitPrice) {}
 
-    /**
-     * Fetched result for a completed transaction (used by GET /transactions/{id} fallback).
-     */
+    /** Fetched durable state used by GET /transactions/{id} when no basket is in memory. */
     public record TransactionRow(
         String transactionId, String stationId, String status,
-        BigDecimal totalAmount, Instant startedAt, Instant completedAt,
+        BigDecimal runningTotal, Instant startedAt, Instant completedAt,
         int itemCount
     ) {}
 
@@ -85,19 +83,20 @@ public final class TransactionDao {
     }
 
     /**
-     * Reads a completed transaction's metadata plus the aggregate item count from
-     * transaction_line. Used by GET /transactions/{id} once a basket has been evicted.
+     * Reads durable transaction metadata and derives basket totals from transaction_line.
+     * Completed transactions use this after their in-memory basket has been evicted.
      * Returns null if the transaction is not found.
      */
-    public TransactionRow readCompleted(String transactionId) throws SQLException {
+    public TransactionRow readById(String transactionId) throws SQLException {
         Connection conn = pool.borrow();
         try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT t.station_id, t.status, t.total_amount, t.started_at, t.completed_at, " +
-                "       COALESCE(SUM(tl.quantity), 0) AS item_count " +
+                "SELECT t.station_id, t.status, t.started_at, t.completed_at, " +
+                "       COALESCE(SUM(tl.quantity), 0) AS item_count, " +
+                "       COALESCE(SUM(tl.quantity * tl.unit_price), 0.00) AS running_total " +
                 "FROM `transaction` t " +
                 "LEFT JOIN transaction_line tl ON tl.transaction_id = t.transaction_id " +
                 "WHERE t.transaction_id = ? " +
-                "GROUP BY t.transaction_id, t.station_id, t.status, t.total_amount, t.started_at, t.completed_at")) {
+                "GROUP BY t.transaction_id, t.station_id, t.status, t.started_at, t.completed_at")) {
             ps.setString(1, transactionId);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return null;
@@ -107,7 +106,7 @@ public final class TransactionDao {
                     transactionId,
                     rs.getString("station_id"),
                     rs.getString("status"),
-                    rs.getBigDecimal("total_amount"),
+                    rs.getBigDecimal("running_total"),
                     started != null ? started.toInstant() : Instant.now(),
                     completed != null ? completed.toInstant() : null,
                     rs.getInt("item_count")

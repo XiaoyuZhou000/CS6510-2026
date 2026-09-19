@@ -113,10 +113,10 @@ server/
 
 **Independent Test**: Drive stock for a known SKU below a threshold via completed transactions, request low-stock alerts, confirm that SKU appears with correct stock and threshold.
 
-- [ ] T030 [US3] Add `listLowStock(Integer thresholdOverride)` to `server/src/persistence/InventoryDao.java`: selects `sku`, `name`, `stock_quantity`, and each row's stored `low_stock_threshold INT` (or the request's override when supplied), using an **at-or-below** comparison (`stock_quantity <= threshold`) per data-model.md's validation summary (FR-015)
-- [ ] T031 [US3] Implement `GET /inventory/low-stock` handler in `server/src/inventory/InventoryHandlers.java`: an optional `threshold` query param overrides the default for that request only, without changing server-side state for other callers (FR-015; spec.md US3 acceptance scenario 2)
-- [ ] T032 [US3] Register the `/inventory/low-stock` route in `server/src/Main.java` (depends on T031)
-- [ ] T033 [P] [US3] Contract test `server/tests/contract/LowStockEndpointTest.java`: response shape vs. `LowStockResponse`, default-vs-override threshold behavior, and the at-or-below boundary when stock exactly equals the threshold (FR-015; spec.md US3 acceptance scenario 1; spec.md Edge Cases)
+- [X] T030 [US3] Add `listLowStock(Integer thresholdOverride)` to `server/src/persistence/InventoryDao.java`: selects `sku`, `name`, `stock_quantity`, and each row's stored `low_stock_threshold INT` (or the request's override when supplied), using an **at-or-below** comparison (`stock_quantity <= threshold`) per data-model.md's validation summary (FR-015)
+- [X] T031 [US3] Implement `GET /inventory/low-stock` handler in `server/src/inventory/InventoryHandlers.java`: an optional `threshold` query param overrides the default for that request only, without changing server-side state for other callers (FR-015; spec.md US3 acceptance scenario 2)
+- [X] T032 [US3] Register the `/inventory/low-stock` route in `server/src/Main.java` (depends on T031)
+- [X] T033 [P] [US3] Contract test `server/tests/contract/LowStockEndpointTest.java`: response shape vs. `LowStockResponse`, default-vs-override threshold behavior, and the at-or-below boundary when stock exactly equals the threshold (FR-015; spec.md US3 acceptance scenario 1; spec.md Edge Cases)
 
 **Checkpoint**: US1+US2+US3 independently functional.
 
@@ -128,11 +128,11 @@ server/
 
 **Independent Test**: Drive a known sequence of scans, then request the popular-items report — independent of whether any transaction has completed.
 
-- [ ] T034 [US4] Add `readLatestWindow(limit)` to `server/src/persistence/PopularWindowDao.java`: selects the `popular_window` row with the highest `window_id BIGINT PK` and its `popular_item` rows (joined to `catalog_item` for `name`), capped at `limit` (FR-014)
-- [ ] T035 [US4] Implement `GET /analytics/popular-items` handler in `server/src/analytics/AnalyticsHandlers.java`: optional `limit` query param (default 10), returns `windowSize` (1000), `slideInterval` (500), `windowStart`, `windowEnd`, `computedAt`, `items` per `PopularItemsResponse` (FR-013, FR-014)
-- [ ] T036 [US4] Register the `/analytics/popular-items` route in `server/src/Main.java` (depends on T035)
-- [ ] T037 [P] [US4] Contract test `server/tests/contract/PopularItemsEndpointTest.java`: response shape vs. `PopularItemsResponse`, top-10 cap and rank ordering, and `windowStart`/`windowEnd` reflecting the latest **computed** (persisted) window rather than the very latest scan (FR-013, FR-014; spec.md US4 acceptance scenarios 1–2)
-- [ ] T038 [P] [US4] Integration test `server/tests/integration/WindowBoundaryAccuracyTest.java` against a real MySQL instance: fire a concurrent burst of scans from multiple threads spanning a 500-scan checkpoint boundary — assert the persisted window's counts are exact for precisely the 1,000-scan range its own `windowStart`/`windowEnd` claim to cover (Constitution V; spec.md US4 acceptance scenario 3)
+- [X] T034 [US4] Add `readLatestWindow(limit)` to `server/src/persistence/PopularWindowDao.java`: selects the `popular_window` row with the highest `window_id BIGINT PK` and its `popular_item` rows (joined to `catalog_item` for `name`), capped at `limit` (FR-014)
+- [X] T035 [US4] Implement `GET /analytics/popular-items` handler in `server/src/analytics/AnalyticsHandlers.java`: optional `limit` query param (default 10), returns `windowSize` (1000), `slideInterval` (500), `windowStart`, `windowEnd`, `computedAt`, `items` per `PopularItemsResponse` (FR-013, FR-014)
+- [X] T036 [US4] Register the `/analytics/popular-items` route in `server/src/Main.java` (depends on T035)
+- [X] T037 [P] [US4] Contract test `server/tests/contract/PopularItemsEndpointTest.java`: response shape vs. `PopularItemsResponse`, top-10 cap and rank ordering, and `windowStart`/`windowEnd` reflecting the latest **computed** (persisted) window rather than the very latest scan (FR-013, FR-014; spec.md US4 acceptance scenarios 1–2)
+- [X] T038 [P] [US4] Integration test `server/tests/integration/WindowBoundaryAccuracyTest.java` against a real MySQL instance: fire a concurrent burst of scans from multiple threads spanning a 500-scan checkpoint boundary — assert the persisted window's counts are exact for precisely the 1,000-scan range its own `windowStart`/`windowEnd` claim to cover (Constitution V; spec.md US4 acceptance scenario 3)
 
 **Checkpoint**: US1+US2+US3+US4 independently functional.
 
@@ -144,10 +144,10 @@ server/
 
 **Independent Test**: Start a transaction, scan a known item, request that transaction by ID, confirm status/itemCount/runningTotal.
 
-- [ ] T039 [US5] Add a completed-transaction read method to `server/src/persistence/TransactionDao.java`: fetches `status`, `started_at`, `completed_at` from the `transaction` row plus `itemCount`/`runningTotal` via `COUNT`/`SUM` over `transaction_line`, for use once a transaction is `COMPLETED` and its in-memory `Basket` has been evicted (data-model.md GET /transactions/{id} fallback)
-- [ ] T040 [US5] Implement `GET /transactions/{id}` handler in `server/src/checkout/CheckoutHandlers.java`: reports `itemCount`/`runningTotal` from the in-memory `Basket` while `OPEN`, falling back to the T039 DB read once `COMPLETED`; 404 `TRANSACTION_NOT_FOUND` when no such transaction exists (FR-012; spec.md US5 acceptance scenarios 1–2)
-- [ ] T041 [US5] Register the `GET /transactions/{id}` route in `server/src/Main.java` (depends on T040)
-- [ ] T042 [P] [US5] Contract test `server/tests/contract/TransactionLookupTest.java`: found (both OPEN and COMPLETED) and not-found cases vs. the `Transaction` schema (spec.md US5 acceptance scenarios 1–2)
+- [X] T039 [US5] Add a completed-transaction read method to `server/src/persistence/TransactionDao.java`: fetches `status`, `started_at`, `completed_at` from the `transaction` row plus `itemCount`/`runningTotal` via `COUNT`/`SUM` over `transaction_line`, for use once a transaction is `COMPLETED` and its in-memory `Basket` has been evicted (data-model.md GET /transactions/{id} fallback)
+- [X] T040 [US5] Implement `GET /transactions/{id}` handler in `server/src/checkout/CheckoutHandlers.java`: reports `itemCount`/`runningTotal` from the in-memory `Basket` while `OPEN`, falling back to the T039 DB read once `COMPLETED`; 404 `TRANSACTION_NOT_FOUND` when no such transaction exists (FR-012; spec.md US5 acceptance scenarios 1–2)
+- [X] T041 [US5] Register the `GET /transactions/{id}` route in `server/src/Main.java` (depends on T040)
+- [X] T042 [P] [US5] Contract test `server/tests/contract/TransactionLookupTest.java`: found (both OPEN and COMPLETED) and not-found cases vs. the `Transaction` schema (spec.md US5 acceptance scenarios 1–2)
 
 **Checkpoint**: Every endpoint in `spec/self-checkout-openapi.yaml` is implemented.
 
@@ -159,9 +159,9 @@ server/
 
 **Independent Test**: Reset the store, verify the 2,000-item/10,000-unit baseline, run a short scripted sequence of transactions, reset again, confirm the baseline is restored identically.
 
-- [ ] T043 [US6] Write `server/README.md` documenting: build/run commands, CLI args (`port`, `dbHost`, `dbPort`, `dbName`, `dbUser`, `dbPassword`), and the required procedure between load-test runs — reinitialize via `db/init-db.ps1`, then (re)start the server process, since `CatalogCache` and `AnalyticsRecorder` state are loaded once at startup and are not refreshed by a database reset alone (FR-016, Constitution VI; research.md §9)
-- [ ] T044 [US6] Integration test `server/tests/integration/ResetBaselineTest.java`: reinitialize via `db/init.sql`, start a fresh server instance, and assert the catalog contains exactly 2,000 items with every SKU's stock at 10,000 units (FR-002, FR-016; spec.md US6 acceptance scenario 1)
-- [ ] T045 [US6] Execute the assignment's full validation gate end-to-end: reinitialize the database, start the server, run the unmodified `load-client` in default mode (10 stations / 60s), reinitialize again, restart the server, run `load-client` in stress mode (100 stations / 120s); confirm stock conservation (`initial − final == sold`, never negative) for both runs and save both JSON reports under `load-client/reports/` (SC-001, SC-003, SC-006; spec.md US6 acceptance scenario 2; Constitution "Validation gate") (depends on all prior phases)
+- [X] T043 [US6] Write `server/README.md` documenting: build/run commands, CLI args (`port`, `dbHost`, `dbPort`, `dbName`, `dbUser`, `dbPassword`), and the required procedure between load-test runs — reinitialize via `db/init-db.ps1`, then (re)start the server process, since `CatalogCache` and `AnalyticsRecorder` state are loaded once at startup and are not refreshed by a database reset alone (FR-016, Constitution VI; research.md §9)
+- [X] T044 [US6] Integration test `server/tests/integration/ResetBaselineTest.java`: reinitialize via `db/init.sql`, start a fresh server instance, and assert the catalog contains exactly 2,000 items with every SKU's stock at 10,000 units (FR-002, FR-016; spec.md US6 acceptance scenario 1)
+- [X] T045 [US6] Execute the assignment's full validation gate end-to-end: reinitialize the database, start the server, run the unmodified `load-client` in default mode (10 stations / 60s), reinitialize again, restart the server, run `load-client` in stress mode (100 stations / 120s); confirm stock conservation (`initial − final == sold`, never negative) for both runs and save both JSON reports under `load-client/reports/` (SC-001, SC-003, SC-006; spec.md US6 acceptance scenario 2; Constitution "Validation gate") (depends on all prior phases)
 
 **Checkpoint**: All user stories independently functional; the assignment's validation gate is satisfied end-to-end.
 
@@ -171,10 +171,10 @@ server/
 
 **Purpose**: Pure-logic coverage and a final full-suite confirmation
 
-- [ ] T046 [P] Unit test `server/tests/unit/RingBufferWindowMathTest.java`: ring-buffer indexing, 500-scan boundary detection, and the `skipNextCheckpoint` restart logic from research.md §9, with no database involved
-- [ ] T047 [P] Unit test `server/tests/unit/LowStockThresholdResolutionTest.java`: default-vs-override threshold resolution and the at-or-below boundary, in isolation from HTTP/DB
-- [ ] T048 [P] Unit test `server/tests/unit/JsonRoundTripTest.java`: round-trip every response DTO (`CatalogItem`, `Transaction`, `ScanResult`, `Receipt`, `LowStockAlert`, `PopularItem`, `PopularItemsResponse`, `ApiError`) through `server/src/json/Json.java`
-- [ ] T049 Run the full `server/tests` suite (contract + integration + unit) via `server/run-tests.sh` and confirm all tests pass before considering the feature complete
+- [X] T046 [P] Unit test `server/tests/unit/RingBufferWindowMathTest.java`: ring-buffer indexing, 500-scan boundary detection, and the `skipNextCheckpoint` restart logic from research.md §9, with no database involved
+- [X] T047 [P] Unit test `server/tests/unit/LowStockThresholdResolutionTest.java`: default-vs-override threshold resolution and the at-or-below boundary, in isolation from HTTP/DB
+- [X] T048 [P] Unit test `server/tests/unit/JsonRoundTripTest.java`: round-trip every response DTO (`CatalogItem`, `Transaction`, `ScanResult`, `Receipt`, `LowStockAlert`, `PopularItem`, `PopularItemsResponse`, `ApiError`) through `server/src/json/Json.java`
+- [X] T049 Run the full `server/tests` suite (contract + integration + unit) via `server/run-tests.sh` and confirm all tests pass before considering the feature complete
 
 ---
 
@@ -271,3 +271,11 @@ With multiple developers, after Foundational completes:
 - Verify integration tests actually exercise concurrency (real threads/executors against a real MySQL instance) — a single-threaded test cannot demonstrate Constitution I or V
 - Commit after each task or logical group; stop at any checkpoint to validate a story independently
 - Avoid: vague tasks, same-file conflicts marked [P], cross-story dependencies that break independent testability
+
+---
+
+## Phase 10: Convergence
+
+- [ ] T050 CRITICAL Make scan admission and completion finalization mutually exclusive in `server/src/checkout/Basket.java` and `server/src/checkout/CheckoutService.java`, so no scan can succeed after the completion snapshot is chosen and failed completion leaves the basket consistently retryable; add deterministic concurrent scan-vs-complete integration coverage proving every accepted scan is included in the receipt and inventory decrement per Constitution I, FR-004, FR-006, FR-008, and US2/AC7 (contradicts)
+- [ ] T051 CRITICAL Correct `server/src/analytics/WindowMath.java` and `server/src/analytics/AnalyticsRecorder.java` to persist the first full 1,000-scan window at scan 1,000 and subsequent full windows every 500 scans with valid inclusive boundaries, then update fresh-start, restart-skip, and concurrent boundary tests so every reported range exactly matches the 1,000 scans counted per Constitution V, FR-013, SC-004, and US4/AC1–3 (contradicts)
+- [ ] T052 CRITICAL Prevent computed analytics checkpoints from being discarded after bounded retries: retain and retry the oldest failed checkpoint in boundary order without blocking scan responses, ensure the latest computed window is eventually persisted and returned, and add transient/prolonged persistence-failure recovery tests per Constitution V, FR-013, and FR-014 (contradicts)

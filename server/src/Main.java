@@ -1,9 +1,11 @@
 import analytics.AnalyticsRecorder;
+import analytics.AnalyticsHandlers;
 import catalog.CatalogCache;
 import catalog.CatalogHandler;
 import checkout.CheckoutHandlers;
 import checkout.CheckoutService;
 import com.sun.net.httpserver.HttpServer;
+import inventory.InventoryHandlers;
 import persistence.CatalogDao;
 import persistence.ConnectionPool;
 import persistence.InventoryDao;
@@ -47,11 +49,13 @@ public final class Main {
         // T017: /items
         server.createContext("/items", new CatalogHandler(catalog));
 
-        // T024: /transactions (all sub-paths routed inside CheckoutHandlers)
+        // T024/T041: transaction lifecycle and GET /transactions/{id}
         server.createContext("/transactions", new CheckoutHandlers(checkoutService));
 
         // T032: /inventory/low-stock
+        server.createContext("/inventory/low-stock", new InventoryHandlers(inventoryDao));
         // T036: /analytics/popular-items
+        server.createContext("/analytics/popular-items", new AnalyticsHandlers(windowDao));
 
         server.start();
         System.out.println("Server listening on port " + port);
