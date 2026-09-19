@@ -13,7 +13,7 @@ public final class WindowMath {
     }
 
     public static boolean isCheckpointBoundary(long scanNumber) {
-        return scanNumber > 0 && scanNumber % SLIDE_INTERVAL == 0;
+        return scanNumber >= WINDOW_SIZE && scanNumber % SLIDE_INTERVAL == 0;
     }
 
     public static long windowStart(long windowEnd) {

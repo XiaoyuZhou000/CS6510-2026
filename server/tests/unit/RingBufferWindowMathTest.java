@@ -17,33 +17,35 @@ public class RingBufferWindowMathTest {
     }
 
     @Test
-    void boundariesOccurEveryFiveHundredScansAndProduceExactRanges() {
+    void firstFullWindowIsAtOneThousandThenSlidesEveryFiveHundred() {
         assertFalse(WindowMath.isCheckpointBoundary(0));
         assertFalse(WindowMath.isCheckpointBoundary(499));
-        assertTrue(WindowMath.isCheckpointBoundary(500));
+        assertFalse(WindowMath.isCheckpointBoundary(500));
         assertFalse(WindowMath.isCheckpointBoundary(999));
         assertTrue(WindowMath.isCheckpointBoundary(1000));
-        assertEquals(-499, WindowMath.windowStart(500));
         assertEquals(1, WindowMath.windowStart(1000));
         assertEquals(501, WindowMath.windowStart(1500));
+        assertThrows(IllegalArgumentException.class, () -> WindowMath.windowStart(500));
         assertThrows(IllegalArgumentException.class, () -> WindowMath.windowStart(1001));
     }
 
     @Test
     void restartSkipIsConsumedOnlyByTheFirstBoundary() {
-        var beforeBoundary = WindowMath.checkpointDecision(999, true);
+        var beforeBoundary = WindowMath.checkpointDecision(1499, true);
         assertFalse(beforeBoundary.checkpoint());
         assertTrue(beforeBoundary.skipNextCheckpoint());
 
-        var skipped = WindowMath.checkpointDecision(1000, beforeBoundary.skipNextCheckpoint());
+        var skipped = WindowMath.checkpointDecision(1500, beforeBoundary.skipNextCheckpoint());
         assertFalse(skipped.checkpoint());
         assertFalse(skipped.skipNextCheckpoint());
 
-        var resumed = WindowMath.checkpointDecision(1500, skipped.skipNextCheckpoint());
+        var resumed = WindowMath.checkpointDecision(2000, skipped.skipNextCheckpoint());
         assertTrue(resumed.checkpoint());
         assertFalse(resumed.skipNextCheckpoint());
 
-        assertTrue(WindowMath.checkpointDecision(500, false).checkpoint(),
-            "A fresh run must persist its first boundary");
+        assertFalse(WindowMath.checkpointDecision(500, false).checkpoint(),
+            "A fresh run must not persist a partial window");
+        assertTrue(WindowMath.checkpointDecision(1000, false).checkpoint(),
+            "A fresh run must persist its first full window");
     }
 }

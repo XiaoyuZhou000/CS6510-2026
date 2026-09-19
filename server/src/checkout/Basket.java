@@ -26,10 +26,16 @@ public final class Basket {
 
     public record ScanSnapshot(int itemCount, BigDecimal runningTotal) {}
 
+    /** Immutable basket contents reserved by a single completion attempt. */
+    public record CompletionSnapshot(Map<String, Line> lines, int itemCount, BigDecimal totalAmount) {
+        public boolean isEmpty() { return lines.isEmpty(); }
+    }
+
     private final String transactionId;
     private final String stationId;
     private final Instant startedAt;
     private Status status = Status.OPEN;
+    private boolean completionInProgress;
     private final Map<String, Line> lines = new LinkedHashMap<>();
 
     public Basket(String transactionId, String stationId) {
@@ -44,8 +50,12 @@ public final class Basket {
 
     public synchronized Status status() { return status; }
 
-    /** Adds one scan of the given SKU; returns a consistent post-scan snapshot. */
-    public synchronized ScanSnapshot addScan(String sku, String name, BigDecimal unitPrice) {
+    /**
+     * Admits and adds one scan atomically. Returns null once a completion has reserved a
+     * snapshot (or after completion), so an accepted scan can never fall outside the receipt.
+     */
+    public synchronized ScanSnapshot addScanIfOpen(String sku, String name, BigDecimal unitPrice) {
+        if (status != Status.OPEN || completionInProgress) return null;
         Line existing = lines.get(sku);
         if (existing != null) {
             existing.quantity++;
@@ -55,11 +65,30 @@ public final class Basket {
         return new ScanSnapshot(itemCountInternal(), runningTotalInternal());
     }
 
-    /** Atomically transitions OPEN → COMPLETED. Returns true on success. */
-    public synchronized boolean markCompleted() {
-        if (status != Status.OPEN) return false;
+    /**
+     * Reserves the current contents for completion and closes scan admission. Returns null
+     * when the transaction is completed or another completion attempt owns the reservation.
+     */
+    public synchronized CompletionSnapshot beginCompletion() {
+        if (status != Status.OPEN || completionInProgress) return null;
+        completionInProgress = true;
+        Map<String, Line> snapshot = copyLines();
+        return new CompletionSnapshot(
+            Collections.unmodifiableMap(snapshot), itemCountInternal(), runningTotalInternal());
+    }
+
+    /** Reopens scan admission after a completion attempt rolls back or otherwise fails. */
+    public synchronized void completionFailed() {
+        if (status == Status.OPEN) completionInProgress = false;
+    }
+
+    /** Finalizes a successfully committed completion. */
+    public synchronized void completionSucceeded() {
+        if (status != Status.OPEN || !completionInProgress) {
+            throw new IllegalStateException("No completion is in progress");
+        }
         status = Status.COMPLETED;
-        return true;
+        completionInProgress = false;
     }
 
     public synchronized int itemCount()        { return itemCountInternal(); }
@@ -68,6 +97,10 @@ public final class Basket {
 
     /** Returns an immutable deep copy of the current lines, safe to read without the basket lock. */
     public synchronized Map<String, Line> linesSnapshot() {
+        return Collections.unmodifiableMap(copyLines());
+    }
+
+    private Map<String, Line> copyLines() {
         Map<String, Line> copy = new LinkedHashMap<>();
         for (Map.Entry<String, Line> e : lines.entrySet()) {
             Line orig = e.getValue();
@@ -75,7 +108,7 @@ public final class Basket {
             ln.quantity = orig.quantity;
             copy.put(e.getKey(), ln);
         }
-        return Collections.unmodifiableMap(copy);
+        return copy;
     }
 
     private int itemCountInternal() {

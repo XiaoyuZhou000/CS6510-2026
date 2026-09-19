@@ -39,7 +39,7 @@ public class WindowBoundaryAccuracyTest {
                     int seen = 0;
                     while (windows.next()) {
                         long end = windows.getLong("window_end");
-                        assertEquals(++seen * 500L, end);
+                        assertEquals(1000L + seen++ * 500L, end);
                         assertEquals(end - 999, windows.getLong("window_start"));
                         Map<String, Long> expected = new HashMap<>();
                         for (long position = Math.max(1, end - 999); position <= end; position++) {
@@ -55,7 +55,7 @@ public class WindowBoundaryAccuracyTest {
                         }
                         assertEquals(expected, actual, "Exact counts for boundary " + end);
                     }
-                    assertEquals(4, seen);
+                    assertEquals(3, seen);
                     assertEquals(2000, db.windows.readLatestWindow(10).windowEnd());
                 } finally {
                     db.pool.release(conn);

@@ -78,16 +78,16 @@ public final class CheckoutService {
     /** POST /transactions/{id}/items — scans one unit of sku into the basket. */
     public ScanView scan(String transactionId, String sku) throws SQLException {
         Basket basket = requireBasket(transactionId);
-        if (basket.status() != Basket.Status.OPEN) {
-            throw new CheckoutException(409, ApiErrors.TRANSACTION_NOT_OPEN,
-                "Transaction is not open: " + transactionId);
-        }
         CatalogCache.CatalogItem item = catalog.get(sku);
         if (item == null) {
             throw new CheckoutException(404, ApiErrors.SKU_NOT_FOUND,
                 "SKU not found: " + sku);
         }
-        Basket.ScanSnapshot snap = basket.addScan(sku, item.name(), item.price());
+        Basket.ScanSnapshot snap = basket.addScanIfOpen(sku, item.name(), item.price());
+        if (snap == null) {
+            throw new CheckoutException(409, ApiErrors.TRANSACTION_NOT_OPEN,
+                "Transaction is not open: " + transactionId);
+        }
         analytics.recordScan(sku);
         return new ScanView(transactionId, sku, item.name(), item.price(),
             snap.itemCount(), snap.runningTotal());
@@ -97,34 +97,31 @@ public final class CheckoutService {
     public ReceiptView complete(String transactionId) throws SQLException {
         Basket basket = requireBasket(transactionId);
 
-        // Check + snapshot under a single synchronized block (status + emptiness + lines are consistent)
-        Map<String, Basket.Line> lines;
-        synchronized (basket) {
-            if (basket.status() != Basket.Status.OPEN) {
-                throw new CheckoutException(409, ApiErrors.TRANSACTION_NOT_OPEN,
-                    "Transaction is not open: " + transactionId);
-            }
-            if (basket.isEmpty()) {
-                throw new CheckoutException(409, ApiErrors.EMPTY_BASKET,
-                    "Basket is empty: " + transactionId);
-            }
-            lines = basket.linesSnapshot();
+        // Reserving the snapshot closes scan admission until this attempt succeeds or fails.
+        Basket.CompletionSnapshot completion = basket.beginCompletion();
+        if (completion == null) {
+            throw new CheckoutException(409, ApiErrors.TRANSACTION_NOT_OPEN,
+                "Transaction is not open: " + transactionId);
         }
+        if (completion.isEmpty()) {
+            basket.completionFailed();
+            throw new CheckoutException(409, ApiErrors.EMPTY_BASKET,
+                "Basket is empty: " + transactionId);
+        }
+        Map<String, Basket.Line> lines = completion.lines();
 
         // Ascending SKU order — prevents lock-ordering deadlocks (research.md §1)
         List<String> sortedSkus = new ArrayList<>(lines.keySet());
         Collections.sort(sortedSkus);
 
         // Compute totals from snapshot (independent of further basket mutations)
-        BigDecimal totalAmount = BigDecimal.ZERO;
-        int itemCount = 0;
-        for (Basket.Line l : lines.values()) {
-            totalAmount = totalAmount.add(l.unitPrice.multiply(BigDecimal.valueOf(l.quantity)));
-            itemCount += l.quantity;
-        }
+        BigDecimal totalAmount = completion.totalAmount();
+        int itemCount = completion.itemCount();
 
-        Connection conn = pool.borrow();
+        Connection conn = null;
+        boolean committed = false;
         try {
+            conn = pool.borrow();
             conn.setAutoCommit(false);
 
             // Step 1: idempotency guard
@@ -155,9 +152,10 @@ public final class CheckoutService {
 
             // Step 4: commit
             conn.commit();
+            committed = true;
 
             // Mark basket completed and evict from map (basket's durable state now lives in DB)
-            basket.markCompleted();
+            basket.completionSucceeded();
             baskets.remove(transactionId, basket);
 
             Instant startedAt = basket.startedAt();
@@ -173,11 +171,16 @@ public final class CheckoutService {
                 totalAmount, startedAt, completedAt, receiptLines);
 
         } catch (SQLException e) {
-            try { conn.rollback(); } catch (SQLException ignored) {}
+            if (conn != null) {
+                try { conn.rollback(); } catch (SQLException ignored) {}
+            }
             throw e;
         } finally {
-            try { conn.setAutoCommit(true); } catch (SQLException ignored) {}
-            pool.release(conn);
+            if (!committed) basket.completionFailed();
+            if (conn != null) {
+                try { conn.setAutoCommit(true); } catch (SQLException ignored) {}
+                pool.release(conn);
+            }
         }
     }
 

@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 
 public final class AnalyticsRecorder {
 
@@ -31,13 +32,22 @@ public final class AnalyticsRecorder {
                 return t;
             });
 
-    private final CatalogCache    catalog;
-    private final PopularWindowDao windowDao;
+    private final Function<String, String> nameLookup;
+    private final AnalyticsWindowStore windowStore;
 
     public AnalyticsRecorder(CatalogCache catalog, PopularWindowDao windowDao) throws SQLException {
-        this.catalog    = catalog;
-        this.windowDao  = windowDao;
-        long maxWindowEnd = windowDao.readMaxWindowEnd();
+        this(sku -> {
+            CatalogCache.CatalogItem item = catalog.get(sku);
+            return item == null ? "" : item.name();
+        }, windowDao);
+    }
+
+    /** Testable constructor for exercising checkpoint persistence and recovery deterministically. */
+    public AnalyticsRecorder(Function<String, String> nameLookup,
+                             AnalyticsWindowStore windowStore) throws SQLException {
+        this.nameLookup = nameLookup;
+        this.windowStore = windowStore;
+        long maxWindowEnd = windowStore.readMaxWindowEnd();
         this.globalScanCounter  = new AtomicLong(maxWindowEnd);
         this.skipNextCheckpoint = maxWindowEnd > 0;
     }
@@ -80,31 +90,35 @@ public final class AnalyticsRecorder {
         List<PopularWindowDao.PopularEntry> ranked = new ArrayList<>(counts.size());
         for (Map.Entry<String, Long> e : counts.entrySet()) {
             String name = "";
-            CatalogCache.CatalogItem item = catalog.get(e.getKey());
-            if (item != null) name = item.name();
+            String resolved = nameLookup.apply(e.getKey());
+            if (resolved != null) name = resolved;
             ranked.add(new PopularWindowDao.PopularEntry(e.getKey(), name, e.getValue()));
         }
         ranked.sort((a, b) -> Long.compare(b.scanCount(), a.scanCount()));
         if (ranked.size() > 10) ranked = ranked.subList(0, 10);
 
-        // Persist with bounded retries (in-place, not re-queued)
-        int attempts = 0;
+        // Keep the oldest failed checkpoint at the head of this single-threaded executor.
+        // Fast retries are bounded, then recovery continues at a capped interval until the
+        // write succeeds. Scan admission never waits for this worker.
+        int failures = 0;
         long[] backoffMs = {50, 200};
-        while (attempts <= MAX_RETRIES) {
+        while (!Thread.currentThread().isInterrupted()) {
             try {
-                windowDao.writeWindow(windowStart, windowEnd, ranked);
+                windowStore.writeWindow(windowStart, windowEnd, ranked);
                 return;
             } catch (SQLException e) {
-                if (attempts < MAX_RETRIES) {
-                    try { Thread.sleep(backoffMs[attempts]); } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
+                long delay = failures < MAX_RETRIES ? backoffMs[failures] : 1000L;
+                failures++;
+                if (failures == MAX_RETRIES + 1) {
+                    System.err.println("[analytics] Checkpoint [" + windowStart + "," + windowEnd
+                        + "] still failing; retaining it for ordered recovery");
                 }
-                attempts++;
+                try { Thread.sleep(delay); } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
             }
         }
-        System.err.println("[analytics] Checkpoint [" + windowStart + "," + windowEnd + "] failed after retries");
     }
 
     public void shutdown() {

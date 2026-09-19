@@ -1,5 +1,7 @@
 package persistence;
 
+import analytics.AnalyticsWindowStore;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -8,7 +10,7 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 
-public final class PopularWindowDao {
+public final class PopularWindowDao implements AnalyticsWindowStore {
 
     public record PopularEntry(String sku, String name, long scanCount) {}
 
