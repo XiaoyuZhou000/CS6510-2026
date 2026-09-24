@@ -1,9 +1,7 @@
 package support;
 
-import catalog.CatalogCache;
-import persistence.CatalogDao;
-import persistence.ConnectionPool;
-import persistence.PopularWindowDao;
+import database.ConnectionPool;
+import database.JdbcPopularWindowStore;
 
 import java.sql.*;
 import java.util.UUID;
@@ -13,8 +11,7 @@ public final class AnalyticsDatabase implements AutoCloseable {
     private final String name = "analytics_test_" + UUID.randomUUID().toString().replace("-", "");
     private final Connection admin;
     public final ConnectionPool pool;
-    public final PopularWindowDao windows;
-    public final CatalogCache catalog;
+    public final JdbcPopularWindowStore windows;
 
     public AnalyticsDatabase() throws Exception {
         String url = System.getProperty("DB_URL",
@@ -33,8 +30,7 @@ public final class AnalyticsDatabase implements AutoCloseable {
         }
         java.net.URI uri = java.net.URI.create(url.substring(5));
         pool = new ConnectionPool(uri.getHost(), uri.getPort() < 0 ? 3306 : uri.getPort(), name, user, password, 2);
-        windows = new PopularWindowDao(pool);
-        catalog = CatalogCache.load(new CatalogDao(pool));
+        windows = new JdbcPopularWindowStore(pool);
     }
 
     public void awaitWindow(long end) throws Exception {

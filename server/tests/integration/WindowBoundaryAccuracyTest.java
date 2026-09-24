@@ -1,6 +1,6 @@
 package integration;
 
-import analytics.AnalyticsRecorder;
+import analytics.AnalyticsService;
 import org.junit.jupiter.api.Test;
 import support.AnalyticsDatabase;
 
@@ -14,7 +14,7 @@ public class WindowBoundaryAccuracyTest {
     @Test
     void concurrentBurstsPersistExactOverlappingWindows() throws Exception {
         try (AnalyticsDatabase db = new AnalyticsDatabase()) {
-            AnalyticsRecorder recorder = new AnalyticsRecorder(db.catalog, db.windows);
+            AnalyticsService recorder = new AnalyticsService(db.windows);
             try (ExecutorService workers = Executors.newFixedThreadPool(8)) {
                 // Each burst has a known SKU but arbitrary internal thread ordering. Boundaries
                 // fall inside bursts, so no test lock serializes recordScan or its snapshot.
@@ -25,7 +25,7 @@ public class WindowBoundaryAccuracyTest {
                     for (int thread = 0; thread < 8; thread++) {
                         scans.add(workers.submit(() -> {
                             start.await();
-                            for (int scan = 0; scan < 100; scan++) recorder.recordScan(sku);
+                            for (int scan = 0; scan < 100; scan++) recorder.recordAcceptedScan(sku);
                             return null;
                         }));
                     }
@@ -56,7 +56,7 @@ public class WindowBoundaryAccuracyTest {
                         assertEquals(expected, actual, "Exact counts for boundary " + end);
                     }
                     assertEquals(3, seen);
-                    assertEquals(2000, db.windows.readLatestWindow(10).windowEnd());
+                    assertEquals(2000, db.windows.readLatest(10).orElseThrow().windowEnd());
                 } finally {
                     db.pool.release(conn);
                 }

@@ -1,6 +1,8 @@
 package contract;
 
-import json.Json;
+// Migration test inventory: GET /transactions/{id} -> US3 transaction reporting (1 of 7 retained routes).
+
+import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -10,6 +12,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -92,6 +95,8 @@ public class TransactionLookupTest {
                                                String transactionId,
                                                String expectedStatus) {
         assertEquals(transactionId, body.get("transactionId"));
+        assertEquals(Set.of("transactionId", "stationId", "status", "itemCount",
+            "runningTotal", "startedAt"), body.keySet());
         assertEquals(STATION_ID, body.get("stationId"));
         assertEquals(expectedStatus, body.get("status"));
         assertInstanceOf(Number.class, body.get("itemCount"));

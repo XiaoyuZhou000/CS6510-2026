@@ -9,4 +9,4 @@ case "$(uname -s)" in
   CYGWIN*|MINGW*|MSYS*) SEP=";" ;;
   *) SEP=":" ;;
 esac
-java -cp "out/main${SEP}lib/*" Main "$@"
+java -cp "out/main${SEP}lib/*" api.Main "$@"

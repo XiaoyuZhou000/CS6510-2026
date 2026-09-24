@@ -1,6 +1,6 @@
 package integration;
 
-import json.Json;
+import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -13,7 +13,6 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -22,7 +21,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * Integration test: after a successful completion response, the transaction and inventory
  * rows must already be committed and queryable immediately over a fresh, direct JDBC connection
- * (FR-010, Constitution II; US2 acceptance scenario 6).
+ * through the layered transaction route (FR-015, Constitution II; US1).
  *
  * Requires a running server AND a reachable MySQL instance.
  */

@@ -1,21 +1,19 @@
 package support;
 
-import analytics.AnalyticsRecorder;
-import analytics.AnalyticsWindowStore;
-import catalog.CatalogCache;
-import checkout.CheckoutService;
-import persistence.CatalogDao;
-import persistence.ConnectionPool;
-import persistence.InventoryDao;
-import persistence.PopularWindowDao;
-import persistence.TransactionDao;
+import database.CatalogStore;
+import database.ConnectionPool;
+import database.JdbcCheckoutCompletionStore;
+import database.JdbcTransactionStore;
+import transaction.AcceptedScanSink;
+import transaction.CatalogCache;
+import transaction.TransactionService;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
-import java.util.List;
 import java.util.UUID;
 
 /** Isolated real-MySQL checkout fixture with a deliberately one-connection application pool. */
@@ -25,8 +23,7 @@ public final class CheckoutDatabase implements AutoCloseable {
     private final String name = "checkout_test_" + UUID.randomUUID().toString().replace("-", "");
     private final Connection admin;
     public final ConnectionPool pool;
-    public final AnalyticsRecorder analytics;
-    public final CheckoutService checkout;
+    public final TransactionService checkout;
 
     public CheckoutDatabase(int stock) throws Exception {
         String url = System.getProperty("DB_URL",
@@ -44,13 +41,10 @@ public final class CheckoutDatabase implements AutoCloseable {
         }
         java.net.URI uri = java.net.URI.create(url.substring(5));
         pool = new ConnectionPool(uri.getHost(), uri.getPort() < 0 ? 3306 : uri.getPort(), name, user, password, 1);
-        CatalogCache catalog = CatalogCache.load(new CatalogDao(pool));
-        AnalyticsWindowStore noOpWindows = new AnalyticsWindowStore() {
-            public long readMaxWindowEnd() { return 0; }
-            public void writeWindow(long start, long end, List<PopularWindowDao.PopularEntry> entries) {}
-        };
-        analytics = new AnalyticsRecorder(sku -> "Race Item", noOpWindows);
-        checkout = new CheckoutService(pool, new TransactionDao(pool), new InventoryDao(pool), catalog, analytics);
+        CatalogCache catalog = CatalogCache.load(() -> java.util.List.of(
+                new CatalogStore.CatalogItem(SKU, "Race Item", new BigDecimal("2.50"))));
+        checkout = new TransactionService(new JdbcTransactionStore(pool),
+                new JdbcCheckoutCompletionStore(pool), catalog, AcceptedScanSink.NO_OP);
     }
 
     public int stock() throws Exception {
@@ -75,7 +69,6 @@ public final class CheckoutDatabase implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        analytics.shutdown();
         pool.borrow().close();
         try (admin; Statement sql = admin.createStatement()) {
             sql.executeUpdate("DROP DATABASE " + name);

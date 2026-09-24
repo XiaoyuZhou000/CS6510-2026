@@ -1,6 +1,8 @@
 package contract;
 
-import json.Json;
+// Migration test inventory: POST start/scan/complete routes -> US1 checkout lifecycle (3 of 7 retained routes).
+
+import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -145,12 +147,17 @@ public class TransactionLifecycleTest {
         String transactionId = startAndGetId(STATION_ID);
         scanItem(transactionId, KNOWN_SKU);
 
-        HttpResponse<String> response = completeTransaction(transactionId);
+        HttpResponse<String> response = postJson(
+            "/transactions/" + transactionId + "/complete", "{}");
 
         assertEquals(200, response.statusCode(),
             "POST /transactions/{id}/complete should return 200 OK");
 
         Map<String, Object> body = Json.parseObject(response.body());
+        assertEquals(
+            java.util.Set.of("transactionId", "stationId", "itemCount", "totalAmount",
+                "startedAt", "completedAt", "lines"),
+            body.keySet(), "Receipt must retain the exact fixed response shape");
         assertEquals(transactionId, body.get("transactionId"), "transactionId must match");
         assertEquals(STATION_ID, body.get("stationId"), "stationId must match");
         assertNotNull(body.get("itemCount"),   "itemCount must be present");
@@ -163,6 +170,8 @@ public class TransactionLifecycleTest {
         assertFalse(lines.isEmpty(), "Receipt must have at least one line");
 
         Map<String, Object> line = Json.asObject(lines.get(0));
+        assertEquals(java.util.Set.of("sku", "name", "unitPrice", "quantity"),
+            line.keySet(), "Receipt line must retain the exact fixed response shape");
         assertNotNull(line.get("sku"),       "line.sku must be present");
         assertNotNull(line.get("name"),      "line.name must be present");
         assertNotNull(line.get("unitPrice"), "line.unitPrice must be present");

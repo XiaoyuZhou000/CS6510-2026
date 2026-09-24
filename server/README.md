@@ -1,6 +1,19 @@
-# Self-Checkout Monolithic Server
+# Self-Checkout Layered Server
 
-This directory contains the Java 21 monolithic server for the self-checkout API. It uses the JDK HTTP server, JDBC, and the vendored jars in `lib/`; no Maven or Gradle installation is required.
+This directory contains the Java 21 layered server for the self-checkout API. It uses the JDK HTTP server, JDBC, and the vendored jars in `lib/`; no Maven or Gradle installation is required.
+
+## Package layout
+
+Production code under `src/` has one owner per package:
+
+- `api/` — HTTP routing, validation, JSON translation, and the `api.Main` composition root
+- `transaction/` — catalog views, basket lifecycle, scans, completion, and inventory query policy
+- `analytics/` — accepted-scan window state, checkpointing, ranking, and popular-item queries
+- `database/` — store contracts, connection pooling, JDBC queries, and atomic persistence
+
+Tests under `tests/` are grouped into `architecture/`, `unit/`, `contract/`, `database/`,
+`integration/`, and shared `support/`. Both build scripts discover Java files recursively, compile
+production classes to `out/main`, and compile tests to `out/test`.
 
 ## Prerequisites
 
@@ -40,6 +53,16 @@ For example:
 
 The same settings can be supplied through `SERVER_PORT`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Positional arguments take precedence. `DB_POOL_SIZE` optionally controls the JDBC pool size (default: 10).
 
+| Environment variable | Default | Purpose |
+|---|---|---|
+| `SERVER_PORT` | `8080` | HTTP listen port |
+| `DB_HOST` | `127.0.0.1` | MySQL host |
+| `DB_PORT` | `3307` | MySQL port |
+| `DB_NAME` | `cs6510_selfcheckout` | MySQL database |
+| `DB_USER` | `root` | MySQL user |
+| `DB_PASSWORD` | empty | MySQL password |
+| `DB_POOL_SIZE` | `10` | JDBC connection-pool size |
+
 To avoid placing a password in shell history, prefer the environment variable:
 
 ```powershell
@@ -57,7 +80,7 @@ bash ./server/run.sh
 
 The script securely prompts for the password. You can also pass `-Password` or `-MySqlExe` when needed.
 
-After every database reset, stop any running server and start a fresh server process. This restart is required: `CatalogCache` and `AnalyticsRecorder` load their state only once at server startup, so resetting MySQL alone does not refresh the already-running process's in-memory catalog, open baskets, scan counter, or analytics ring buffer.
+After every database reset, stop any running server and start a fresh server process. This restart is required: `CatalogCache` and `AnalyticsService` load their state only once at server startup, so resetting MySQL alone does not refresh the already-running process's in-memory catalog, open baskets, scan counter, or analytics ring buffer.
 
 The required order for each independent run is therefore:
 
@@ -88,7 +111,20 @@ cd server
 ./run-tests.sh
 ```
 
-HTTP contract and integration tests that need a live server skip themselves when the configured server is unavailable. Override endpoints and database credentials with JVM properties such as `-DSERVER_BASE_URL=...`, `-DDB_URL=...`, `-DDB_USER=...`, and `-DDB_PASS=...`.
+HTTP contract and integration tests that need a live server skip themselves when the configured server is unavailable. A skipped test is useful for local unit-only work but is not evidence for the final validation gate. For final validation, start MySQL and the layered server first and confirm the JUnit summary reports no skipped live checks.
+
+Pass test configuration as arguments to `run-tests.sh`:
+
+```bash
+./run-tests.sh \
+  -DSERVER_BASE_URL=http://localhost:8080 \
+  -DDB_URL='jdbc:mysql://127.0.0.1:3307/cs6510_selfcheckout?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC' \
+  -DDB_USER=root \
+  -DDB_PASS=secret
+```
+
+`run-tests.sh` also maps the `DB_USER` and `DB_PASSWORD` environment variables to the default
+`DB_USER` and `DB_PASS` JVM properties. Explicit `-D` arguments override those defaults.
 
 `ResetBaselineTest` is intentionally opt-in because it drops and recreates the configured database. Run it only against a disposable assignment database:
 

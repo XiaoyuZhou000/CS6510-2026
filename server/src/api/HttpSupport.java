@@ -1,7 +1,7 @@
 package api;
 
 import com.sun.net.httpserver.HttpExchange;
-import json.Json;
+import api.json.Json;
 
 import java.io.IOException;
 import java.io.OutputStream;

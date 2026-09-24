@@ -1,6 +1,6 @@
 package integration;
 
-import json.Json;
+import api.json.Json;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -77,24 +77,45 @@ public final class ResetBaselineTest {
                     "Catalog must not contain duplicate SKUs");
             }
 
-            try (Connection connection = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-                 Statement statement = connection.createStatement();
-                 ResultSet rows = statement.executeQuery(
-                     "SELECT COUNT(*) AS row_count, MIN(stock_quantity) AS min_stock, "
-                         + "MAX(stock_quantity) AS max_stock, SUM(stock_quantity) AS total_stock "
-                         + "FROM inventory")) {
-                assertTrue(rows.next());
-                assertEquals(2_000, rows.getInt("row_count"));
-                assertEquals(10_000, rows.getInt("min_stock"));
-                assertEquals(10_000, rows.getInt("max_stock"));
-                assertEquals(20_000_000L, rows.getLong("total_stock"));
-            }
+            assertTrue(server.isAlive(), "The freshly started server must remain running");
+            assertTrue(server.pid() > 0, "The fresh server process must have a process id");
+            assertExactDatabaseBaseline();
         } finally {
             server.destroy();
             if (!server.waitFor(10, TimeUnit.SECONDS)) {
                 server.destroyForcibly();
                 server.waitFor(10, TimeUnit.SECONDS);
             }
+        }
+    }
+
+    private static void assertExactDatabaseBaseline() throws Exception {
+        try (Connection connection = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
+             Statement statement = connection.createStatement()) {
+            try (ResultSet rows = statement.executeQuery(
+                    "SELECT (SELECT COUNT(*) FROM catalog_item) AS catalog_rows, "
+                        + "COUNT(*) AS inventory_rows, MIN(stock_quantity) AS min_stock, "
+                        + "MAX(stock_quantity) AS max_stock, SUM(stock_quantity) AS total_stock "
+                        + "FROM inventory")) {
+                assertTrue(rows.next());
+                assertEquals(2_000, rows.getInt("catalog_rows"));
+                assertEquals(2_000, rows.getInt("inventory_rows"));
+                assertEquals(10_000, rows.getInt("min_stock"));
+                assertEquals(10_000, rows.getInt("max_stock"));
+                assertEquals(20_000_000L, rows.getLong("total_stock"));
+            }
+
+            assertEmpty(statement, "`transaction`");
+            assertEmpty(statement, "transaction_line");
+            assertEmpty(statement, "popular_window");
+            assertEmpty(statement, "popular_item");
+        }
+    }
+
+    private static void assertEmpty(Statement statement, String table) throws Exception {
+        try (ResultSet rows = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
+            assertTrue(rows.next());
+            assertEquals(0L, rows.getLong(1), table + " must be empty after reset");
         }
     }
 
@@ -140,7 +161,7 @@ public final class ResetBaselineTest {
             + libraryDirectory + System.getProperty("file.separator") + "*";
 
         ProcessBuilder builder = new ProcessBuilder(
-            javaExecutable(), "-cp", classpath, "Main",
+            javaExecutable(), "-cp", classpath, "api.Main",
             Integer.toString(port), host, Integer.toString(dbPort), dbName, DB_USER);
         builder.directory(projectRoot.resolve("server").toFile());
         builder.environment().put("DB_PASSWORD", DB_PASS);

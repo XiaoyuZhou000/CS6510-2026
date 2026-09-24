@@ -1,6 +1,6 @@
 package api;
 
-import json.Json;
+import api.json.Json;
 
 public final class ApiErrors {
 

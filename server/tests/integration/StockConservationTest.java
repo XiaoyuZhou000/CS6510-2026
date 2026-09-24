@@ -1,6 +1,6 @@
 package integration;
 
-import json.Json;
+import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * Integration test: many concurrent completions across a mix of overlapping and distinct SKUs.
  * For every touched SKU: initial_stock − final_stock == total_quantity_sold (from successful
  * completions only), and stock is never observed negative at any point
- * (FR-008, SC-001; US2 acceptance scenario 7; Constitution I).
+ * through the layered server (FR-016, SC-003; US1; Constitution I).
  *
  * Requires a running server AND a reachable MySQL instance.
  */

@@ -1,9 +1,12 @@
 package contract;
 
-import analytics.AnalyticsHandlers;
-import analytics.AnalyticsRecorder;
+// Migration test inventory: GET /analytics/popular-items -> US3 operational reporting (1 of 7 retained routes).
+
+import analytics.AnalyticsService;
+import api.AnalyticsHttpHandler;
+import api.json.Json;
 import com.sun.net.httpserver.HttpServer;
-import json.Json;
+import database.PopularWindowStore;
 import org.junit.jupiter.api.Test;
 import support.AnalyticsDatabase;
 
@@ -18,32 +21,30 @@ public class PopularItemsEndpointTest {
     @Test
     void latestMeansHighestWindowIdAndNamesComeFromCatalog() throws Exception {
         try (AnalyticsDatabase db = new AnalyticsDatabase()) {
-            assertNull(db.windows.readLatestWindow(10));
-            db.windows.writeWindow(501, 1500, List.of(
-                new persistence.PopularWindowDao.PopularEntry("sku1", "ignored name", 900)));
-            db.windows.writeWindow(1, 1000, List.of(
-                new persistence.PopularWindowDao.PopularEntry("sku2", "ignored name", 700)));
+            assertTrue(db.windows.readLatest(10).isEmpty());
+            db.windows.writeWindow(snapshot(501, 1500, "sku1", 900));
+            db.windows.writeWindow(snapshot(1, 1000, "sku2", 700));
             java.sql.Connection conn = db.pool.borrow();
             try (java.sql.Statement sql = conn.createStatement()) {
                 sql.executeUpdate("UPDATE popular_window SET computed_at='2000-01-01 00:00:00' WHERE window_end=1000");
             } finally {
                 db.pool.release(conn);
             }
-            var latest = db.windows.readLatestWindow(10);
+            var latest = db.windows.readLatest(10).orElseThrow();
             assertEquals(1000, latest.windowEnd(), "Select by ID, not boundary or timestamp");
-            assertEquals("Item 2", latest.items().getFirst().name());
-            assertEquals(700, latest.items().getFirst().scanCount());
-            assertTrue(db.windows.readLatestWindow(0).items().isEmpty());
-            assertThrows(IllegalArgumentException.class, () -> db.windows.readLatestWindow(-1));
+            assertEquals("Item 2", latest.ranks().getFirst().name());
+            assertEquals(700, latest.ranks().getFirst().scanCount());
+            assertTrue(db.windows.readLatest(0).orElseThrow().ranks().isEmpty());
+            assertThrows(IllegalArgumentException.class, () -> db.windows.readLatest(-1));
         }
     }
 
     @Test
     void reportsPersistedWindowWithRankedTopTenAndRequestLocalLimit() throws Exception {
         try (AnalyticsDatabase db = new AnalyticsDatabase(); HttpClient client = HttpClient.newHttpClient()) {
-            AnalyticsRecorder recorder = new AnalyticsRecorder(db.catalog, db.windows);
+            AnalyticsService recorder = new AnalyticsService(db.windows);
             HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            server.createContext("/analytics/popular-items", new AnalyticsHandlers(db.windows));
+            server.createContext("/analytics/popular-items", new AnalyticsHttpHandler(recorder));
             server.start();
             String base = "http://127.0.0.1:" + server.getAddress().getPort() + "/analytics/popular-items";
             try {
@@ -54,11 +55,11 @@ public class PopularItemsEndpointTest {
                 Instant.parse((String) empty.get("computedAt"));
 
                 for (int i = 1; i <= 12; i++) {
-                    for (int n = 0; n < i * 10; n++) recorder.recordScan("sku" + i);
+                    for (int n = 0; n < i * 10; n++) recorder.recordAcceptedScan("sku" + i);
                 }
-                for (int n = 0; n < 220; n++) recorder.recordScan("sku12");
+                for (int n = 0; n < 220; n++) recorder.recordAcceptedScan("sku12");
                 db.awaitWindow(1000);
-                for (int n = 0; n < 123; n++) recorder.recordScan("sku1");
+                for (int n = 0; n < 123; n++) recorder.recordAcceptedScan("sku1");
 
                 Map<String, Object> report = get(client, base);
                 assertEquals(Set.of("windowSize", "slideInterval", "windowStart", "windowEnd", "computedAt", "items"), report.keySet());
@@ -66,7 +67,7 @@ public class PopularItemsEndpointTest {
                 assertEquals(500, number(report, "slideInterval"));
                 assertEquals(1, number(report, "windowStart"));
                 assertEquals(1000, number(report, "windowEnd"));
-                assertEquals(db.windows.readLatestWindow(10).computedAt(), Instant.parse((String) report.get("computedAt")));
+                assertEquals(db.windows.readLatest(10).orElseThrow().computedAt(), Instant.parse((String) report.get("computedAt")));
                 List<Object> items = Json.getList(report, "items");
                 assertEquals(10, items.size());
                 for (int rank = 1; rank <= 10; rank++) {
@@ -101,6 +102,12 @@ public class PopularItemsEndpointTest {
         assertEquals(200, response.statusCode(), response.body());
         assertTrue(response.headers().firstValue("Content-Type").orElse("").startsWith("application/json"));
         return Json.parseObject(response.body());
+    }
+
+    private static PopularWindowStore.PopularWindowSnapshot snapshot(
+            long start, long end, String sku, long count) {
+        return new PopularWindowStore.PopularWindowSnapshot(start, end,
+                List.of(new PopularWindowStore.SnapshotRank(1, sku, count)));
     }
 
     private static HttpResponse<String> request(HttpClient client, String url, String method) throws Exception {

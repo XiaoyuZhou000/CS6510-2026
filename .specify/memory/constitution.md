@@ -1,25 +1,25 @@
 <!--
 Sync Impact Report
 ==================
-Version change: [initial template] → 1.0.0
-Rationale: Initial ratification. First concrete constitution replacing the unfilled
-scaffold; MAJOR baseline (1.0.0) per semantic versioning for a first adopted governance
-document.
+Version change: 1.0.0 → 2.0.0
+Rationale: MAJOR amendment. The required architecture changes from a monolithic design
+to a layered design with enforceable layer responsibilities and dependency boundaries.
+Implementations conforming only to the former monolithic constraint are no longer
+compliant.
 
-Modified principles: none (initial adoption)
+Modified principles:
+  - Added VII. Layer Boundary Integrity
+  - Architectural Constraints: Monolithic Architecture → Layered Architecture
 
-Added sections:
-  - Core Principles I–VI (Inventory Consistency; Durable Completion & Reliability;
-    Contract Fidelity; Performance Under Concurrency; Analytics Window Accuracy;
-    Testability & Repeatability)
-  - Architectural Constraints (Section 2)
-  - Development Workflow & Quality Gates (Section 3)
-  - Governance
+Added sections: none
 
 Removed sections: none
 
 Templates / dependent artifacts requiring review:
-  - .specify/templates/* (plan/spec/tasks) read this file at runtime; no edits required now.
+  - The next feature specification and plan must map the implementation to the four
+    required layers and identify any migration of existing monolithic responsibilities.
+  - Existing source code and tests require review for compliance with the new dependency
+    rules; no application files are modified by this constitution command.
 
 Follow-up TODOs: none. All placeholders resolved.
 
@@ -129,11 +129,43 @@ Every load run MUST start from the same, easily reproduced state.
 Rationale: Comparable measurements require identical initial conditions and a fixed
 measurement tool.
 
+### VII. Layer Boundary Integrity (NON-NEGOTIABLE)
+
+The server MUST separate its responsibilities into explicit API, transaction, analytics,
+and database-access layers.
+
+- The API layer MUST translate HTTP requests and responses and MUST delegate business
+  behavior; it MUST NOT implement inventory, transaction, analytics, or persistence
+  rules.
+- The transaction layer MUST own basket lifecycle, scan processing, completion,
+  idempotency, pricing, and inventory-consistency orchestration.
+- The analytics layer MUST own scan-window state, hopping-window recomputation, popular-
+  item ranking, and the analytics result exposed to callers.
+- The database-access layer MUST encapsulate database connections, queries, transactions,
+  and persistence mappings. Other layers MUST NOT execute database operations directly.
+- Dependencies MUST flow from the API layer into the transaction or analytics layer, and
+  from those layers into the database-access layer. Lower layers MUST NOT depend on the
+  API layer, and circular layer dependencies are forbidden.
+- Cross-layer calls MUST use explicit interfaces or module contracts that can be tested
+  independently.
+
+Rationale: Explicit boundaries make responsibilities visible and testable while allowing
+the internal implementation to change without altering the fixed HTTP contract.
+
 ## Architectural Constraints
 
-- **Current architecture (this iteration): monolithic.** The API MUST be delivered as a
-  single deployable server process (e.g., Spring Boot, Flask, Node.js). Implementation
-  language is free.
+- **Current architecture (this iteration): layered.** The server MAY remain a single
+  deployable process, but its source structure and runtime call paths MUST implement the
+  four layers defined in Principle VII. Merely renaming existing monolithic files or
+  placing them in layer-named directories does not satisfy this requirement.
+- **API layer:** endpoint handlers/controllers, request validation, response serialization,
+  and HTTP status mapping only.
+- **Transaction layer:** transaction lifecycle, basket operations, pricing, completion,
+  and coordination of atomic inventory changes.
+- **Analytics layer:** scan ingestion for analytics, 1,000-scan hopping-window state,
+  recomputation every 500 scans, ranking, and popular-item query behavior.
+- **Database-access layer:** all durable reads and writes for catalog, inventory, completed
+  transactions, idempotency records, and persisted popular-item results.
 - **Persistence:** Stock items and popular-item results MUST be stored in a database
   that can be easily reinitialized between runs. In-memory state is permitted only for
   in-progress baskets, subject to Principle II.
@@ -141,9 +173,10 @@ measurement tool.
   concurrent stations for 60 s) and the stress run (100 stations for 120 s), preserving
   inventory correctness in both. Throughput, error rate, and p95/p99 latency SHOULD be
   captured for both runs to characterize behavior under increased load.
-- **Forward compatibility:** Because later iterations reuse parts of this codebase under
-  different architectures, module boundaries (API handling, transaction/inventory logic,
-  persistence, analytics) SHOULD be kept separable to ease future re-architecture.
+- **Submission evidence:** The repository directory for this iteration MUST contain two
+  timestamped JSON reports produced by the unchanged load client: one default run and one
+  stress run. Each report MUST identify the settings used so the workloads are
+  reproducible.
 
 ## Development Workflow & Quality Gates
 
@@ -154,6 +187,9 @@ measurement tool.
 - **Consistency gate:** Changes touching scan, completion, or inventory MUST preserve the
   invariants in Principle I, including behavior under concurrent completion and duplicate
   completion.
+- **Layering gate:** Plans, code reviews, and tests MUST verify that every server component
+  has one declared layer, respects Principle VII's dependency direction, and does not
+  bypass the transaction, analytics, or database-access abstractions.
 - **Validation gate:** Both the default and stress load runs MUST be executed with the
   unmodified client from a freshly reinitialized database, and their JSON reports saved,
   before results are reported or submitted.
@@ -176,4 +212,4 @@ measurement tool.
   the Core Principles and Quality Gates before work is considered complete. Any accepted
   deviation MUST be justified in writing in the relevant spec or plan.
 
-**Version**: 1.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-17
+**Version**: 2.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-22

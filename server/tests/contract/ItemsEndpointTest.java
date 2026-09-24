@@ -1,6 +1,8 @@
 package contract;
 
-import json.Json;
+// Migration test inventory: GET /items -> US3 catalog reporting (1 of 7 retained routes).
+
+import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -99,16 +101,39 @@ public class ItemsEndpointTest {
             "Expected exactly " + EXPECTED_CATALOG_SIZE + " catalog items, got: " + items.size());
 
         Set<String> skus = new HashSet<>();
+        String previousSku = null;
         for (Object raw : items) {
             @SuppressWarnings("unchecked")
             Map<String, Object> item = (Map<String, Object>) raw;
+            assertEquals(Set.of("sku", "name", "price"), item.keySet());
             String sku = item.get("sku").toString();
             assertTrue(skus.add(sku),
                 "Duplicate SKU detected: " + sku);
+            if (previousSku != null) {
+                assertTrue(previousSku.compareTo(sku) < 0,
+                    "Catalog must retain stable seed/load order");
+            }
+            previousSku = sku;
         }
 
         assertEquals(EXPECTED_CATALOG_SIZE, skus.size(),
             "All " + EXPECTED_CATALOG_SIZE + " SKUs must be unique");
+    }
+
+    @Test
+    void rejectsWrongMethodsAndUnmatchedPaths() throws Exception {
+        HttpClient client = HttpClient.newHttpClient();
+        HttpResponse<String> wrongMethod = client.send(HttpRequest.newBuilder()
+            .uri(URI.create(BASE_URL + "/items"))
+            .POST(HttpRequest.BodyPublishers.noBody()).build(),
+            HttpResponse.BodyHandlers.ofString());
+        assertEquals(405, wrongMethod.statusCode());
+        assertEquals("GET", wrongMethod.headers().firstValue("Allow").orElse(""));
+
+        HttpResponse<String> unmatched = client.send(HttpRequest.newBuilder()
+            .uri(URI.create(BASE_URL + "/items/extra"))
+            .GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(404, unmatched.statusCode());
     }
 
     private List<Object> fetchItems() throws Exception {

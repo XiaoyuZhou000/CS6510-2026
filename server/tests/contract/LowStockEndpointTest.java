@@ -1,6 +1,8 @@
 package contract;
 
-import json.Json;
+// Migration test inventory: GET /inventory/low-stock -> US3 operational reporting (1 of 7 retained routes).
+
+import api.json.Json;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -79,7 +81,7 @@ public class LowStockEndpointTest {
 
                 setInventory(conn, 0, 3);
                 assertEquals(0, number(find(get("?threshold=0")), "threshold"));
-                assertTrue(Json.getList(get("?threshold=-1"), "alerts").isEmpty());
+                assertEquals(400, request("GET", "/inventory/low-stock?threshold=-1", "").statusCode());
             } finally {
                 setInventory(conn, stock, threshold);
             }

@@ -1,7 +1,7 @@
 package unit;
 
 import api.ApiErrors;
-import json.Json;
+import api.json.Json;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;

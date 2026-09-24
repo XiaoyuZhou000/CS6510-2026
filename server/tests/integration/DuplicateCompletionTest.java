@@ -1,6 +1,6 @@
 package integration;
 
-import json.Json;
+import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * Integration test: completing an already-completed transaction a second time must:
  * - return 409 TRANSACTION_NOT_OPEN on the duplicate request,
- * - leave stock decremented exactly once (idempotency, FR-009, SC-002; US2 acceptance scenario 5).
+ * - leave stock decremented exactly once through the layered server (FR-014, SC-004; US1).
  *
  * Requires a running server AND a reachable MySQL instance.
  */

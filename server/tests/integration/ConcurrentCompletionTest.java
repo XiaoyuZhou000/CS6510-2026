@@ -1,6 +1,6 @@
 package integration;
 
-import json.Json;
+import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -13,9 +13,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -25,7 +23,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * Integration test: two stations each scan the last remaining unit of the same SKU,
  * then complete concurrently — exactly one must succeed, the other must be rejected,
- * and the SKU's stock must never go negative (Constitution I; US2 acceptance scenario 4).
+ * and the SKU's stock must never go negative through the layered server (FR-016; US1).
  *
  * Requires a running server AND a reachable MySQL instance.
  * Override via SERVER_BASE_URL and DB_* system properties.
