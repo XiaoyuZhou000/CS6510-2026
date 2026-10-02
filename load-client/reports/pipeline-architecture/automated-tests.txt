@@ -1,0 +1,20 @@
+Pipeline Analytics automated gate
+Run date: 2026-10-01 America/Los_Angeles
+
+Command: server/build.sh
+Result: PASS (exit 0)
+Output: Built. Run with: ./run.sh [port] [dbHost] [dbPort] [dbName] [dbUser] [dbPassword]
+
+Command: server/build-tests.sh
+Result: PASS (exit 0)
+Output: Tests compiled. Run with: ./run-tests.sh
+
+Command: server/run-tests.sh -DSERVER_BASE_URL=http://localhost:8080
+Result: PASS (exit 0)
+
+JUnit summary:
+45 containers found, 45 started, 45 successful, 0 failed
+112 tests found, 112 started, 111 successful, 0 failed
+0 tests skipped; 1 test aborted (destructive ResetBaselineTest intentionally disabled)
+
+The full gate included unit, architecture, database, contract, and integration tests.

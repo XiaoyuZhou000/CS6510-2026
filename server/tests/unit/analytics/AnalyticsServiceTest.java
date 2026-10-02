@@ -53,6 +53,9 @@ class AnalyticsServiceTest {
             assertEquals(List.of(
                     new PopularWindowStore.SnapshotRank(1, "A", 500),
                     new PopularWindowStore.SnapshotRank(2, "C", 500)), store.snapshots.get(1).ranks());
+            assertEquals(List.of("analytics-persistence", "analytics-persistence"),
+                    store.writingThreads,
+                    "only the Persistence Filter worker may cross the store boundary");
         } finally {
             service.shutdown();
         }
@@ -114,6 +117,8 @@ class AnalyticsServiceTest {
         private final long recoveredEnd;
         private final List<PopularWindowSnapshot> snapshots =
                 Collections.synchronizedList(new ArrayList<>());
+        private final List<String> writingThreads =
+                Collections.synchronizedList(new ArrayList<>());
         private final AtomicBoolean failWrites = new AtomicBoolean();
         private final AtomicInteger attempts = new AtomicInteger();
         private final CountDownLatch firstAttempt = new CountDownLatch(1);
@@ -134,6 +139,7 @@ class AnalyticsServiceTest {
             attempts.incrementAndGet();
             firstAttempt.countDown();
             if (failWrites.get()) throw new StoreFailure("injected failure");
+            writingThreads.add(Thread.currentThread().getName());
             snapshots.add(snapshot);
         }
 

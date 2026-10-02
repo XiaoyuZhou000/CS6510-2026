@@ -19,6 +19,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -90,6 +92,39 @@ class TransactionServiceTest {
         assertThrows(StoreFailure.class, () -> isolated.complete(first));
         completions.failure = null;
         assertEquals(1, isolated.scan(new TransactionOperations.ScanCommand(second, "B")).itemCount());
+    }
+
+    @Test
+    void analyticsRunsOnlyAfterAdmissionAndSlowOrThrowingSinksCannotUndoCheckout() throws Exception {
+        CountDownLatch sinkEntered = new CountDownLatch(1);
+        CountDownLatch releaseSink = new CountDownLatch(1);
+        AtomicInteger calls = new AtomicInteger();
+        TransactionService isolated = new TransactionService(transactions, completions, catalog, sku -> {
+            calls.incrementAndGet();
+            sinkEntered.countDown();
+            try {
+                assertTrue(releaseSink.await(2, TimeUnit.SECONDS));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            throw new IllegalStateException("analytics unavailable");
+        });
+        String id = isolated.start(new TransactionOperations.StartCommand("station-slow")).transactionId();
+        Thread scan = new Thread(() -> isolated.scan(new TransactionOperations.ScanCommand(id, "A")));
+
+        scan.start();
+        assertTrue(sinkEntered.await(1, TimeUnit.SECONDS));
+        assertEquals(1, isolated.get(id).itemCount(), "basket admission precedes analytics callback");
+        releaseSink.countDown();
+        scan.join(1_000);
+
+        assertFalse(scan.isAlive());
+        assertEquals(1, calls.get());
+        assertEquals(1, isolated.complete(id).itemCount());
+        assertEquals(TransactionOperations.TransactionStatus.COMPLETED, isolated.get(id).status());
+        assertFailure(TransactionFailure.Code.NOT_OPEN,
+                () -> isolated.scan(new TransactionOperations.ScanCommand(id, "A")));
+        assertEquals(1, calls.get(), "a rejected scan must never reach analytics");
     }
 
     private static void assertFailure(TransactionFailure.Code code, Runnable action) {

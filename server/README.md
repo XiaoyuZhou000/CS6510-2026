@@ -8,12 +8,40 @@ Production code under `src/` has one owner per package:
 
 - `api/` — HTTP routing, validation, JSON translation, and the `api.Main` composition root
 - `transaction/` — catalog views, basket lifecycle, scans, completion, and inventory query policy
-- `analytics/` — accepted-scan window state, checkpointing, ranking, and popular-item queries
+- `analytics/` — the accepted-scan pipeline, lifecycle, structured operational logging, and
+  committed popular-item queries
 - `database/` — store contracts, connection pooling, JDBC queries, and atomic persistence
 
 Tests under `tests/` are grouped into `architecture/`, `unit/`, `contract/`, `database/`,
 `integration/`, and shared `support/`. Both build scripts discover Java files recursively, compile
 production classes to `out/main`, and compile tests to `out/test`.
+
+## Analytics pipeline
+
+Accepted scans move through three independently executing filters in a fixed order:
+
+```text
+AnalyticsService -> Window Filter -> Ranking Filter -> Persistence Filter -> PopularWindowStore
+```
+
+- The **Window Filter** assigns the single analytics order, owns the 1,000-scan ring, and emits
+  immutable complete snapshots at `[1,1000]`, `[501,1500]`, and each later 500-event hop.
+- The **Ranking Filter** counts a snapshot, sorts by count descending then SKU ascending, and emits
+  at most ten contiguous ranks.
+- The **Persistence Filter** commits ranked windows atomically and in order. A failed oldest window
+  remains in place and retries after 50 ms, 200 ms, and then capped 1-second waits; newer windows
+  cannot overtake it.
+
+Each arrow between filters is an unbounded FIFO `LinkedBlockingQueue`; filters never call one
+another directly. `AnalyticsService` owns the three named workers, accepts scans under a short
+lifecycle lock, and reads results only from committed storage. During shutdown it rejects new
+ingestion, places one end marker, drains stage by stage, and joins all workers against one deadline.
+Timeout, caller interruption, or an unexpected worker failure interrupts peers and produces a
+structured forced/failure outcome rather than reporting a clean drain.
+
+This is an internal decomposition only. `spec/self-checkout-openapi.yaml`, `db/init.sql`, and the
+load client remain unchanged. In particular, `GET /analytics/popular-items` keeps the same fields,
+limit behavior, empty response, and status mappings, and it never exposes queues or in-flight state.
 
 ## Prerequisites
 

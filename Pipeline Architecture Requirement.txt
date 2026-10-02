@@ -1,0 +1,17 @@
+The self checkout application is not generally suitable for a full refactoring as a pipelined architecture. 
+
+There is one piece of functionality however that can be naturally pipelined - think of the manner in which the windowed analytics operates. Refactor this functionality into a a small collection of filters connected by pipes. The latter can be implemented  using threads or embedded messaging for asynchronous communication - whatever works in the language you are using. 
+
+Submit a URL for your repo that contains the 2 json files resulting from running the load client against your server:
+
+with default parameters (2 points)
+from using stress mode, ie java -cp out Main --stations=100 --duration=120 (2 points)
+Also briefly describe the filters in your pipeline (name, purpose) and how the filters are connected (1 point), eg:
+
+"The system has a 3 stage pipeline:
+
+ingest (buffers inputs) -> process (performs batching) -> output (writes results to DB)
+
+The pipes are implemented by Java blocking queus."
+
+Simple, eh?

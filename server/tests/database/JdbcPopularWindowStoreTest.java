@@ -51,6 +51,23 @@ class JdbcPopularWindowStoreTest {
         }
     }
 
+    @Test
+    void equivalentAlreadyCommittedWindowIsRecognizedWithoutDuplicatingItsBoundary() throws Exception {
+        try (AnalyticsDatabase db = open()) {
+            PopularWindowStore.PopularWindowSnapshot window = snapshot(
+                    1, 1000, rank(1, "sku2", 60), rank(2, "sku1", 40));
+
+            db.windows.writeWindow(window);
+            assertDoesNotThrow(() -> db.windows.writeWindow(window));
+
+            assertEquals(1, rowCount(db, "popular_window"));
+            assertEquals(2, rowCount(db, "popular_item"));
+            assertThrows(StoreFailure.class, () -> db.windows.writeWindow(snapshot(
+                    1, 1000, rank(1, "sku1", 1000))));
+            assertEquals(1, rowCount(db, "popular_window"));
+        }
+    }
+
     private static AnalyticsDatabase open() throws Exception {
         try {
             return new AnalyticsDatabase();

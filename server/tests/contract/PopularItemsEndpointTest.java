@@ -82,7 +82,10 @@ public class PopularItemsEndpointTest {
                 assertEquals(items.subList(0, 3), Json.getList(get(client, base + "?limit=3"), "items"));
                 assertEquals(items, Json.getList(get(client, base + "?limit=100"), "items"));
                 assertTrue(Json.getList(get(client, base + "?limit=0"), "items").isEmpty());
-                assertEquals(report, get(client, base));
+                Map<String, Object> whileNextWindowIsInFlight = get(client, base);
+                assertEquals(report, whileNextWindowIsInFlight,
+                        "Queries must expose only the latest committed complete window");
+                assertEquals(1000, number(whileNextWindowIsInFlight, "windowEnd"));
                 for (String invalid : new String[]{"-1", "abc", "1.5", "2147483648", ""}) {
                     HttpResponse<String> response = request(client, base + "?limit=" + invalid, "GET");
                     assertEquals(400, response.statusCode());

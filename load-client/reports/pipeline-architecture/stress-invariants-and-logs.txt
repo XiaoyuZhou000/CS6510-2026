@@ -1,0 +1,21 @@
+Pipeline Analytics stress workload evidence
+Run date: 2026-10-01 America/Los_Angeles
+
+Provenance:
+- db/init-db.ps1 completed successfully immediately before server startup.
+- Reset baseline: 2,000 catalog rows, 2,000 inventory rows, 20,000,000 total units.
+- A fresh server process was started after reset.
+- Unchanged client settings: --stations=100 --duration=120.
+- Selected client report: report-20261001-194550.json (retained byte-for-byte).
+
+db/validate-invariants.sql output:
+invariant_status  completed_transactions  completed_units  minimum_stock  popular_windows  latest_window_end
+PASS              19156                   156678           0              887              444000
+
+Structured operational records:
+- No BACKLOG or PERSISTENCE_RETRY record was emitted during this workload; the pipeline kept pace
+  with ingress and persistence did not fail.
+- The process was stopped after the invariant query. No forced or worker-failure outcome occurred
+  during the run.
+
+Result: PASS

@@ -32,6 +32,8 @@ public final class Main {
         String database = args.length > 3 ? args[3] : env("DB_NAME", "cs6510_selfcheckout");
         String user = args.length > 4 ? args[4] : env("DB_USER", "root");
         String password = args.length > 5 ? args[5] : env("DB_PASSWORD", "");
+        long analyticsShutdownTimeoutMillis = longEnv(
+                "ANALYTICS_SHUTDOWN_TIMEOUT_MS", 5_000L);
 
         ConnectionPool pool = new ConnectionPool(host, databasePort, database, user, password,
                 intEnv("DB_POOL_SIZE", 10));
@@ -40,7 +42,8 @@ public final class Main {
         StoreQueryService storeQueries = new StoreQueryService(catalog, new JdbcInventoryStore(pool));
         CatalogOperations catalogOperations = storeQueries;
         InventoryOperations inventoryOperations = storeQueries;
-        AnalyticsOperations analytics = new AnalyticsService(new JdbcPopularWindowStore(pool));
+        AnalyticsOperations analytics = new AnalyticsService(
+                new JdbcPopularWindowStore(pool), analyticsShutdownTimeoutMillis);
         TransactionOperations transactions = new TransactionService(
                 new JdbcTransactionStore(pool), new JdbcCheckoutCompletionStore(pool),
                 catalog, analytics::recordAcceptedScan);
@@ -77,5 +80,16 @@ public final class Main {
     private static int intEnv(String name, int fallback) {
         String value = System.getenv(name);
         return value == null || value.isEmpty() ? fallback : Integer.parseInt(value);
+    }
+
+    private static long longEnv(String name, long fallback) {
+        String value = System.getenv(name);
+        return value == null || value.isEmpty() ? fallback : positiveLong(value, name);
+    }
+
+    private static long positiveLong(String value, String name) {
+        long parsed = Long.parseLong(value);
+        if (parsed <= 0) throw new IllegalArgumentException(name + " must be positive");
+        return parsed;
     }
 }

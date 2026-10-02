@@ -91,6 +91,11 @@ class LayerDependencyTest {
                     && DATABASE_MEMBER.matcher(text).find()) {
                 violations.add(relative + ": handler retains a database collaborator");
             }
+            if (owner == Layer.ANALYTICS && text.contains("PopularWindowStore")
+                    && !Set.of("AnalyticsService.java", "PersistenceFilter.java")
+                    .contains(source.getFileName().toString())) {
+                violations.add(relative + ": only the facade and persistence filter may use PopularWindowStore");
+            }
         }
 
         for (Layer layer : Layer.values()) {

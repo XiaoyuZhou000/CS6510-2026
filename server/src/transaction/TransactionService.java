@@ -58,7 +58,7 @@ public final class TransactionService implements TransactionOperations {
         try {
             acceptedScans.recordAcceptedScan(item.sku());
         } catch (RuntimeException sinkFailure) {
-            System.err.println("[transaction] Accepted-scan sink failed: " + sinkFailure.getMessage());
+            System.err.println("[transaction] Accepted-scan sink failed after basket admission");
         }
         return new ScanView(command.transactionId(), item.sku(), item.name(), item.price(),
                 snapshot.itemCount(), snapshot.runningTotal());

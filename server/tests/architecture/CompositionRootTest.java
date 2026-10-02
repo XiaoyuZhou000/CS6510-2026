@@ -4,12 +4,15 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Focused checks for construction-only bootstrap and handler injection. */
@@ -49,6 +52,31 @@ class CompositionRootTest {
             }
         }
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    @Test
+    void compositionBuildsOnlyTheAnalyticsFacadeNotIndividualFilters() throws Exception {
+        String source = Files.readString(source("api/Main.java"));
+        assertTrue(source.contains("new AnalyticsService("));
+        assertFalse(source.contains("new WindowFilter("));
+        assertFalse(source.contains("new RankingFilter("));
+        assertFalse(source.contains("new PersistenceFilter("));
+    }
+
+    @Test
+    void compositionReadsValidatedAnalyticsShutdownTimeoutAndDelegatesShutdown() throws Exception {
+        String source = Files.readString(source("api/Main.java"));
+        assertTrue(source.contains("ANALYTICS_SHUTDOWN_TIMEOUT_MS"));
+        assertTrue(source.contains("5_000L"));
+        assertTrue(source.contains("analytics.shutdown()"));
+
+        Method parser = api.Main.class.getDeclaredMethod("positiveLong", String.class, String.class);
+        parser.setAccessible(true);
+        assertEquals(5_000L, parser.invoke(null, "5000", "ANALYTICS_SHUTDOWN_TIMEOUT_MS"));
+        assertThrows(java.lang.reflect.InvocationTargetException.class,
+                () -> parser.invoke(null, "0", "ANALYTICS_SHUTDOWN_TIMEOUT_MS"));
+        assertThrows(java.lang.reflect.InvocationTargetException.class,
+                () -> parser.invoke(null, "not-a-number", "ANALYTICS_SHUTDOWN_TIMEOUT_MS"));
     }
 
     private static boolean isBusinessInterface(Class<?> type) {

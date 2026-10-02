@@ -26,6 +26,10 @@ public final class CheckoutDatabase implements AutoCloseable {
     public final TransactionService checkout;
 
     public CheckoutDatabase(int stock) throws Exception {
+        this(stock, AcceptedScanSink.NO_OP);
+    }
+
+    public CheckoutDatabase(int stock, AcceptedScanSink acceptedScans) throws Exception {
         String url = System.getProperty("DB_URL",
             "jdbc:mysql://127.0.0.1:3307/cs6510_selfcheckout?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC");
         String user = System.getProperty("DB_USER", "root");
@@ -44,7 +48,7 @@ public final class CheckoutDatabase implements AutoCloseable {
         CatalogCache catalog = CatalogCache.load(() -> java.util.List.of(
                 new CatalogStore.CatalogItem(SKU, "Race Item", new BigDecimal("2.50"))));
         checkout = new TransactionService(new JdbcTransactionStore(pool),
-                new JdbcCheckoutCompletionStore(pool), catalog, AcceptedScanSink.NO_OP);
+                new JdbcCheckoutCompletionStore(pool), catalog, acceptedScans);
     }
 
     public int stock() throws Exception {

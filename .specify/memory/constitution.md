@@ -1,25 +1,28 @@
 <!--
 Sync Impact Report
 ==================
-Version change: 1.0.0 → 2.0.0
-Rationale: MAJOR amendment. The required architecture changes from a monolithic design
-to a layered design with enforceable layer responsibilities and dependency boundaries.
-Implementations conforming only to the former monolithic constraint are no longer
-compliant.
+Version change: 2.0.0 → 3.0.0
+Rationale: MAJOR amendment. The required architecture changes from a purely layered
+design to a layered server with a mandatory asynchronous pipeline inside the analytics
+layer. Implementations that preserve the layers but keep windowing, ranking, and
+persistence in one analytics component are no longer compliant.
 
 Modified principles:
-  - Added VII. Layer Boundary Integrity
-  - Architectural Constraints: Monolithic Architecture → Layered Architecture
+  - V. Analytics Window Accuracy (expanded with ordered ingestion, complete-window
+    publication, and no-silent-loss requirements)
+  - Added VIII. Analytics Pipeline Integrity
+  - Architectural Constraints: Layered → Layered with Pipelined Analytics
+  - Development Workflow & Quality Gates (added pipeline architecture gate)
 
 Added sections: none
 
 Removed sections: none
 
 Templates / dependent artifacts requiring review:
-  - The next feature specification and plan must map the implementation to the four
-    required layers and identify any migration of existing monolithic responsibilities.
-  - Existing source code and tests require review for compliance with the new dependency
-    rules; no application files are modified by this constitution command.
+  - The next feature specification and plan must define the analytics filters, message
+    contracts, queue behavior, lifecycle, and migration from the current AnalyticsService.
+  - Existing analytics source and tests require review for compliance with the new
+    pipeline rules; no application files are modified by this constitution command.
 
 Follow-up TODOs: none. All placeholders resolved.
 
@@ -109,12 +112,19 @@ is not refreshed on every scan.
 
 - Scans MUST be counted over a hopping window: the most recent 1,000 scans, recomputed
   every 500 scans.
+- Accepted scan events MUST enter the analytics pipeline in one well-defined FIFO order.
+  Concurrent producers MUST NOT mutate shared window state directly.
+- An accepted scan event MUST NOT be silently discarded. Backpressure or ingestion
+  failure MUST be explicit and observable if the pipeline cannot accept the event.
 - The top 10 items for the latest computed window MUST be persisted and returned by
   `/analytics/popular-items` together with the corresponding window boundaries.
-- Counts MUST be correct for the window they describe.
+- Counts and ranks MUST be correct for the complete window they describe. Ties MUST be
+  resolved deterministically by SKU in ascending order.
+- The query endpoint MUST expose only the latest successfully persisted complete window;
+  it MUST NOT expose partial or in-flight pipeline state.
 
 Rationale: The contract specifies a windowed aggregate, not a continuously exact
-ranking; accuracy is defined relative to that window.
+ranking; accuracy is defined relative to a complete, ordered window.
 
 ### VI. Testability & Repeatability
 
@@ -152,18 +162,54 @@ and database-access layers.
 Rationale: Explicit boundaries make responsibilities visible and testable while allowing
 the internal implementation to change without altering the fixed HTTP contract.
 
+### VIII. Analytics Pipeline Integrity (NON-NEGOTIABLE)
+
+Windowed analytics MUST be implemented as a small collection of independent filters
+connected by asynchronous pipes. One service containing all analytics stages plus a
+background persistence task does not satisfy this principle.
+
+- The pipeline MUST contain three explicit processing stages:
+  1. The Window Filter MUST consume accepted scan events, assign their serial analytics
+     order, maintain the 1,000-scan ring buffer, and emit an immutable window snapshot
+     after the first 1,000 scans and every 500 scans thereafter.
+  2. The Ranking Filter MUST consume window snapshots, count SKUs, apply deterministic
+     ordering, select the top 10, and emit an immutable ranked-window result.
+  3. The Persistence Filter MUST consume ranked-window results and write them to the
+     database in window order, retaining and retrying the oldest failed result before a
+     newer result may become visible.
+- The filters MUST communicate through Java `BlockingQueue` pipes rather than direct
+  downstream method calls, and each filter MUST execute on its own worker thread.
+- Messages crossing pipes MUST be immutable and MUST contain the window boundaries or
+  event data required by the receiving filter; filters MUST NOT share mutable window or
+  ranking state.
+- The analytics service exposed to the rest of the application MUST act only as the
+  pipeline facade and lifecycle owner: it accepts scan events, reads the latest persisted
+  result, starts workers, and coordinates shutdown.
+- Pipeline shutdown MUST stop new ingestion, drain all events and complete windows already
+  accepted, preserve stage order, and wait for workers to terminate within a documented
+  bound. Forced termination MUST be observable and MUST NOT be reported as a clean drain.
+- Analytics delay or persistence failure MUST NOT weaken inventory, completion, or
+  idempotency guarantees. Pipeline backlog, retries, and terminal worker failures MUST be
+  observable for diagnosis.
+
+Rationale: Explicit filters and pipes make the windowed computation a genuine pipeline,
+isolate stage responsibilities, and allow ingestion, computation, and persistence to
+progress asynchronously without coupling analytics internals to checkout behavior.
+
 ## Architectural Constraints
 
-- **Current architecture (this iteration): layered.** The server MAY remain a single
-  deployable process, but its source structure and runtime call paths MUST implement the
-  four layers defined in Principle VII. Merely renaming existing monolithic files or
-  placing them in layer-named directories does not satisfy this requirement.
+- **Current architecture (this iteration): layered with pipelined analytics.** The server
+  remains one deployable process and MUST retain the four layers defined in Principle VII.
+  Within the analytics layer, windowed processing MUST use the filter-and-pipe structure
+  defined in Principle VIII. The rest of the application MUST NOT be refactored into a
+  pipeline solely for architectural uniformity.
 - **API layer:** endpoint handlers/controllers, request validation, response serialization,
   and HTTP status mapping only.
 - **Transaction layer:** transaction lifecycle, basket operations, pricing, completion,
   and coordination of atomic inventory changes.
-- **Analytics layer:** scan ingestion for analytics, 1,000-scan hopping-window state,
-  recomputation every 500 scans, ranking, and popular-item query behavior.
+- **Analytics layer:** a pipeline facade plus Window, Ranking, and Persistence filters;
+  FIFO `BlockingQueue` pipes; immutable stage messages; 1,000-scan hopping-window state;
+  recomputation every 500 scans; deterministic ranking; and popular-item query behavior.
 - **Database-access layer:** all durable reads and writes for catalog, inventory, completed
   transactions, idempotency records, and persisted popular-item results.
 - **Persistence:** Stock items and popular-item results MUST be stored in a database
@@ -190,6 +236,10 @@ the internal implementation to change without altering the fixed HTTP contract.
 - **Layering gate:** Plans, code reviews, and tests MUST verify that every server component
   has one declared layer, respects Principle VII's dependency direction, and does not
   bypass the transaction, analytics, or database-access abstractions.
+- **Pipeline gate:** Plans, code reviews, and tests MUST verify three independently
+  executable analytics filters, queue-only stage communication, FIFO/no-silent-loss
+  ingestion, exact 1,000/500 window boundaries, deterministic ranking, ordered persistence
+  and retry, and drain-aware shutdown as required by Principles V and VIII.
 - **Validation gate:** Both the default and stress load runs MUST be executed with the
   unmodified client from a freshly reinitialized database, and their JSON reports saved,
   before results are reported or submitted.
@@ -212,4 +262,4 @@ the internal implementation to change without altering the fixed HTTP contract.
   the Core Principles and Quality Gates before work is considered complete. Any accepted
   deviation MUST be justified in writing in the relevant spec or plan.
 
-**Version**: 2.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-22
+**Version**: 3.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-29

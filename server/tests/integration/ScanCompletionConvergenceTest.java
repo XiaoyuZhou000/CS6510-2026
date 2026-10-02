@@ -17,7 +17,8 @@ public class ScanCompletionConvergenceTest {
     // Direct layered-service fixture: no HTTP or analytics implementation participates.
     @Test
     void everyScanAcceptedBeforeCompletionReservationIsSoldExactlyOnce() throws Exception {
-        try (CheckoutDatabase db = new CheckoutDatabase(100)) {
+        final int initialStock = 1_000_000;
+        try (CheckoutDatabase db = new CheckoutDatabase(initialStock)) {
             String tx = db.checkout.start(new TransactionOperations.StartCommand("race-station")).transactionId();
             db.checkout.scan(new TransactionOperations.ScanCommand(tx, CheckoutDatabase.SKU));
 
@@ -45,7 +46,7 @@ public class ScanCompletionConvergenceTest {
                 int accepted = 1 + acceptedDuringRace;
                 assertEquals(accepted, receipt.itemCount());
                 assertEquals(accepted, receipt.lines().getFirst().quantity());
-                assertEquals(100 - accepted, db.stock());
+                assertEquals(initialStock - accepted, db.stock());
                 assertThrows(TransactionFailure.class,
                     () -> db.checkout.scan(new TransactionOperations.ScanCommand(tx, CheckoutDatabase.SKU)));
             } finally {

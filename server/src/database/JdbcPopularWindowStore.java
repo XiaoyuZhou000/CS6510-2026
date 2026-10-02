@@ -37,14 +37,24 @@ public final class JdbcPopularWindowStore implements PopularWindowStore {
 
     @Override
     public void writeWindow(PopularWindowSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
         Connection connection = pool.borrow();
         try {
             connection.setAutoCommit(false);
+            if (recognizeEquivalentCommittedWindow(connection, snapshot)) {
+                connection.commit();
+                return;
+            }
             long windowId = insertHeader(connection, snapshot);
             insertRanks(connection, windowId, snapshot.ranks());
             connection.commit();
         } catch (SQLException e) {
             rollback(connection, e);
+            try {
+                if (recognizeEquivalentCommittedWindow(connection, snapshot)) return;
+            } catch (SQLException verificationFailure) {
+                e.addSuppressed(verificationFailure);
+            }
             throw new StoreFailure("Failed to persist popular window", e);
         } finally {
             try { connection.setAutoCommit(true); }
@@ -132,6 +142,39 @@ public final class JdbcPopularWindowStore implements PopularWindowStore {
             }
         }
         return List.copyOf(ranks);
+    }
+
+    private static boolean recognizeEquivalentCommittedWindow(
+            Connection connection, PopularWindowSnapshot snapshot) throws SQLException {
+        Long windowId = null;
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT window_id FROM popular_window WHERE window_start=? AND window_end=? "
+                        + "ORDER BY window_id DESC LIMIT 1")) {
+            statement.setLong(1, snapshot.windowStart());
+            statement.setLong(2, snapshot.windowEnd());
+            try (ResultSet results = statement.executeQuery()) {
+                if (results.next()) windowId = results.getLong(1);
+            }
+        }
+        if (windowId == null) return false;
+
+        List<SnapshotRank> stored = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT rank_pos,sku,scan_count FROM popular_item "
+                        + "WHERE window_id=? ORDER BY rank_pos")) {
+            statement.setLong(1, windowId);
+            try (ResultSet results = statement.executeQuery()) {
+                while (results.next()) {
+                    stored.add(new SnapshotRank(results.getInt("rank_pos"),
+                            results.getString("sku"), results.getLong("scan_count")));
+                }
+            }
+        }
+        if (!stored.equals(snapshot.ranks())) {
+            throw new SQLException("A different popular window already exists for boundary "
+                    + snapshot.windowStart() + "-" + snapshot.windowEnd());
+        }
+        return true;
     }
 
     private static void rollback(Connection connection, SQLException original) {

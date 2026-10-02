@@ -3,8 +3,10 @@ package contract;
 // Migration test inventory: GET /inventory/low-stock -> US3 operational reporting (1 of 7 retained routes).
 
 import api.json.Json;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.net.ConnectException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -16,6 +18,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /** Requires a running server and its MySQL database; restores all fixture inventory. */
 public class LowStockEndpointTest {
@@ -24,6 +27,24 @@ public class LowStockEndpointTest {
         "jdbc:mysql://127.0.0.1:3307/cs6510_selfcheckout?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC");
     private static final String SKU = "SKU-001998";
     private final HttpClient client = HttpClient.newHttpClient();
+
+    @BeforeAll
+    static void requireServerRunning() {
+        try {
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest probe = HttpRequest.newBuilder()
+                    .uri(URI.create(BASE + "/items"))
+                    .GET()
+                    .build();
+            client.send(probe, HttpResponse.BodyHandlers.discarding());
+        } catch (ConnectException unavailable) {
+            assumeTrue(false,
+                    "Server not reachable at " + BASE
+                            + " — start the server before running contract tests");
+        } catch (Exception reachable) {
+            // Any non-connect response means the server is available for contract validation.
+        }
+    }
 
     @Test
     void thresholdsAreInclusivePerSkuAndOverridesAreRequestLocal() throws Exception {
