@@ -24,13 +24,15 @@ So I chose a narrow boundary. The public checkout API stays synchronous, while o
 
 Here I show the boundary I chose.
 
+The application retains its layered structure. The API layer handles HTTP requests, the transaction layer manages checkout logic, the analytics layer processes accepted scans, and the database access layer encapsulates persistence. Catalog and inventory operations also go through HTTP handlers, business services, and database stores. For this walkthrough, I’ll focus on the analytics pipeline and its integration with checkout.
+
 I send an HTTP request from the load client to the API. The API delegates to the transaction service, where I validate the transaction and ask the basket to accept the scan. I keep everything up to that point on the synchronous request path.
 
 After I accept the scan, the transaction service emits one `AcceptedScan` message. I send that message into the analytics subsystem.
 
 From there, I run three worker stages asynchronously. I use the window filter to group accepted scans into overlapping windows with the size of 1000 scans. I use the ranking filter to convert each window into a Top 10 list. I use the persistence filter to write the completed ranking to MySQL.
 
-I connect those stages with three blocking queues (the ingress queue, the window queue, and the ranking queue). I use each queue as both a pipe and a concurrency boundary. Each stage consumes one message type, performs one transformation, and publishes a new immutable message for the next stage.
+I connect those stages with three blocking queues. Each stage consumes one message type, performs one transformation, and publishes a new immutable message for the next stage.
 
 Main class connects accepted scans to the analytics pipeline. This keeps my transaction layer independent of the analytics implementation. The transaction service only knows that it can report a successfully accepted SKU.
 

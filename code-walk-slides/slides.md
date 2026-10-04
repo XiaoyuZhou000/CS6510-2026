@@ -93,12 +93,15 @@ layout: default
 
 <div class="pipe-labels"><span>ingressQueue</span><span>windowQueue</span><span>rankingQueue</span></div>
 
-<div class="callout">`Main` connects accepted scans to the analytics pipeline.</div>
+<div class="callout">
+  <div><strong>API:</strong> HTTP requests · <strong>Transaction:</strong> checkout logic</div>
+  <div><strong>Analytics:</strong> scan processing · <strong>Database access:</strong> persistence</div>
+</div>
 
 <div class="source">server/src/api/Main.java · server/src/analytics/AnalyticsService.java</div>
 
 <!--
-Point out the architectural seam. Main creates AnalyticsService and passes its ingestion method into TransactionService through the AcceptedScanSink interface. Three BlockingQueues connect three dedicated worker threads. Reads go to the latest committed database snapshot.
+Briefly introduce the four layers: API handles HTTP requests, transaction manages checkout logic, analytics processes accepted scans, and database access encapsulates persistence. Catalog and inventory also use the API, business services, and database stores. Then focus on the analytics pipeline and its integration with checkout. Main creates AnalyticsService and passes its ingestion method into TransactionService through the AcceptedScanSink interface. Three BlockingQueues connect three dedicated worker threads. Reads go to the latest committed database snapshot.
 Target time: 2 minutes.
 -->
 
