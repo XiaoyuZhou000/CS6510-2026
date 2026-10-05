@@ -90,7 +90,7 @@ For the saving stage, I use the persistence filter and one database transaction 
 
 For each ranked window, the JDBC commits the top 10 ranked items to the database. 
 
-I only use one persistence worker, which preserves the FIFO order established by the queues. If a database operation raises a `StoreFailure`, that worker keeps the current window and retries it. There will be 2 retry operations with delays of 50 milliseconds and 200 milliseconds. It will not give up a newer window if the earlier one failed.
+I only use one persistence worker, which preserves the FIFO order established by the queues. If a database operation raises a `StoreFailure`, the worker keeps the current window and retries it, first after 50 milliseconds, then after 200 milliseconds. If it continues to fail, the worker keeps retrying the same window at one-second intervals until the write succeeds or the worker is interrupted. It only takes the next window from the queue after the current one is successfully persisted, so newer windows cannot overtake a failed earlier window.
 
 I also handle an edge case which database may commit successfully but the client loses the response. On retry, I look for an equivalent committed window and treat that retry as success rather than writing a duplicate.
 
