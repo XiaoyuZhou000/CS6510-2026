@@ -24,7 +24,7 @@ So I chose a narrow boundary. The public checkout API stays synchronous, while o
 
 Here I show the boundary I chose.
 
-The application retains its layered structure. The API layer handles HTTP requests, the transaction layer manages checkout logic, the analytics layer processes accepted scans, and the database access layer encapsulates persistence. Catalog and inventory operations also go through HTTP handlers, business services, and database stores. For this walkthrough, I’ll focus on the analytics pipeline and its integration with checkout.
+The application retains its layered structure. The API layer handles HTTP requests, the transaction layer manages checkout logic, the analytics layer processes accepted scans, and the database access layer encapsulates persistence. For this walkthrough, I’ll focus on the analytics pipeline and its integration with checkout.
 
 I send an HTTP request from the load client to the API. The API delegates to the transaction service, where I validate the transaction and ask the basket to accept the scan. I keep everything up to that point on the synchronous request path.
 
