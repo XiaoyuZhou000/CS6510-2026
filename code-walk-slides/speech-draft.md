@@ -128,7 +128,7 @@ I also made an important performance and durability trade-off. The queues and th
 
 The cost is crash recovery. If the process stops unexpectedly before a window is persisted, I lose the messages still in the queues and the partial window in memory. 
 
-In a production system, I could use a durable event log so the service can replay accepted scans after a crash. I would either bound that queue or some triggering events to prevent outage. It would also be better to track queue depth and processing lag as operational metrics.
+In a production system, I could use a durable event log so the service can replay accepted scans after a crash. Leaving queues unbounded is also a potential problem. I would either bound that queue or some triggering events to prevent outage. It would also be better to track queue depth and processing lag as operational metrics.
 
 That concludes my code walk. I’m happy to take questions.
 
