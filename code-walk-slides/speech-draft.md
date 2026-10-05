@@ -48,7 +48,7 @@ Only after that admission succeeds, I wrap the SKU in an immutable `AcceptedScan
 
 I then return the normal synchronous scan response to the client. I do not make the client wait for the whole analytics process which includes 1,000-scan window, a ranking calculation, or a database write.
 
-I care about this ordering. I never count a rejected scan because I send the event to analytics only after the basket accepts it. At the same time, I isolate analytics from checkout. If the analytics call fails, I log the failure without rolling back a scan that the basket has already accepted.
+~~I care about this ordering. I never count a rejected scan because I send the event to analytics only after the basket accepts it. At the same time, I isolate analytics from checkout. If the analytics call fails, I log the failure without rolling back a scan that the basket has already accepted.~~
 
 ## Slide 4 — I give each stage one task
 
@@ -102,7 +102,7 @@ I keep the read side much simpler than the write pipeline.
 
 When the client calls `GET /analytics/popular-items` with a limit, I validate that limit in the HTTP handler and ask `AnalyticsService` for the latest popular items. 
 
-Like what i have shown In my sample, I include not only the window configuration and its exact bounds but also each item’s SKU, scan count, and rank.
+~~Like what i have shown In my sample, I include not only the window configuration and its exact bounds but also each item’s SKU, scan count, and rank.~~
 
 Most importantly, I never read the live ring buffer or a ranking that is still moving through the queues. I only read the latest committed database snapshot. Although my response may lag behind current scanning activity, but it remains complete and durable.
 
@@ -112,11 +112,11 @@ I verified both the functional boundaries and the performance behavior.
 
 In my load reports, I compare 10 stations with 100 stations. With 10 stations, I measured a scan p99 of 0.43 milliseconds. With 100 stations, I measured 0.46 milliseconds. I recorded zero scan errors in both runs, even though I increased station concurrency by a factor of ten.
 
-My item throughput values also show that I continued processing a substantial scan rate while analytics ran asynchronously.
+This report also show that I continued processing a substantial scan rate while analytics ran asynchronously.
 
 I use boundary tests to check the exact hopping-window rules. At 999 accepted scans, I have no window. At scan 1,000, I emit the first window, covering 1 through 1,000. At scan 1,499, I do not emit another result. At scan 1,500, I emit the next window, covering 501 through 1,500.
 
-One thing I want to clearify is that zero scan errors does not mean I completed every transaction successfully. Completion can still fail due to low inventory reasons. I treat these failures as a separate business operation in completion process. I count accepted basket scans here for popular-items analytics.
+One thing I want to clearify is that zero scan errors does not mean I completed every transaction successfully. Completion can still fail due to low inventory reasons. I treat these failures as a separate business operation in completion process of transaction service. I count accepted basket scans here for popular-items analytics.
 
 ## Slide 10 — What worked for me and what I would improve
 
