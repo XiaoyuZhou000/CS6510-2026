@@ -112,8 +112,6 @@ I verified both the functional boundaries and the performance behavior.
 
 In my load reports, I compare 10 stations with 100 stations. With 10 stations, I measured a scan p99 of 0.43 milliseconds. With 100 stations, I measured 0.46 milliseconds. I recorded zero scan errors in both runs, even though I increased station concurrency by a factor of ten.
 
-This report also show that I continued processing a substantial scan rate while analytics ran asynchronously.
-
 I use boundary tests to check the exact hopping-window rules. At 999 accepted scans, I have no window. At scan 1,000, I emit the first window, covering 1 through 1,000. At scan 1,499, I do not emit another result. At scan 1,500, I emit the next window, covering 501 through 1,500.
 
 One thing I want to clearify is that zero scan errors does not mean I completed every transaction successfully. Completion can still fail due to low inventory reasons. I treat these failures as a separate business operation in completion process of transaction service. I count accepted basket scans here for popular-items analytics.
