@@ -2,156 +2,124 @@ package architecture;
 
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.EnumMap;
-import java.util.EnumSet;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Exhaustive static gate for the four production layers. */
+/** Static gate over every production source in the four build roots. */
 class LayerDependencyTest {
     private static final Pattern PACKAGE = Pattern.compile("(?m)^package\\s+([a-zA-Z0-9_.]+)\\s*;");
-    private static final Pattern IMPORT = Pattern.compile("(?m)^import\\s+(?:static\\s+)?([a-zA-Z0-9_.]+)\\s*;");
     private static final Pattern SQL = Pattern.compile(
-            "(?i)\\\"\\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\\b");
+            "(?i)\"\\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\\b");
     private static final Pattern DATABASE_MEMBER = Pattern.compile(
             "(?m)^\\s*(?:private|protected|public)\\s+(?:final\\s+)?(?:database\\.)?"
                     + "(?:CatalogStore|TransactionStore|InventoryStore|CheckoutCompletionStore|PopularWindowStore|"
                     + "ConnectionPool|Jdbc[A-Za-z0-9_]*)\\b");
 
     @Test
-    void everyProductionSourceHasOneLayerAndRespectsDependencies() throws Exception {
-        Path sourceRoot = sourceRoot();
+    void everyProductionSourceHasItsDeclaredOwnerAndKeepsSqlAndHttpAtTheirBoundaries() throws Exception {
+        Path server = serverRoot();
         List<String> violations = new ArrayList<>();
-        Map<Layer, Set<Layer>> graph = new EnumMap<>(Layer.class);
-        for (Layer layer : Layer.values()) graph.put(layer, EnumSet.noneOf(Layer.class));
-
-        List<Path> sources;
-        try (Stream<Path> paths = Files.walk(sourceRoot)) {
-            sources = paths.filter(path -> path.toString().endsWith(".java")).sorted().toList();
-        }
-        assertTrue(!sources.isEmpty(), "No production Java sources found under " + sourceRoot);
-
-        for (Path source : sources) {
-            String text = Files.readString(source);
-            String relative = unix(sourceRoot.relativize(source));
-            Matcher packageMatcher = PACKAGE.matcher(text);
-            if (!packageMatcher.find()) {
-                violations.add(relative + ": missing declared layer package");
-                continue;
-            }
-            Layer owner = Layer.fromPackage(packageMatcher.group(1));
-            if (owner == null) {
-                violations.add(relative + ": unassigned package " + packageMatcher.group(1));
-                continue;
-            }
-            if (!relative.startsWith(owner.packageName + "/")) {
-                violations.add(relative + ": path/package ownership mismatch for " + owner.packageName);
-            }
-
-            Matcher imports = IMPORT.matcher(text);
-            while (imports.find()) {
-                String imported = imports.group(1);
-                Layer target = Layer.fromPackage(imported);
-                if (target != null && target != owner) {
-                    graph.get(owner).add(target);
-                    if (!owner.allows(target, source.getFileName().toString())) {
-                        violations.add(relative + ": forbidden import " + imported);
+        int count = 0;
+        for (String owner : List.of("common", "transaction", "inventory", "analytics")) {
+            Path root = server.resolve(owner + "/src");
+            assertTrue(Files.isDirectory(root), "Missing source root: " + root);
+            try (Stream<Path> paths = Files.walk(root)) {
+                for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
+                    count++;
+                    String body = Files.readString(source);
+                    String relative = root.relativize(source).toString().replace('\\', '/');
+                    Matcher declared = PACKAGE.matcher(body);
+                    if (!declared.find()) {
+                        violations.add(source + ": missing package");
+                        continue;
+                    }
+                    String packageName = declared.group(1);
+                    if (!relative.startsWith(packageName.replace('.', '/') + "/")) {
+                        violations.add(source + ": package/path mismatch");
+                    }
+                    boolean database = packageName.equals("database") || packageName.startsWith("database.")
+                            || packageName.endsWith(".database") || packageName.contains(".database.");
+                    boolean api = packageName.equals("api") || packageName.startsWith("api.");
+                    boolean compositionRoot = source.getFileName().toString().equals(
+                            Character.toUpperCase(owner.charAt(0)) + owner.substring(1) + "Main.java");
+                    if (!database && (body.contains("java.sql") || SQL.matcher(body).find())) {
+                        violations.add(source + ": SQL outside database adapter");
+                    }
+                    if (!api && !compositionRoot && (body.contains("com.sun.net.httpserver")
+                            || body.contains("HttpExchange") || body.contains("HttpHandler")
+                            || Pattern.compile("\\bHTTP_[A-Z_]+\\b").matcher(body).find())) {
+                        violations.add(source + ": HTTP outside API or entry point");
+                    }
+                    if (api && source.getFileName().toString().endsWith("HttpHandler.java")
+                            && DATABASE_MEMBER.matcher(body).find()) {
+                        violations.add(source + ": handler retains database collaborator");
+                    }
+                    if (owner.equals("analytics") && packageName.equals("analytics")
+                            && body.contains("PopularWindowStore") && !compositionRoot
+                            && !List.of("AnalyticsService.java", "PersistenceFilter.java")
+                                    .contains(source.getFileName().toString())) {
+                        violations.add(source + ": filter bypasses Analytics facade/persistence boundary");
                     }
                 }
             }
+        }
+        assertTrue(count > 0, "No production Java sources found");
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
 
-            boolean compositionRoot = relative.equals("api/Main.java");
-            if (owner != Layer.DATABASE) {
-                if (text.contains("java.sql")) violations.add(relative + ": java.sql outside database");
-                if (SQL.matcher(text).find()) violations.add(relative + ": SQL text outside database");
-                if (!compositionRoot && text.contains("ConnectionPool")) {
-                    violations.add(relative + ": ConnectionPool outside database");
+    @Test
+    void domainSourcesDoNotImportPeersAndCommonHasNoBusinessPackage() throws Exception {
+        Path server = serverRoot();
+        List<String> violations = new ArrayList<>();
+        for (String owner : List.of("transaction", "inventory", "analytics")) {
+            Path root = server.resolve(owner + "/src");
+            try (Stream<Path> paths = Files.walk(root)) {
+                for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
+                    String body = Files.readString(source);
+                    for (String peer : List.of("transaction", "inventory", "analytics")) {
+                        if (!peer.equals(owner) && (Pattern.compile("(?m)^import\\s+" + peer + "\\.").matcher(body).find()
+                                || Pattern.compile("\\b" + peer + "\\.[A-Z]").matcher(body).find())) {
+                            violations.add(source + " imports peer domain " + peer);
+                        }
+                    }
                 }
-                if (!compositionRoot && Pattern.compile("\\bJdbc[A-Z][A-Za-z0-9_]*").matcher(text).find()) {
-                    violations.add(relative + ": JDBC adapter reference outside database");
-                }
-            }
-            if (owner != Layer.API && (text.contains("com.sun.net.httpserver")
-                    || text.contains("HttpExchange") || text.contains("HttpHandler")
-                    || Pattern.compile("\\bHTTP_[A-Z_]+\\b").matcher(text).find())) {
-                violations.add(relative + ": HTTP type/status below API");
-            }
-            if (owner == Layer.API && source.getFileName().toString().endsWith("HttpHandler.java")
-                    && DATABASE_MEMBER.matcher(text).find()) {
-                violations.add(relative + ": handler retains a database collaborator");
-            }
-            if (owner == Layer.ANALYTICS && text.contains("PopularWindowStore")
-                    && !Set.of("AnalyticsService.java", "PersistenceFilter.java")
-                    .contains(source.getFileName().toString())) {
-                violations.add(relative + ": only the facade and persistence filter may use PopularWindowStore");
             }
         }
-
-        for (Layer layer : Layer.values()) {
-            detectCycle(layer, layer, graph, new HashSet<>(), violations);
+        Path jar = server.resolve("out/common.jar");
+        assertTrue(Files.isRegularFile(jar), "Missing common artifact: " + jar);
+        try (java.util.jar.JarFile archive = new java.util.jar.JarFile(jar.toFile())) {
+            archive.stream().map(java.util.zip.ZipEntry::getName)
+                    .filter(name -> name.matches("^(transaction|inventory|analytics)/.*\\.class$"))
+                    .forEach(name -> violations.add("common.jar contains business class " + name));
+        }
+        try (Stream<Path> paths = Files.walk(server.resolve("common/src"))) {
+            for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
+                String body = Files.readString(source);
+                Matcher declared = PACKAGE.matcher(body);
+                if (!declared.find() || List.of("transaction", "inventory", "analytics")
+                        .stream().anyMatch(domain -> declared.group(1).equals(domain)
+                                || declared.group(1).startsWith(domain + "."))) {
+                    violations.add(source + " contains business package");
+                }
+                for (String domain : List.of("transaction", "inventory", "analytics")) {
+                    if (Pattern.compile("(?m)^import\\s+" + domain + "\\.").matcher(body).find()) {
+                        violations.add(source + " imports business package " + domain);
+                    }
+                }
+            }
         }
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
     }
 
-    private static void detectCycle(Layer origin, Layer current, Map<Layer, Set<Layer>> graph,
-                                    Set<Layer> path, List<String> violations) {
-        if (!path.add(current)) return;
-        for (Layer next : graph.get(current)) {
-            if (next == origin) {
-                String message = "layer cycle reaches " + origin.packageName;
-                if (!violations.contains(message)) violations.add(message);
-            } else {
-                detectCycle(origin, next, graph, new HashSet<>(path), violations);
-            }
-        }
-    }
-
-    private static Path sourceRoot() throws IOException {
+    private static Path serverRoot() {
         Path cwd = Path.of("").toAbsolutePath().normalize();
-        for (Path candidate : List.of(cwd.resolve("src"), cwd.resolve("server/src"))) {
-            if (Files.isDirectory(candidate)) return candidate.toRealPath();
-        }
-        throw new IOException("Cannot locate server/src from " + cwd);
-    }
-
-    private static String unix(Path path) {
-        return path.toString().replace('\\', '/');
-    }
-
-    private enum Layer {
-        API("api"), TRANSACTION("transaction"), ANALYTICS("analytics"), DATABASE("database");
-
-        private final String packageName;
-
-        Layer(String packageName) {
-            this.packageName = packageName;
-        }
-
-        static Layer fromPackage(String name) {
-            for (Layer layer : values()) {
-                if (name.equals(layer.packageName) || name.startsWith(layer.packageName + ".")) return layer;
-            }
-            return null;
-        }
-
-        boolean allows(Layer target, String fileName) {
-            return switch (this) {
-                case API -> target == TRANSACTION || target == ANALYTICS
-                        || (fileName.equals("Main.java") && target == DATABASE);
-                case TRANSACTION, ANALYTICS -> target == DATABASE;
-                case DATABASE -> false;
-            };
-        }
+        return Files.isDirectory(cwd.resolve("server/common")) ? cwd.resolve("server") : cwd;
     }
 }

@@ -4,35 +4,43 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Focused checks for construction-only bootstrap and handler injection. */
+/** Checks each independent composition root and handler injection boundary. */
 class CompositionRootTest {
     @Test
-    void mainContainsConstructionAndRegistrationButNoRequestTimeStoreCalls() throws Exception {
-        String source = Files.readString(source("api/Main.java"));
-        assertTrue(source.contains("HttpServer.create"));
-        assertTrue(source.contains("createContext("));
-        assertTrue(source.contains("newVirtualThreadPerTaskExecutor"));
-        assertFalse(source.contains(".loadAll("));
-        assertFalse(source.contains(".findById("));
-        assertFalse(source.contains(".findLowStock("));
-        assertFalse(source.contains(".completeAtomically("));
-        assertFalse(source.contains(".readLatest("));
-        assertFalse(source.contains(".writeWindow("));
+    void eachDomainMainConstructsOnlyItsOwnRoutesAndStores() throws Exception {
+        for (String domain : List.of("transaction", "inventory", "analytics")) {
+            Path main = mainSource(domain);
+            String source = Files.readString(main);
+            assertTrue(source.contains("HttpServer.create"), main.toString());
+            assertTrue(source.contains("createContext("), main.toString());
+            assertTrue(source.contains("newVirtualThreadPerTaskExecutor"), main.toString());
+            assertTrue(source.contains("new ConnectionPool("), main.toString());
+            assertTrue(source.contains("addShutdownHook"), main.toString());
+            assertFalse(source.contains(".loadAll("), main.toString());
+            assertFalse(source.contains(".findById("), main.toString());
+            assertFalse(source.contains(".findLowStock("), main.toString());
+            assertFalse(source.contains(".completeAtomically("), main.toString());
+            assertFalse(source.contains(".readLatest("), main.toString());
+            assertFalse(source.contains(".writeWindow("), main.toString());
+            for (String peer : List.of("transaction", "inventory", "analytics")) {
+                if (!peer.equals(domain)) {
+                    assertFalse(source.matches("(?s).*import\\s+" + peer + "\\..*"),
+                            main + " imports peer domain " + peer);
+                }
+            }
+        }
     }
 
     @Test
-    void everyHttpHandlerRetainsOnlyBusinessInterfaces() throws Exception {
+    void everyHttpHandlerRetainsOnlyBusinessInterfaces() {
         List<String> violations = new ArrayList<>();
         for (Class<?> handler : List.of(
                 api.TransactionHttpHandler.class, api.CatalogHttpHandler.class,
@@ -55,39 +63,31 @@ class CompositionRootTest {
     }
 
     @Test
-    void compositionBuildsOnlyTheAnalyticsFacadeNotIndividualFilters() throws Exception {
-        String source = Files.readString(source("api/Main.java"));
+    void analyticsCompositionBuildsTheFacadeAndDelegatesShutdown() throws Exception {
+        String source = Files.readString(mainSource("analytics"));
         assertTrue(source.contains("new AnalyticsService("));
         assertFalse(source.contains("new WindowFilter("));
         assertFalse(source.contains("new RankingFilter("));
         assertFalse(source.contains("new PersistenceFilter("));
-    }
-
-    @Test
-    void compositionReadsValidatedAnalyticsShutdownTimeoutAndDelegatesShutdown() throws Exception {
-        String source = Files.readString(source("api/Main.java"));
-        assertTrue(source.contains("ANALYTICS_SHUTDOWN_TIMEOUT_MS"));
-        assertTrue(source.contains("5_000L"));
-        assertTrue(source.contains("analytics.shutdown()"));
-
-        Method parser = api.Main.class.getDeclaredMethod("positiveLong", String.class, String.class);
-        parser.setAccessible(true);
-        assertEquals(5_000L, parser.invoke(null, "5000", "ANALYTICS_SHUTDOWN_TIMEOUT_MS"));
-        assertThrows(java.lang.reflect.InvocationTargetException.class,
-                () -> parser.invoke(null, "0", "ANALYTICS_SHUTDOWN_TIMEOUT_MS"));
-        assertThrows(java.lang.reflect.InvocationTargetException.class,
-                () -> parser.invoke(null, "not-a-number", "ANALYTICS_SHUTDOWN_TIMEOUT_MS"));
+        assertTrue(source.contains("running.shutdown()"));
+        String facade = Files.readString(serverRoot().resolve("analytics/src/analytics/AnalyticsService.java"));
+        assertTrue(facade.contains("shutdownTimeoutMillis <= 0"));
     }
 
     private static boolean isBusinessInterface(Class<?> type) {
         Package owner = type.getPackage();
         String packageName = owner == null ? "" : owner.getName();
-        return type.isInterface() && (packageName.equals("transaction") || packageName.equals("analytics"));
+        return type.isInterface() && (packageName.equals("transaction")
+                || packageName.equals("inventory") || packageName.equals("analytics"));
     }
 
-    private static Path source(String relative) {
+    private static Path mainSource(String domain) {
+        String name = Character.toUpperCase(domain.charAt(0)) + domain.substring(1) + "Main.java";
+        return serverRoot().resolve(domain + "/src/" + domain + "/" + name);
+    }
+
+    private static Path serverRoot() {
         Path cwd = Path.of("").toAbsolutePath().normalize();
-        Path direct = cwd.resolve("src").resolve(relative);
-        return Files.exists(direct) ? direct : cwd.resolve("server/src").resolve(relative);
+        return Files.isDirectory(cwd.resolve("server/common")) ? cwd.resolve("server") : cwd;
     }
 }

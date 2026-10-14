@@ -1,0 +1,179 @@
+package database;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+
+/** Atomically publishes complete ranks and advances the durable checkpoint. */
+public final class JdbcPopularWindowStore implements PopularWindowStore {
+    private final ConnectionPool pool;
+
+    public JdbcPopularWindowStore(ConnectionPool pool) {
+        this.pool = Objects.requireNonNull(pool, "pool");
+    }
+
+    @Override
+    public long readMaxWindowEnd() {
+        Connection connection = pool.borrow();
+        try {
+            return readCheckpoint(connection, false);
+        } catch (SQLException failure) {
+            throw new StoreFailure("Failed to read analytics checkpoint", failure);
+        } finally {
+            pool.release(connection);
+        }
+    }
+
+    @Override
+    public void writeWindow(PopularWindowSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        Connection connection = pool.borrow();
+        try {
+            connection.setAutoCommit(false);
+            long checkpoint = readCheckpoint(connection, true);
+            if (snapshot.windowEnd() <= checkpoint) {
+                verifyEquivalent(connection, snapshot);
+                connection.commit();
+                return;
+            }
+            long next = checkpoint == 0 ? 1000 : checkpoint + 500;
+            if (snapshot.windowEnd() != next) {
+                throw new IllegalStateException("window boundary is out of checkpoint order: " + snapshot.windowEnd());
+            }
+            long id = insertHeader(connection, snapshot);
+            insertRanks(connection, id, snapshot.ranks());
+            try (PreparedStatement update = connection.prepareStatement(
+                    "UPDATE analytics_checkpoint SET last_window_end=? WHERE checkpoint_key=1 AND last_window_end=?")) {
+                update.setLong(1, snapshot.windowEnd());
+                update.setLong(2, checkpoint);
+                if (update.executeUpdate() != 1) throw new SQLException("analytics checkpoint changed unexpectedly");
+            }
+            connection.commit();
+        } catch (SQLException failure) {
+            try { connection.rollback(); } catch (SQLException rollback) { failure.addSuppressed(rollback); }
+            throw new StoreFailure("Failed to persist popular window at " + snapshot.windowEnd(), failure);
+        } catch (RuntimeException failure) {
+            try { connection.rollback(); } catch (SQLException rollback) { failure.addSuppressed(rollback); }
+            throw failure;
+        } finally {
+            try { connection.setAutoCommit(true); }
+            catch (SQLException reset) { System.err.println("[analytics] JDBC reset failed: " + reset.getMessage()); }
+            pool.release(connection);
+        }
+    }
+
+    @Override
+    public Optional<PopularWindowView> readLatest(int limit) {
+        if (limit < 0) throw new IllegalArgumentException("limit must be non-negative");
+        Connection connection = pool.borrow();
+        try {
+            long checkpoint = readCheckpoint(connection, false);
+            if (checkpoint == 0) return Optional.empty();
+            Header header = readHeader(connection, checkpoint);
+            if (header == null) throw new SQLException("checkpoint has no complete window at " + checkpoint);
+            return Optional.of(new PopularWindowView(header.id(), header.start(), header.end(),
+                    header.computedAt(), readRanks(connection, header.id(), Math.min(limit, 10))));
+        } catch (SQLException failure) {
+            throw new StoreFailure("Failed to read latest popular window", failure);
+        } finally {
+            pool.release(connection);
+        }
+    }
+
+    private static long readCheckpoint(Connection connection, boolean lock) throws SQLException {
+        String query = "SELECT last_window_end FROM analytics_checkpoint WHERE checkpoint_key=1"
+                + (lock ? " FOR UPDATE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(query);
+             ResultSet rows = statement.executeQuery()) {
+            if (!rows.next()) throw new SQLException("analytics checkpoint singleton is missing");
+            return rows.getLong(1);
+        }
+    }
+
+    private static long insertHeader(Connection connection, PopularWindowSnapshot snapshot)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO popular_window (window_start,window_end,computed_at) VALUES (?,?,?)",
+                Statement.RETURN_GENERATED_KEYS)) {
+            statement.setLong(1, snapshot.windowStart());
+            statement.setLong(2, snapshot.windowEnd());
+            statement.setTimestamp(3, Timestamp.from(Instant.now()));
+            statement.executeUpdate();
+            try (ResultSet keys = statement.getGeneratedKeys()) {
+                if (!keys.next()) throw new SQLException("popular window ID missing");
+                return keys.getLong(1);
+            }
+        }
+    }
+
+    private static void insertRanks(Connection connection, long id, List<SnapshotRank> ranks)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO popular_item (window_id,rank_pos,sku,scan_count) VALUES (?,?,?,?)")) {
+            for (SnapshotRank rank : ranks) {
+                statement.setLong(1, id);
+                statement.setInt(2, rank.rank());
+                statement.setString(3, rank.sku());
+                statement.setLong(4, rank.scanCount());
+                statement.addBatch();
+            }
+            if (!ranks.isEmpty()) statement.executeBatch();
+        }
+    }
+
+    private static void verifyEquivalent(Connection connection, PopularWindowSnapshot expected)
+            throws SQLException {
+        Header stored = readHeader(connection, expected.windowEnd());
+        if (stored == null || stored.start() != expected.windowStart()) {
+            throw new IllegalStateException("committed window boundary is missing or conflicts");
+        }
+        List<SnapshotRank> ranks = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT rank_pos,sku,scan_count FROM popular_item WHERE window_id=? ORDER BY rank_pos")) {
+            statement.setLong(1, stored.id());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) ranks.add(new SnapshotRank(rows.getInt(1), rows.getString(2), rows.getLong(3)));
+            }
+        }
+        if (!ranks.equals(expected.ranks())) throw new IllegalStateException("committed window ranks conflict");
+    }
+
+    private static Header readHeader(Connection connection, long end) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT window_id,window_start,window_end,computed_at FROM popular_window WHERE window_end=?")) {
+            statement.setLong(1, end);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) return null;
+                return new Header(rows.getLong(1), rows.getLong(2), rows.getLong(3),
+                        rows.getTimestamp(4).toInstant());
+            }
+        }
+    }
+
+    private static List<StoredRank> readRanks(Connection connection, long id, int limit)
+            throws SQLException {
+        List<StoredRank> ranks = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT pi.rank_pos,pi.sku,ci.name,pi.scan_count "
+                + "FROM popular_item pi JOIN catalog_item ci ON ci.sku=pi.sku "
+                + "WHERE pi.window_id=? ORDER BY pi.rank_pos LIMIT ?")) {
+            statement.setLong(1, id);
+            statement.setInt(2, limit);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) ranks.add(new StoredRank(rows.getInt(1), rows.getString(2),
+                        rows.getString(3), rows.getLong(4)));
+            }
+        }
+        return List.copyOf(ranks);
+    }
+
+    private record Header(long id, long start, long end, Instant computedAt) { }
+}

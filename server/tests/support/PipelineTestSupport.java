@@ -4,6 +4,7 @@ import database.PopularWindowStore;
 import database.StoreFailure;
 
 import java.time.Duration;
+import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -19,6 +20,23 @@ import java.util.function.Predicate;
 
 /** Shared deterministic fakes and synchronization helpers for analytics pipeline tests. */
 public final class PipelineTestSupport {
+    public static int freePort() throws java.io.IOException {
+        try (ServerSocket socket = new ServerSocket(0)) { return socket.getLocalPort(); }
+    }
+
+    public static void awaitHttpStatus(Process process, String url, int expected) throws Exception {
+        java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(1)).build();
+        awaitOrFail(Duration.ofSeconds(10), url + " to return " + expected, () -> {
+            if (!process.isAlive()) throw new AssertionError("Service exited before " + url + " became ready");
+            try {
+                var response = client.send(java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
+                    .timeout(Duration.ofSeconds(1)).GET().build(),
+                    java.net.http.HttpResponse.BodyHandlers.discarding());
+                return response.statusCode() == expected;
+            } catch (Exception unavailable) { return false; }
+        });
+    }
     public static final Duration DEFAULT_AWAIT_TIMEOUT = Duration.ofSeconds(2);
     private static final Duration DEFAULT_POLL_INTERVAL = Duration.ofMillis(5);
 

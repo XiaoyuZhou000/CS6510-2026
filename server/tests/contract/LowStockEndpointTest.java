@@ -1,6 +1,6 @@
 package contract;
 
-// Migration test inventory: GET /inventory/low-stock -> US3 operational reporting (1 of 7 retained routes).
+// Inventory Service contract through the stable public port 8080.
 
 import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
@@ -60,6 +60,7 @@ public class LowStockEndpointTest {
                     threshold = rs.getInt(2);
                 }
             }
+            boolean completionCommitted = false;
             try {
                 setInventory(conn, 3, 3);
                 Instant before = Instant.now();
@@ -89,6 +90,12 @@ public class LowStockEndpointTest {
                 assertEquals(Json.getList(overridden, "alerts").size(),
                     Json.getList(overridden, "alerts").stream()
                         .map(entry -> Json.asObject(entry).get("sku")).collect(Collectors.toSet()).size());
+                String previousSku = null;
+                for (Object entry : Json.getList(overridden, "alerts")) {
+                    String sku = Json.asObject(entry).get("sku").toString();
+                    if (previousSku != null) assertTrue(previousSku.compareTo(sku) < 0);
+                    previousSku = sku;
+                }
                 assertEquals(3, number(find(get("?threshold=9")), "currentStock"));
                 assertEquals(3, number(find(get("")), "threshold"));
 
@@ -98,13 +105,14 @@ public class LowStockEndpointTest {
                 post("/transactions/" + tx + "/items", "{\"sku\":\"" + SKU + "\"}", 200);
                 assertNull(find(get("")), "Scanning must not change stock");
                 post("/transactions/" + tx + "/complete", "", 200);
+                completionCommitted = true;
                 assertEquals(3, number(find(get("")), "currentStock"));
 
                 setInventory(conn, 0, 3);
                 assertEquals(0, number(find(get("?threshold=0")), "threshold"));
-                assertEquals(400, request("GET", "/inventory/low-stock?threshold=-1", "").statusCode());
+                assertError(request("GET", "/inventory/low-stock?threshold=-1", ""));
             } finally {
-                setInventory(conn, stock, threshold);
+                setInventory(conn, stock - (completionCommitted ? 1 : 0), threshold);
             }
         }
     }
@@ -113,18 +121,23 @@ public class LowStockEndpointTest {
     void rejectsInvalidThresholdsAndUnmatchedRoutes() throws Exception {
         for (String value : new String[]{"abc", "1.5", "2147483648", ""}) {
             HttpResponse<String> response = request("GET", "/inventory/low-stock?threshold=" + value, "");
-            assertEquals(400, response.statusCode());
-            Map<String, Object> error = Json.parseObject(response.body());
-            assertInstanceOf(String.class, error.get("error"));
-            assertInstanceOf(String.class, error.get("message"));
+            assertError(response);
         }
         assertEquals(404, request("GET", "/inventory/low-stock/extra", "").statusCode());
         assertEquals(405, request("POST", "/inventory/low-stock", "").statusCode());
     }
 
+    private static void assertError(HttpResponse<String> response) {
+        assertEquals(400, response.statusCode(), response.body());
+        Map<String, Object> error = Json.parseObject(response.body());
+        assertEquals(Set.of("error", "message"), error.keySet());
+        assertEquals("INVALID_THRESHOLD", error.get("error"));
+        assertInstanceOf(String.class, error.get("message"));
+    }
+
     private Connection connect() throws SQLException {
         return DriverManager.getConnection(DB_URL,
-            System.getProperty("DB_USER", "root"), System.getProperty("DB_PASS", ""));
+            System.getProperty("DB_USER", System.getenv().getOrDefault("DB_USER", "root")), System.getProperty("DB_PASS", System.getenv().getOrDefault("DB_PASSWORD", "")));
     }
 
     private void setInventory(Connection conn, int stock, int threshold) throws SQLException {

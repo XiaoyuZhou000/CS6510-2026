@@ -1,265 +1,222 @@
 <!--
 Sync Impact Report
 ==================
-Version change: 2.0.0 → 3.0.0
-Rationale: MAJOR amendment. The required architecture changes from a purely layered
-design to a layered server with a mandatory asynchronous pipeline inside the analytics
-layer. Implementations that preserve the layers but keep windowing, ranking, and
-persistence in one analytics component are no longer compliant.
+Version change: 3.0.0 → 4.0.0
+Rationale: MAJOR. Independent domain-service deployment and durable scan-event recovery
+replace the single-process architecture and its allowance for non-durable accepted scans.
 
 Modified principles:
-  - V. Analytics Window Accuracy (expanded with ordered ingestion, complete-window
-    publication, and no-silent-loss requirements)
-  - Added VIII. Analytics Pipeline Integrity
-  - Architectural Constraints: Layered → Layered with Pipelined Analytics
-  - Development Workflow & Quality Gates (added pipeline architecture gate)
+  - I. Inventory Consistency → I. Checkout and Inventory Consistency
+  - II. Durable Completion & Reliability → III. Centralized Persistence and Durability
+  - III. Contract Fidelity → IV. REST Contract Fidelity
+  - IV. Performance Under Concurrency → VII. Performance and Operational Simplicity
+  - V. Analytics Window Accuracy → VI. Analytics Pipeline and Window Accuracy
+  - VI. Testability & Repeatability → VIII. Verification and Benchmark Evidence
+  - VII. Layer Boundary Integrity → II. Domain Service Boundaries
+  - VIII. Analytics Pipeline Integrity → VI. Analytics Pipeline and Window Accuracy
+Added sections: none; Core Principles now includes V. Recoverable Event Processing.
+Removed sections: none.
+Follow-up TODOs: none.
 
-Added sections: none
-
-Removed sections: none
-
-Templates / dependent artifacts requiring review:
-  - The next feature specification and plan must define the analytics filters, message
-    contracts, queue behavior, lifecycle, and migration from the current AnalyticsService.
-  - Existing analytics source and tests require review for compliance with the new
-    pipeline rules; no application files are modified by this constitution command.
-
-Follow-up TODOs: none. All placeholders resolved.
-
-NOTE: This report is scratch material for amendment review and should be removed before
-the amended constitution is committed.
+This report is temporary review material and should be removed before commit.
 -->
 
 # Self-Checkout System Constitution
 
 ## Core Principles
 
-The principles below are ordered by priority. When two principles conflict, the
-higher-numbered priority yields to the lower-numbered one. Consistency (I) is the
-highest priority; Reliability (II) and Performance (IV) follow, consistent with the
-project's Architectural Characteristics Analysis.
+When requirements compete, correctness and recoverability take precedence over
+throughput. Explicit assignment requirements take precedence over optional design
+preferences.
 
-### I. Inventory Consistency (NON-NEGOTIABLE)
+### I. Checkout and Inventory Consistency (NON-NEGOTIABLE)
 
-Correct inventory is the highest priority; a fast checkout that produces wrong stock
-counts is a defect, not a trade-off.
+- Scanning MUST NOT decrement stock; stock changes only when a transaction completes.
+- Completion MUST atomically commit the completed-transaction state and all required
+  inventory checks and decrements, or commit none of them. Repeated completion MUST NOT
+  decrement stock again.
+- Concurrent completions MUST prevent overselling and lost updates. For each SKU,
+  `initial_stock - final_stock` MUST equal the quantity sold in completed transactions,
+  and final stock MUST NOT be negative.
+- A success response and receipt MUST follow the successful commit of the required
+  transaction and inventory changes.
 
-- Stock MUST be decremented only when a transaction completes, never when an item is
-  scanned.
-- For every SKU, `initial_stock - final_stock` MUST equal the total quantity sold in
-  completed transactions, and stock MUST never become negative.
-- Completion MUST be atomic: stock checks and decrements for all basket items, plus the
-  completed-transaction record, MUST commit together or not at all. Partial deductions
-  are forbidden.
-- Completion MUST be idempotent: repeating a completion for the same transaction MUST
-  NOT decrement stock a second time.
-- Concurrent completions MUST NOT sell the same last unit.
+Rationale: A sale is valid only when its inventory and transaction records agree under
+concurrent checkout.
 
-Rationale: Concurrent checkout stations contend for the same SKUs; correctness under
-contention is the product's core promise.
+### II. Domain Service Boundaries (NON-NEGOTIABLE)
 
-### II. Durable Completion & Reliability
+- The system MUST be decomposed by business capability into independently buildable,
+  runnable, configurable, and deployable services, each with its own runtime and entry
+  point. The preferred boundaries are Transaction (checkout lifecycle, scans, completion,
+  transaction state), Inventory (catalog, inventory queries, low-stock reporting), and
+  Analytics (popular-item processing and ranking). A different boundary MUST be justified
+  by business responsibility rather than a technical layer or table.
+- Each service MUST retain clear API, business, and persistence boundaries internally.
+  Business rules MUST NOT be placed in HTTP handlers or generic database adapters.
+- The Analytics Service MUST retain the existing Window, Ranking, and Persistence filter
+  pipeline. Services MUST NOT depend on another service's process or startup to perform
+  their own assigned responsibility, except for shared database availability.
+- Additional services MUST have a documented business need; decomposition solely to add
+  layers, tables, or infrastructure is insufficient.
 
-A successful completion MUST mean the result is durable.
+Rationale: Capability ownership makes independent deployment useful while preserving
+the separation of concerns gained in the layered and pipeline iterations.
 
-- Inventory changes and the completed-transaction record MUST be committed to the
-  database before a success/receipt response is returned.
-- Persisted popular-item results MUST be written to the database as required by the
-  contract.
-- A failure at one checkout station MUST NOT corrupt another station's basket or the
-  shared inventory.
-- In-progress (unpaid) baskets MAY be held in server memory to reduce write load; this
-  is an accepted trade-off that weakens recovery of unfinished work, and a server crash
-  MAY lose in-progress baskets. Durability guarantees apply to completed transactions
-  only.
+### III. Centralized Persistence and Durability (NON-NEGOTIABLE)
 
-Rationale: Durability is scoped to committed sales so that acknowledged purchases are
-never lost, while unfinished baskets stay cheap.
+- All domain services MUST use one centralized MySQL database. Persisted database state
+  MUST be the primary means of cross-service coordination. Services MAY access the same
+  tables when their responsibilities require it; for example, Transaction MAY update
+  inventory through JDBC within a checkout transaction.
+- Direct service-to-service REST, gRPC, or other RPC MUST NOT be introduced unless a
+  specific need is documented and the database-based approach is insufficient. gRPC is
+  not part of the required external interface.
+- Shared JDBC or persistence code SHOULD be factored into reusable components when it
+  prevents duplication. Shared components MUST NOT contain cross-domain business logic
+  or create runtime dependencies between services.
+- Accepted business events needed for analytics MUST be durably stored in MySQL. An event
+  MUST NOT be acknowledged as durably accepted before its required database transaction
+  commits. Transaction Service MUST persist the event information within the appropriate
+  transactional workflow. In-memory baskets or caches MAY accelerate access but MUST NOT
+  be the sole record of accepted events or committed transactions.
+- Acknowledged transaction state MUST be recoverable after Transaction Service restart
+  without manual reconstruction.
+- Database access MUST preserve transaction integrity and concurrency safety.
 
-### III. Contract Fidelity
+Rationale: The shared database is the assignment's coordination boundary and the source
+of truth after a service crash.
 
-The implementation exists to satisfy one fixed contract exercised by an unmodified
-client.
+### IV. REST Contract Fidelity (NON-NEGOTIABLE)
 
-- The server MUST conform to the OpenAPI specification in `spec/` for every endpoint,
-  including request/response shapes and status codes.
-- The unmodified load client MUST run against the server without changes.
-- The API contract and the load client are external inputs and MUST NOT be modified to
-  make an implementation pass.
+- The existing HTTP/REST endpoints MUST retain their request and response shapes,
+  status codes, and error semantics as specified in `spec/self-checkout-openapi.yaml`.
+  The provided load client MUST work without modification.
+- Any routing needed to expose multiple services through the existing client-facing
+  contract MUST be documented and justified. OpenAPI MAY document or validate that
+  contract without adding unnecessary runtime machinery.
+- External communication MUST remain HTTP/REST. gRPC MUST NOT be introduced without a
+  demonstrated technical requirement and a documented compatibility decision.
 
-Rationale: Week-to-week comparisons are only meaningful when the contract and test tool
-are held constant.
+Rationale: A stable contract keeps the architecture iterations comparable and protects
+existing clients.
 
-### IV. Performance Under Concurrency
+### V. Recoverable Event Processing (NON-NEGOTIABLE)
 
-Performance is prioritized after consistency and reliability, and is measured under
-concurrent load.
+- Analytics Service MUST consume persisted database events, not direct in-process calls
+  from Transaction Service. It MUST eventually reflect every relevant committed scan
+  event, including events accepted before an unexpected Analytics Service termination.
+- Processing MUST tolerate duplicate delivery, interrupted work, and restart without
+  losing or double-counting accepted events. Durable event order, checkpoint semantics,
+  and the boundary between processing and checkpoint commits MUST be defined in the
+  technical plan and tested against crash points.
+- Restart MUST reconstruct correct sliding-window and ranking state from durable data
+  without manual reconstruction of accepted transactions. Rebuilding from event history
+  MAY occur during initialization or recovery; normal queries SHOULD use the latest
+  complete materialized result.
+- Existing `AnalyticsLog`, `PersistenceFilter`, and related persistence mechanisms MUST
+  be evaluated for reuse before replacement.
 
-- Latency targets are p95 goals under the default 10-station workload: below 200 ms to
-  start a transaction, 100 ms to scan an item, and 1 s to complete a transaction. These
-  are design targets, not contract-mandated thresholds.
-- Frequent operations (start, scan) SHOULD avoid unnecessary database access; holding
-  in-progress baskets in memory is the sanctioned technique for this.
-- Performance work MUST NOT weaken the guarantees in Principles I and II.
+Rationale: A process-local queue cannot provide a recovery guarantee once Analytics runs
+separately from Transaction.
 
-Rationale: Customers repeat start and scan throughout checkout, so those paths must stay
-fast without trading away correctness or durable completion.
+### VI. Analytics Pipeline and Window Accuracy
 
-### V. Analytics Window Accuracy
+- Analytics Service MUST preserve separate Window, Ranking, and Persistence filter
+  responsibilities, ordered asynchronous queue-based pipes rather than direct downstream
+  calls, and immutable data passed between stages. In-memory sliding-window and ranking
+  structures SHOULD support incremental processing during normal operation; database
+  history remains the recoverable source.
+- Popularity MUST count accepted scans, not completed sales. The established hopping
+  window of the most recent 1,000 scans, recomputed every 500 scans, MUST retain its
+  current boundaries and business rules. Ranking MUST be deterministic, with SKU-ascending
+  tie breaking and the top 10 items for each complete window.
+- The endpoint MUST return only a complete, successfully persisted window and its
+  boundaries; it MUST NOT expose partial or in-flight state. Processing and persistence
+  MUST preserve event and window order across retry and recovery.
+- Analytics MAY be eventually consistent with committed scans. The plan MUST define the
+  visibility and failure behavior, and no accepted event may be silently discarded.
 
-Popular-item analytics MUST be accurate for the defined window, even though the ranking
-is not refreshed on every scan.
+Rationale: Durable input and incremental in-memory filters preserve both recoverability
+and the prior pipeline's efficient query path.
 
-- Scans MUST be counted over a hopping window: the most recent 1,000 scans, recomputed
-  every 500 scans.
-- Accepted scan events MUST enter the analytics pipeline in one well-defined FIFO order.
-  Concurrent producers MUST NOT mutate shared window state directly.
-- An accepted scan event MUST NOT be silently discarded. Backpressure or ingestion
-  failure MUST be explicit and observable if the pipeline cannot accept the event.
-- The top 10 items for the latest computed window MUST be persisted and returned by
-  `/analytics/popular-items` together with the corresponding window boundaries.
-- Counts and ranks MUST be correct for the complete window they describe. Ties MUST be
-  resolved deterministically by SKU in ascending order.
-- The query endpoint MUST expose only the latest successfully persisted complete window;
-  it MUST NOT expose partial or in-flight pipeline state.
+### VII. Performance and Operational Simplicity
 
-Rationale: The contract specifies a windowed aggregate, not a continuously exact
-ranking; accuracy is defined relative to a complete, ordered window.
+- Correctness and recovery guarantees MUST NOT be weakened for throughput. Services
+  SHOULD avoid redundant queries, unnecessary synchronous writes, and excessive polling;
+  required durable event writes are not optional.
+- JDBC access, indexing, connection reuse, and incremental event consumption SHOULD be
+  chosen to sustain the existing default and stress workloads. Performance results MUST
+  include throughput, error rate, and tail latency for comparison with prior iterations.
+- Message brokers, service meshes, API gateways, and other infrastructure MUST NOT be
+  added without a concrete requirement and documented benefit. Simple Java JARs are
+  acceptable; Docker MAY be used when it simplifies deployment.
+- Each service MUST document its build, startup, port, configuration, database connection,
+  and dependencies. Independent restart MUST preserve shared state correctness.
 
-### VI. Testability & Repeatability
+Rationale: This academic system needs measurable performance and repeatable operation,
+without infrastructure that obscures the required service boundaries.
 
-Every load run MUST start from the same, easily reproduced state.
+### VIII. Verification and Benchmark Evidence
 
-- The database MUST be reinitializable before each run to 2,000 catalog items with
-  10,000 units of stock per item.
-- The unchanged load client MUST be used to produce results.
-- JSON reports from the default run and the stress run MUST be saved so results can be
-  compared from identical starting conditions.
+- Existing functional behavior and relevant automated tests MUST be preserved. Tests MUST
+  cover service isolation, API compatibility, concurrent checkout and inventory
+  invariants, durable event consumption, duplicate handling, and Analytics Service crash
+  and restart at persistence, processing, and checkpoint boundaries.
+- Recovery tests MUST verify that persisted events reconstruct the correct window and
+  ranking without loss or double counting. Concurrent completion tests MUST reconcile
+  final stock with completed sales.
+- The unchanged load client MUST run against the actual distributed deployment and
+  centralized MySQL database from a reproducible baseline. Two genuine JSON reports MUST
+  be committed: one with default parameters and one using
+  `java -cp out Main --stations=100 --duration=120`. Results MUST NOT be fabricated.
 
-Rationale: Comparable measurements require identical initial conditions and a fixed
-measurement tool.
-
-### VII. Layer Boundary Integrity (NON-NEGOTIABLE)
-
-The server MUST separate its responsibilities into explicit API, transaction, analytics,
-and database-access layers.
-
-- The API layer MUST translate HTTP requests and responses and MUST delegate business
-  behavior; it MUST NOT implement inventory, transaction, analytics, or persistence
-  rules.
-- The transaction layer MUST own basket lifecycle, scan processing, completion,
-  idempotency, pricing, and inventory-consistency orchestration.
-- The analytics layer MUST own scan-window state, hopping-window recomputation, popular-
-  item ranking, and the analytics result exposed to callers.
-- The database-access layer MUST encapsulate database connections, queries, transactions,
-  and persistence mappings. Other layers MUST NOT execute database operations directly.
-- Dependencies MUST flow from the API layer into the transaction or analytics layer, and
-  from those layers into the database-access layer. Lower layers MUST NOT depend on the
-  API layer, and circular layer dependencies are forbidden.
-- Cross-layer calls MUST use explicit interfaces or module contracts that can be tested
-  independently.
-
-Rationale: Explicit boundaries make responsibilities visible and testable while allowing
-the internal implementation to change without altering the fixed HTTP contract.
-
-### VIII. Analytics Pipeline Integrity (NON-NEGOTIABLE)
-
-Windowed analytics MUST be implemented as a small collection of independent filters
-connected by asynchronous pipes. One service containing all analytics stages plus a
-background persistence task does not satisfy this principle.
-
-- The pipeline MUST contain three explicit processing stages:
-  1. The Window Filter MUST consume accepted scan events, assign their serial analytics
-     order, maintain the 1,000-scan ring buffer, and emit an immutable window snapshot
-     after the first 1,000 scans and every 500 scans thereafter.
-  2. The Ranking Filter MUST consume window snapshots, count SKUs, apply deterministic
-     ordering, select the top 10, and emit an immutable ranked-window result.
-  3. The Persistence Filter MUST consume ranked-window results and write them to the
-     database in window order, retaining and retrying the oldest failed result before a
-     newer result may become visible.
-- The filters MUST communicate through Java `BlockingQueue` pipes rather than direct
-  downstream method calls, and each filter MUST execute on its own worker thread.
-- Messages crossing pipes MUST be immutable and MUST contain the window boundaries or
-  event data required by the receiving filter; filters MUST NOT share mutable window or
-  ranking state.
-- The analytics service exposed to the rest of the application MUST act only as the
-  pipeline facade and lifecycle owner: it accepts scan events, reads the latest persisted
-  result, starts workers, and coordinates shutdown.
-- Pipeline shutdown MUST stop new ingestion, drain all events and complete windows already
-  accepted, preserve stage order, and wait for workers to terminate within a documented
-  bound. Forced termination MUST be observable and MUST NOT be reported as a clean drain.
-- Analytics delay or persistence failure MUST NOT weaken inventory, completion, or
-  idempotency guarantees. Pipeline backlog, retries, and terminal worker failures MUST be
-  observable for diagnosis.
-
-Rationale: Explicit filters and pipes make the windowed computation a genuine pipeline,
-isolate stage responsibilities, and allow ingestion, computation, and persistence to
-progress asynchronously without coupling analytics internals to checkout behavior.
+Rationale: Architecture and recovery claims require executable evidence under the same
+client and workloads used for earlier iterations.
 
 ## Architectural Constraints
 
-- **Current architecture (this iteration): layered with pipelined analytics.** The server
-  remains one deployable process and MUST retain the four layers defined in Principle VII.
-  Within the analytics layer, windowed processing MUST use the filter-and-pipe structure
-  defined in Principle VIII. The rest of the application MUST NOT be refactored into a
-  pipeline solely for architectural uniformity.
-- **API layer:** endpoint handlers/controllers, request validation, response serialization,
-  and HTTP status mapping only.
-- **Transaction layer:** transaction lifecycle, basket operations, pricing, completion,
-  and coordination of atomic inventory changes.
-- **Analytics layer:** a pipeline facade plus Window, Ranking, and Persistence filters;
-  FIFO `BlockingQueue` pipes; immutable stage messages; 1,000-scan hopping-window state;
-  recomputation every 500 scans; deterministic ranking; and popular-item query behavior.
-- **Database-access layer:** all durable reads and writes for catalog, inventory, completed
-  transactions, idempotency records, and persisted popular-item results.
-- **Persistence:** Stock items and popular-item results MUST be stored in a database
-  that can be easily reinitialized between runs. In-memory state is permitted only for
-  in-progress baskets, subject to Principle II.
-- **Scale envelope:** The system MUST correctly handle both the default run (10
-  concurrent stations for 60 s) and the stress run (100 stations for 120 s), preserving
-  inventory correctness in both. Throughput, error rate, and p95/p99 latency SHOULD be
-  captured for both runs to characterize behavior under increased load.
-- **Submission evidence:** The repository directory for this iteration MUST contain two
-  timestamped JSON reports produced by the unchanged load client: one default run and one
-  stress run. Each report MUST identify the settings used so the workloads are
-  reproducible.
+- This iteration MUST begin from the `pipeline-architecture` implementation and proceed
+  through incremental refactoring. Tested business logic, persistence adapters, HTTP
+  handlers, and pipeline filters SHOULD be reused where practical. Unrelated feature
+  changes SHOULD be avoided.
+- Transaction Service owns checkout lifecycle and atomic completion; Inventory Service
+  owns catalog and low-stock queries; Analytics Service owns persisted-event consumption,
+  windowing, ranking, and popular-item queries. Shared table access does not transfer
+  ownership of those business responsibilities.
+- Every service MUST connect to the same configurable MySQL instance. The existing REST
+  routes MUST remain reachable to the unchanged client; any routing arrangement MUST be
+  explicit in deployment documentation.
+- The system MUST preserve the established 2,000-item, 10,000-units-per-item reset
+  baseline for comparable runs. Default and stress reports MUST identify their settings
+  and the distributed deployment used.
 
 ## Development Workflow & Quality Gates
 
-- Work follows the Spec Kit flow: constitution → specify → plan → tasks → implement.
-  Feature specs and plans MUST be consistent with this constitution.
-- **Contract gate:** A change MUST NOT be considered done if it breaks conformance to the
-  OpenAPI spec or requires modifying the load client.
-- **Consistency gate:** Changes touching scan, completion, or inventory MUST preserve the
-  invariants in Principle I, including behavior under concurrent completion and duplicate
-  completion.
-- **Layering gate:** Plans, code reviews, and tests MUST verify that every server component
-  has one declared layer, respects Principle VII's dependency direction, and does not
-  bypass the transaction, analytics, or database-access abstractions.
-- **Pipeline gate:** Plans, code reviews, and tests MUST verify three independently
-  executable analytics filters, queue-only stage communication, FIFO/no-silent-loss
-  ingestion, exact 1,000/500 window boundaries, deterministic ranking, ordered persistence
-  and retry, and drain-aware shutdown as required by Principles V and VIII.
-- **Validation gate:** Both the default and stress load runs MUST be executed with the
-  unmodified client from a freshly reinitialized database, and their JSON reports saved,
-  before results are reported or submitted.
-- Trade-offs that touch prioritized characteristics (consistency, reliability,
-  performance) MUST be made explicit and MUST respect the priority order in Core
-  Principles.
+- Work MUST follow constitution → specification → plan → tasks → implementation. The
+  specification and plan MUST trace service ownership, shared tables, event durability,
+  recovery, routing, and deployment back to these principles.
+- Plans MUST define event ordering, checkpoint and restart rules, transaction boundaries,
+  failure behavior, and the consistency delay visible to analytics users. Significant
+  changes to API behavior, consistency, or analytics semantics MUST be justified.
+- Reviews MUST verify independent service build and restart, no unapproved runtime
+  service coupling, transactional inventory invariants, unchanged REST behavior, and
+  crash-safe analytics without loss or double counting.
+- Completion requires passing relevant automated tests and producing both reproducible
+  benchmark JSON files from the distributed deployment and centralized database.
 
 ## Governance
 
-- This constitution supersedes other project practices for the Self-Checkout System.
-  Where a plan, task, or implementation conflicts with it, the constitution prevails.
-- **Amendments** MUST be documented in this file, include a rationale, and update the
-  version and amendment date. The Sync Impact Report at the top records each change and
-  is expected to be removed before the amended file is committed.
-- **Versioning policy** (semantic):
-  - MAJOR: backward-incompatible governance or principle removals/redefinitions.
-  - MINOR: a new principle/section or materially expanded guidance.
-  - PATCH: clarifications, wording, and non-semantic refinements.
-- **Compliance review:** Specs, plans, and implementation changes MUST be checked against
-  the Core Principles and Quality Gates before work is considered complete. Any accepted
-  deviation MUST be justified in writing in the relevant spec or plan.
+- This constitution governs subsequent specifications, plans, tasks, implementation,
+  and code reviews. A conflicting artifact MUST be corrected or an explicit deviation
+  from a MUST requirement MUST be documented and justified before acceptance.
+- Amendments MUST record their rationale, affected principles, version, and amendment
+  date in this file. The Sync Impact Report is review material and MUST be removed before
+  the amended constitution is committed.
+- Semantic versioning applies: MAJOR for incompatible principle or governance changes,
+  MINOR for new principles or material additions, and PATCH for non-semantic corrections.
+- Compliance reviews MUST prioritize simplicity, correctness, compatibility, durability,
+  and independent deployability. Implementation choices belong in the relevant
+  specification or plan unless a principle requires them.
 
-**Version**: 3.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-29
+**Version**: 4.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-10-11

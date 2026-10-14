@@ -52,6 +52,17 @@ public class ConcurrentCompletionTest {
 
     @Test
     void concurrentCompletion_exactlyOneSucceeds_stockNeverNegative() throws Exception {
+        int originalStock;
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
+             PreparedStatement ps = conn.prepareStatement(
+                 "SELECT stock_quantity FROM inventory WHERE sku = ?")) {
+            ps.setString(1, TEST_SKU);
+            try (ResultSet rows = ps.executeQuery()) {
+                assertTrue(rows.next());
+                originalStock = rows.getInt(1);
+            }
+        }
+        AtomicInteger successes = new AtomicInteger(0);
         // Set SKU stock to exactly 1 unit via direct DB access
         try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
              PreparedStatement ps = conn.prepareStatement(
@@ -60,6 +71,7 @@ public class ConcurrentCompletionTest {
             assertEquals(1, ps.executeUpdate(), "SKU must exist in inventory");
         }
 
+        try {
         // Start two transactions, each scanning the last unit
         String tx1 = startAndGetId("station-concurrent-A");
         String tx2 = startAndGetId("station-concurrent-B");
@@ -68,7 +80,7 @@ public class ConcurrentCompletionTest {
 
         // Complete both concurrently via real threads
         ExecutorService exec = Executors.newFixedThreadPool(2);
-        AtomicInteger successes  = new AtomicInteger(0);
+
         AtomicInteger rejections = new AtomicInteger(0);
 
         Callable<Integer> completer1 = () -> {
@@ -95,6 +107,23 @@ public class ConcurrentCompletionTest {
         assertEquals(1, rejections.get(),
             "Exactly one completion should be rejected");
 
+        // The losing checkout remains OPEN with its committed basket for a later retry.
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
+             PreparedStatement ps = conn.prepareStatement(
+                 "SELECT status FROM `transaction` WHERE transaction_id IN (?,?)")) {
+            ps.setString(1, tx1);
+            ps.setString(2, tx2);
+            try (ResultSet rs = ps.executeQuery()) {
+                assertTrue(rs.next());
+                String firstStatus = rs.getString(1);
+                assertTrue(rs.next());
+                String secondStatus = rs.getString(1);
+                assertEquals(java.util.Set.of("COMPLETED", "OPEN"),
+                    java.util.Set.of(firstStatus, secondStatus));
+                assertFalse(rs.next());
+            }
+        }
+
         // Verify final stock is exactly 0, never negative
         try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
              PreparedStatement ps = conn.prepareStatement(
@@ -106,6 +135,19 @@ public class ConcurrentCompletionTest {
                 assertEquals(0, finalStock,
                     "Final stock must be exactly 0 (one unit sold, none negative)");
             }
+        }
+        } finally {
+            restoreStock(originalStock - successes.get());
+        }
+    }
+
+    private static void restoreStock(int quantity) throws Exception {
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
+             PreparedStatement ps = conn.prepareStatement(
+                 "UPDATE inventory SET stock_quantity=? WHERE sku=?")) {
+            ps.setInt(1, quantity);
+            ps.setString(2, TEST_SKU);
+            assertEquals(1, ps.executeUpdate());
         }
     }
 

@@ -30,22 +30,11 @@ public class RingBufferWindowMathTest {
     }
 
     @Test
-    void restartSkipIsConsumedOnlyByTheFirstBoundary() {
-        var beforeBoundary = WindowMath.checkpointDecision(1499, true);
-        assertFalse(beforeBoundary.checkpoint());
-        assertTrue(beforeBoundary.skipNextCheckpoint());
-
-        var skipped = WindowMath.checkpointDecision(1500, beforeBoundary.skipNextCheckpoint());
-        assertFalse(skipped.checkpoint());
-        assertFalse(skipped.skipNextCheckpoint());
-
-        var resumed = WindowMath.checkpointDecision(2000, skipped.skipNextCheckpoint());
-        assertTrue(resumed.checkpoint());
-        assertFalse(resumed.skipNextCheckpoint());
-
-        assertFalse(WindowMath.checkpointDecision(500, false).checkpoint(),
-            "A fresh run must not persist a partial window");
-        assertTrue(WindowMath.checkpointDecision(1000, false).checkpoint(),
-            "A fresh run must persist its first full window");
+    void restartUsesAbsoluteCheckpointWithoutSkippingTheNextOverlap() {
+        assertTrue(WindowMath.isCheckpointBoundary(1000));
+        assertTrue(WindowMath.isCheckpointBoundary(1500));
+        assertEquals(501, WindowMath.windowStart(1500));
+        assertFalse(WindowMath.isCheckpointBoundary(1499));
+        assertTrue(WindowMath.isCheckpointBoundary(2000));
     }
 }

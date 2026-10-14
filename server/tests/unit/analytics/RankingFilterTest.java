@@ -58,4 +58,25 @@ class RankingFilterTest {
         assertEquals(List.of(500L, 500L),
                 ranked.ranks().stream().map(PipelineMessage.RankedItem::scanCount).toList());
     }
+    @Test
+    void tiedElevenSkusKeepTheLexicographicallyFirstTenAtAnAbsoluteBoundary()
+            throws Exception {
+        BlockingQueue<PipelineMessage.WindowMessage> input = new LinkedBlockingQueue<>();
+        BlockingQueue<PipelineMessage.RankingMessage> output = new LinkedBlockingQueue<>();
+        Thread worker = new Thread(new RankingFilter(input, output));
+        worker.start();
+        List<String> skus = new ArrayList<>();
+        for (char sku = 'A'; sku <= 'K'; sku++) {
+            for (int count = 0; count < 90; count++) skus.add(String.valueOf(sku));
+        }
+        for (int count = 0; count < 10; count++) skus.add("A");
+        input.add(new PipelineMessage.WindowSnapshot(1001, 2000, skus));
+        input.add(PipelineMessage.WindowEnd.INSTANCE);
+        worker.join(2000);
+        var ranked = (PipelineMessage.RankedWindow) output.take();
+        assertEquals(2000, ranked.windowEnd());
+        assertEquals(List.of("A", "B", "C", "D", "E", "F", "G", "H", "I", "J"),
+                ranked.ranks().stream().map(PipelineMessage.RankedItem::sku).toList());
+        assertEquals(100, ranked.ranks().getFirst().scanCount());
+    }
 }

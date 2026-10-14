@@ -4,8 +4,8 @@ import api.CatalogHttpHandler;
 import api.InventoryHttpHandler;
 import database.StoreFailure;
 import org.junit.jupiter.api.Test;
-import transaction.CatalogOperations;
-import transaction.InventoryOperations;
+import inventory.CatalogOperations;
+import inventory.InventoryOperations;
 
 import java.math.BigDecimal;
 import java.time.Instant;

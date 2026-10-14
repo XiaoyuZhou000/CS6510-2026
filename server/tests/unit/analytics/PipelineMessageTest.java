@@ -12,7 +12,9 @@ import static org.junit.jupiter.api.Assertions.*;
 class PipelineMessageTest {
     @Test
     void acceptedScanValidatesAndTypedMarkersAreStableValues() {
-        assertEquals("SKU-1", new PipelineMessage.AcceptedScan("SKU-1").sku());
+        assertEquals("SKU-1", new PipelineMessage.AcceptedScan(7, "SKU-1").sku());
+        assertEquals(7, new PipelineMessage.AcceptedScan(7, "SKU-1").position());
+        assertThrows(IllegalArgumentException.class, () -> new PipelineMessage.AcceptedScan(0, "SKU-1"));
         assertThrows(IllegalArgumentException.class, () -> new PipelineMessage.AcceptedScan(" "));
         assertThrows(IllegalArgumentException.class,
                 () -> new PipelineMessage.AcceptedScan("123456789012345678901"));

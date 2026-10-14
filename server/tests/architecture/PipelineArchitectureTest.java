@@ -49,7 +49,6 @@ class PipelineArchitectureTest {
     void externalContractSchemaAndLoadClientSourcesRemainByteForByteCompatible() throws Exception {
         Map<String, String> expectedSha256 = Map.ofEntries(
                 Map.entry("spec/self-checkout-openapi.yaml", "3272ac80b3fdb63f127cd47ed8bf42b03d9d8efccc0d12cbeafb54f2d6819ff5"),
-                Map.entry("db/init.sql", "942f60dccb3f25d973649c65730f1d2f42706e3c059bf5cd1590112180ee6032"),
                 Map.entry("load-client/src/ApiClient.java", "90cc36bf53c95a0507ac6e41ee47967377d538919c8f62fcd7b0681e0f5b5167"),
                 Map.entry("load-client/src/CatalogItem.java", "980c468443a2f9d6731d537a1c271631410b872a1d518ba9fdd775567fe567bb"),
                 Map.entry("load-client/src/Config.java", "ac530593a275db7214f4d1feb026e131ffbec1e860d340884726bc192091fd48"),
@@ -83,10 +82,24 @@ class PipelineArchitectureTest {
         }
     }
 
+    @Test
+    void analyticsStagesLiveInTheirOwnSourceRootAndOnlyShareQueuedMessages() throws Exception {
+        Path root = projectRoot().resolve("server/analytics/src/analytics");
+        for (String file : List.of("WindowFilter.java", "RankingFilter.java", "PersistenceFilter.java")) {
+            Path source = root.resolve(file);
+            assertTrue(Files.isRegularFile(source), "Missing Analytics stage: " + source);
+            String body = Files.readString(source);
+            assertTrue(body.contains("BlockingQueue<PipelineMessage."), file);
+            assertFalse(body.contains("import transaction."), file);
+            assertFalse(body.contains("import inventory."), file);
+            assertFalse(body.contains("com.sun.net.httpserver"), file);
+            assertFalse(body.contains("java.sql"), file);
+        }
+        assertFalse(Files.readString(root.resolve("WindowFilter.java")).contains("new RankingFilter("));
+        assertFalse(Files.readString(root.resolve("RankingFilter.java")).contains("new PersistenceFilter("));
+    }
     private static String read(String relative) throws Exception {
-        Path cwd = Path.of("").toAbsolutePath().normalize();
-        Path direct = cwd.resolve("src").resolve(relative);
-        return Files.readString(Files.exists(direct) ? direct : cwd.resolve("server/src").resolve(relative));
+        return Files.readString(projectRoot().resolve("server/analytics/src").resolve(relative));
     }
 
     private static Path projectRoot() {

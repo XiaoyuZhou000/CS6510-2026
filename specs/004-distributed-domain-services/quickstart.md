@@ -1,0 +1,102 @@
+# Quickstart: Validate the Distributed Deployment
+
+This guide uses the implemented service scripts, router, durable database tables, and recovery tests. See [service-deployment.md](contracts/service-deployment.md), [public-http-and-routing.md](contracts/public-http-and-routing.md), and [data-model.md](data-model.md) for the expected boundaries and data checks.
+
+## Prerequisites and baseline
+
+- Java 21, `javac`, Bash, MySQL 8.0+ with Connector/J from `server/lib/`, the MySQL CLI, and Nginx for the static route proxy.
+- One reachable MySQL database for all three service processes. Set `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` for each process; default local DB port is 3307 unless overridden. Do not put the password in reports.
+- Run commands from the repository root unless a `cd` is shown. Use separate terminals for the three service commands and the proxy. Keep the proxy on port 8080 for the unchanged client.
+
+Reset **only a disposable assignment database**. Stop all service processes before each reset, because the reset drops and recreates the database. On Windows, the existing reset command is:
+
+```powershell
+./db/init-db.ps1 -Port 3307
+```
+
+The reset should report 2,000 catalog and inventory rows and 20,000,000 total initial units. Confirm singleton scan sequence and analytics checkpoint values are zero before beginning a run. Restart all services after reset.
+
+## Build and start
+
+```bash
+./server/build.sh transaction
+./server/build.sh inventory
+./server/build.sh analytics
+
+# In separate terminals, with the same DB_* configuration:
+./server/run-transaction.sh       # default private port 8081
+./server/run-inventory.sh         # default private port 8082
+./server/run-analytics.sh         # default private port 8083
+
+# In a fourth terminal; config exposes the stable public port 8080:
+mkdir -p logs temp
+nginx -p "$(pwd)/" -c deploy/nginx.conf
+```
+
+`curl http://localhost:8080/items` should return 2,000 items. Route-specific validation must use port 8080 to test the actual client-facing path. A stopped service may make its own routes return proxy 502/503; unrelated routes must keep working.
+
+## Automated validation
+
+```bash
+./server/build-tests.sh
+./server/run-tests.sh -DSERVER_BASE_URL=http://localhost:8080
+```
+
+Require zero failed **and zero skipped live** contract/integration checks. The adapted suite must cover the original seven-route contract, separate service startup/restart, accepted-scan durability, concurrent completion and stock conservation, ordered event positions, duplicate replay, crash before/after window persistence, and recovery after an Analytics outage. `db/validate-invariants.sql` must find no negative stock or completed-sale reconciliation mismatch; it also compares accepted scans with the event sequence and independently recomputes persisted windows.
+
+## Directed recovery checks
+
+1. Start a transaction through port 8080, scan one SKU twice and a second SKU once, record the returned `transactionId`, `itemCount=3`, running total, and `startedAt`. Restart **only** Transaction Service. `GET /transactions/{id}` must still be `OPEN` with those exact values. Complete it once; the receipt must contain all three units. Complete again; expect HTTP 409 `TRANSACTION_NOT_OPEN` and no second stock deduction.
+2. Stop Analytics Service, submit at least 1,500 successful scans through Transaction Service, and confirm scans still succeed. Restart only Analytics. Poll `/analytics/popular-items` until the latest committed window ends at 1,500. The 1–1,000 and 501–1,500 windows must match an independent count over `accepted_scan`, with descending counts, ascending SKU ties, and at most ten ranks. Before the first 1,000 scans, expect the existing empty response.
+3. Run fault-injection tests at event read, in-memory window assembly, before window commit, and after window commit but before worker acknowledgement. In each case restart Analytics and wait for catch-up. Assert one header per eligible `window_end`, no partial ranks, contiguous checkpoint progression, and no missing accepted position. Repeated delivery of one position or ranked boundary must not add a count or another visible window.
+4. Restart Inventory Service alone, verify `/items` and `/inventory/low-stock` recover, and verify Transaction checkout continues during its outage. Repeat the owner outage check for Transaction and Analytics. A reachable handler with MySQL unavailable should return the existing JSON 500 `INTERNAL_ERROR`; no uncommitted operation receives a success response.
+
+## Required load evidence
+
+For **each** run below, stop all service processes, reset the database as above, restart the three services and proxy, and run the unchanged client from `load-client/`. The new reports belong under `load-client/reports/service-based-architecture/`. Use distinct run-specific report directories or copy the generated JSON after each command; preserve the original client-generated bytes.
+
+```bash
+cd load-client
+./build.sh
+java -cp out Main
+```
+
+After a **separate fresh reset** and service restart:
+
+```bash
+cd load-client
+java -cp out Main --stations=100 --duration=120
+```
+
+Both commands must target the distributed proxy on `http://localhost:8080` and produce distinct genuine JSON files. Record their settings, throughput, per-operation success/error rates, p95/p99 latency, service ports/versions, and baseline reset in the report manifest. After the client stops, allow Analytics to reach the highest eligible scan boundary before comparing all window counts and rank ordering to `accepted_scan`. Run inventory reconciliation against completed transaction lines and record recovery/service-isolation results with the reports. Prior pipeline JSON files do not satisfy this feature's evidence requirement.
+
+## Verified Windows commands (2026-10-13)
+
+With JDK 21 and Git Bash, build and compile tests from the repository root:
+
+```powershell
+& 'C:\Program Files\Git\bin\bash.exe' -c 'export PATH="/c/Program Files/Git/usr/bin:/c/Program Files/Git/mingw64/bin:/c/Program Files/Java/jdk-21/bin:$PATH"; server/build-tests.sh'
+```
+
+Set the same `DB_*` values for all three separate JVMs. Run `./server/run-transaction.sh`, `./server/run-inventory.sh`, and `./server/run-analytics.sh` in three Git Bash terminals. Stop any one with Ctrl+C, then rerun only its command. The direct Java 21 classpaths and entry points are in [server/README.md](../../server/README.md).
+
+For Nginx on Windows, create an ASCII-only runtime prefix containing `conf/`, `logs/`, and `temp/`; copy `deploy/nginx.conf` to `conf/nginx.conf`. Nginx 1.31.6 was used for verification. Replace these paths, then test, start, and later stop it:
+
+```powershell
+$nginx = 'C:\path\to\nginx.exe'
+$prefix = 'C:\path\to\nginx-runtime'
+& $nginx -p "$prefix/" -c conf/nginx.conf -t
+Start-Process -FilePath $nginx -WorkingDirectory $prefix -ArgumentList @('-p',"$prefix/",'-c','conf/nginx.conf') -WindowStyle Hidden
+& $nginx -p "$prefix/" -c conf/nginx.conf -s stop
+```
+
+For the full live suite, set `NGINX_BIN` to the Nginx executable and `SERVER_BASE_URL=http://127.0.0.1:8080` before `./server/run-tests.sh`. The 2026-10-13 run had 139 successes, zero failures, and one intentionally disabled destructive reset test. The independent restart smoke suite and routing tests passed. The router now reuses upstream connections; the initial diagnostic run without reuse exhausted Windows temporary TCP ports.
+
+After each workload, wait for Analytics to reach the highest eligible accepted-scan boundary, then run:
+
+```powershell
+Get-Content -LiteralPath 'db/validate-invariants.sql' -Raw |
+  & 'C:\Program Files\MySQL\MySQL Server 8.4\bin\mysql.exe' -h 127.0.0.1 -P 3307 -u root -p cs6510_selfcheckout
+```
+
+The genuine default and stress reports, per-run invariant output, and artifact hashes are in [the evidence manifest](../../load-client/reports/service-based-architecture/README.md).

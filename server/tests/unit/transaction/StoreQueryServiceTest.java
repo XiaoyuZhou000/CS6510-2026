@@ -3,7 +3,7 @@ package unit.transaction;
 import database.CatalogStore;
 import database.InventoryStore;
 import org.junit.jupiter.api.Test;
-import transaction.StoreQueryService;
+import inventory.StoreQueryService;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;

@@ -70,4 +70,71 @@ class WindowFilterTest {
     private static String sku(int number) {
         return "S" + String.format("%04d", number);
     }
+    @Test
+    void positionedReplayPrewarmsOverlapAndIgnoresExactDuplicate() throws Exception {
+        BlockingQueue<PipelineMessage.IngressMessage> input = new LinkedBlockingQueue<>();
+        BlockingQueue<PipelineMessage.WindowMessage> output = new LinkedBlockingQueue<>();
+        List<PipelineMessage.AcceptedScan> prewarm = new ArrayList<>();
+        for (int position = 1; position <= 1000; position++) {
+            prewarm.add(new PipelineMessage.AcceptedScan(position, "A"));
+        }
+        Thread worker = new Thread(new WindowFilter(input, output, 1000, prewarm));
+        worker.start();
+        input.add(new PipelineMessage.AcceptedScan(1000, "A"));
+        for (int position = 1001; position <= 1500; position++) {
+            input.add(new PipelineMessage.AcceptedScan(position, "B"));
+        }
+        input.add(PipelineMessage.IngressEnd.INSTANCE);
+        worker.join(2000);
+        assertFalse(worker.isAlive());
+        var window = assertInstanceOf(PipelineMessage.WindowSnapshot.class, output.take());
+        assertEquals(501, window.windowStart());
+        assertEquals(1500, window.windowEnd());
+        assertEquals(500, window.skus().stream().filter("A"::equals).count());
+        assertEquals(500, window.skus().stream().filter("B"::equals).count());
+        assertInstanceOf(PipelineMessage.WindowEnd.class, output.take());
+    }
+
+    @Test
+    void positionedReplayRejectsGapAndConflictingDuplicate() throws Exception {
+        for (PipelineMessage.AcceptedScan bad : List.of(
+                new PipelineMessage.AcceptedScan(2, "A"),
+                new PipelineMessage.AcceptedScan(1, "B"))) {
+            BlockingQueue<PipelineMessage.IngressMessage> input = new LinkedBlockingQueue<>();
+            BlockingQueue<PipelineMessage.WindowMessage> output = new LinkedBlockingQueue<>();
+            java.util.concurrent.atomic.AtomicReference<Throwable> failure =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            Thread worker = new Thread(new WindowFilter(input, output, 0, List.of()));
+            worker.setUncaughtExceptionHandler((thread, thrown) -> failure.set(thrown));
+            worker.start();
+            if (bad.position() == 1) input.add(new PipelineMessage.AcceptedScan(1, "A"));
+            input.add(bad);
+            worker.join(2000);
+            assertInstanceOf(IllegalStateException.class, failure.get());
+            assertTrue(output.isEmpty());
+        }
+    }
+    @Test
+    void positionedStreamEmitsExactlyTheAbsoluteThousandFiveHundredAndTwoThousandEnds()
+            throws Exception {
+        BlockingQueue<PipelineMessage.IngressMessage> input = new LinkedBlockingQueue<>();
+        BlockingQueue<PipelineMessage.WindowMessage> output = new LinkedBlockingQueue<>();
+        Thread worker = new Thread(new WindowFilter(input, output, 0, List.of()));
+        worker.start();
+        for (int position = 1; position <= 2000; position++) {
+            input.add(new PipelineMessage.AcceptedScan(position, sku(position)));
+        }
+        input.add(PipelineMessage.IngressEnd.INSTANCE);
+        worker.join(2000);
+        assertFalse(worker.isAlive());
+        List<PipelineMessage.WindowMessage> messages = new ArrayList<>(output);
+        assertEquals(4, messages.size());
+        var first = (PipelineMessage.WindowSnapshot) messages.get(0);
+        var second = (PipelineMessage.WindowSnapshot) messages.get(1);
+        var third = (PipelineMessage.WindowSnapshot) messages.get(2);
+        assertEquals(List.of(1000L, 1500L, 2000L),
+                List.of(first.windowEnd(), second.windowEnd(), third.windowEnd()));
+        assertEquals(first.skus().subList(500, 1000), second.skus().subList(0, 500));
+        assertEquals(second.skus().subList(500, 1000), third.skus().subList(0, 500));
+    }
 }

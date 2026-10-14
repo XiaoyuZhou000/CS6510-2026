@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p out/test
+
+# Compile tests against the independent service artifacts only.
+./build.sh
 
 # Keep test discovery recursive as suites move into layer-specific directories.
 SOURCES=()
@@ -21,6 +24,6 @@ esac
 JUNIT_CONSOLE="lib/junit-platform-console-standalone-1.11.0.jar"
 MYSQL_CONNECTOR="lib/mysql-connector-j-9.0.0.jar"
 javac --release 21 -d out/test \
-  -cp "${JUNIT_CONSOLE}${SEP}${MYSQL_CONNECTOR}${SEP}out/main" \
+  -cp "${JUNIT_CONSOLE}${SEP}${MYSQL_CONNECTOR}${SEP}out/common.jar${SEP}out/transaction.jar${SEP}out/inventory.jar${SEP}out/analytics.jar" \
   "${SOURCES[@]}"
 echo "Tests compiled. Run with: ./run-tests.sh"

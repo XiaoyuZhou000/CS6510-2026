@@ -1,6 +1,7 @@
 package integration;
 
 import analytics.AnalyticsService;
+import database.JdbcAcceptedScanReader;
 import org.junit.jupiter.api.Test;
 import org.opentest4j.TestAbortedException;
 import support.CheckoutDatabase;
@@ -21,10 +22,12 @@ class AnalyticsCheckoutIsolationTest {
     void failingAnalyticsPersistenceCannotCorruptConcurrentScanAndCompletionTraffic() throws Exception {
         FakePopularWindowStore analyticsStore = new FakePopularWindowStore();
         analyticsStore.writeGate().fail();
-        AnalyticsService analytics = new AnalyticsService(analyticsStore);
         int stations = 20;
         int scansPerStation = 75;
-        try (CheckoutDatabase db = open(2_000, analytics::recordAcceptedScan)) {
+        try (CheckoutDatabase db = open(2_000)) {
+            AnalyticsService analytics = new AnalyticsService(analyticsStore,
+                    new JdbcAcceptedScanReader(db.pool));
+            try {
             List<String> transactionIds = new ArrayList<>();
             for (int station = 0; station < stations; station++) {
                 transactionIds.add(db.checkout.start(
@@ -61,14 +64,15 @@ class AnalyticsCheckoutIsolationTest {
                     () -> analyticsStore.committedWindows().size() == 2);
             assertEquals(List.of(1000L, 1500L), analyticsStore.committedWindows().stream()
                     .map(window -> window.windowEnd()).toList());
-        } finally {
-            analytics.shutdown();
+            } finally {
+                analytics.shutdown();
+            }
         }
     }
 
-    private static CheckoutDatabase open(int stock, transaction.AcceptedScanSink sink) throws Exception {
+    private static CheckoutDatabase open(int stock) throws Exception {
         try {
-            return new CheckoutDatabase(stock, sink);
+            return new CheckoutDatabase(stock);
         } catch (SQLException unavailable) {
             throw new TestAbortedException("MySQL unavailable for isolation integration test", unavailable);
         }

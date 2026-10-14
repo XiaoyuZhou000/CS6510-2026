@@ -1,164 +1,81 @@
-# Self-Checkout Layered Server
+# Self-Checkout Distributed Services
 
-This directory contains the Java 21 layered server for the self-checkout API. It uses the JDK HTTP server, JDBC, and the vendored jars in `lib/`; no Maven or Gradle installation is required.
+Java 21, MySQL 8.0+, Bash, Nginx, and the vendored Connector/J and JUnit JARs are required. The three domain services are separate JVMs over one MySQL database. Nginx provides the unchanged public base URL, `http://localhost:8080`; the load client and contract tests use that URL.
 
-## Package layout
+| Service | Private port | Public routes | Artifact / entry point |
+|---|---:|---|---|
+| Transaction | 8081 | `POST /transactions`, `POST /transactions/{id}/items`, `POST /transactions/{id}/complete`, `GET /transactions/{id}` | `out/transaction.jar`, `transaction.TransactionMain` |
+| Inventory | 8082 | `GET /items`, `GET /inventory/low-stock` | `out/inventory.jar`, `inventory.InventoryMain` |
+| Analytics | 8083 | `GET /analytics/popular-items` | `out/analytics.jar`, `analytics.AnalyticsMain` |
 
-Production code under `src/` has one owner per package:
+`common.jar` contains only shared HTTP/JSON and JDBC utilities. Each service JAR contains its own API, business, and database adapters and requires only `common.jar` plus `lib/mysql-connector-j-9.0.0.jar` at runtime. Transaction validates prices and deducts stock directly in the shared database transaction. Analytics polls durable `accepted_scan` rows and checkpoints complete windows; neither service calls a peer process.
 
-- `api/` — HTTP routing, validation, JSON translation, and the `api.Main` composition root
-- `transaction/` — catalog views, basket lifecycle, scans, completion, and inventory query policy
-- `analytics/` — the accepted-scan pipeline, lifecycle, structured operational logging, and
-  committed popular-item queries
-- `database/` — store contracts, connection pooling, JDBC queries, and atomic persistence
+## Build and configure
 
-Tests under `tests/` are grouped into `architecture/`, `unit/`, `contract/`, `database/`,
-`integration/`, and shared `support/`. Both build scripts discover Java files recursively, compile
-production classes to `out/main`, and compile tests to `out/test`.
-
-## Analytics pipeline
-
-Accepted scans move through three independently executing filters in a fixed order:
-
-```text
-AnalyticsService -> Window Filter -> Ranking Filter -> Persistence Filter -> PopularWindowStore
-```
-
-- The **Window Filter** assigns the single analytics order, owns the 1,000-scan ring, and emits
-  immutable complete snapshots at `[1,1000]`, `[501,1500]`, and each later 500-event hop.
-- The **Ranking Filter** counts a snapshot, sorts by count descending then SKU ascending, and emits
-  at most ten contiguous ranks.
-- The **Persistence Filter** commits ranked windows atomically and in order. A failed oldest window
-  remains in place and retries after 50 ms, 200 ms, and then capped 1-second waits; newer windows
-  cannot overtake it.
-
-Each arrow between filters is an unbounded FIFO `LinkedBlockingQueue`; filters never call one
-another directly. `AnalyticsService` owns the three named workers, accepts scans under a short
-lifecycle lock, and reads results only from committed storage. During shutdown it rejects new
-ingestion, places one end marker, drains stage by stage, and joins all workers against one deadline.
-Timeout, caller interruption, or an unexpected worker failure interrupts peers and produces a
-structured forced/failure outcome rather than reporting a clean drain.
-
-This is an internal decomposition only. `spec/self-checkout-openapi.yaml`, `db/init.sql`, and the
-load client remain unchanged. In particular, `GET /analytics/popular-items` keeps the same fields,
-limit behavior, empty response, and status mappings, and it never exposes queues or in-flight state.
-
-## Prerequisites
-
-- JDK 21 or newer (`java` and `javac` on `PATH`)
-- Bash (Git Bash, WSL, Linux, or macOS) for the `*.sh` scripts
-- MySQL 8.0 or newer
-- The MySQL command-line client for `db/init-db.ps1`
-
-The examples below assume commands are run from the repository root. The default database endpoint is `127.0.0.1:3307`, the database name is `cs6510_selfcheckout`, and the default database user is `root`.
-
-## Build and run
-
-Build the server:
+From `server/` with JDK 21 on `PATH`:
 
 ```bash
-cd server
-./build.sh
+./build.sh                 # all services and common
+./build.sh transaction     # common and Transaction only
+./build.sh inventory       # common and Inventory only
+./build.sh analytics       # common and Analytics only
 ```
 
-Run it with defaults:
+Set the **same** `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` for each JVM. Defaults are `127.0.0.1`, `3307`, `cs6510_selfcheckout`, `root`, and an empty password. `DB_POOL_SIZE` defaults to 10. Pass passwords by environment variable rather than a command argument. `TRANSACTION_PORT`, `INVENTORY_PORT`, and `ANALYTICS_PORT` override the private defaults; an optional numeric argument to each run script overrides its port. The fixed Nginx map in `deploy/nginx.conf` assumes 8081/8082/8083, so update the map when overriding a private port.
+
+## Start, stop, and restart independently
+
+Run these in three separate Bash terminals from `server/`:
 
 ```bash
-./run.sh
+./run-transaction.sh
+./run-inventory.sh
+./run-analytics.sh
 ```
 
-`run.sh` accepts these positional arguments, in order:
+Each script checks for its own JAR, `common.jar`, and Connector/J, then replaces the shell with its JVM. Stop a service with Ctrl+C in **its** terminal and rerun only that script to restart it. The other two JVMs and Nginx stay up. On Windows, use Git Bash with JDK 21 on `PATH`; the scripts choose the Windows `;` classpath separator. The equivalent direct Windows launch, useful for a service manager, is `java -cp "out/transaction.jar;out/common.jar;lib/mysql-connector-j-9.0.0.jar" transaction.TransactionMain` from `server/`, substituting the service JAR and main class for the other two.
 
-```text
-./run.sh [port] [dbHost] [dbPort] [dbName] [dbUser] [dbPassword]
-```
-
-For example:
+Start Nginx from the repository root on Unix:
 
 ```bash
-./run.sh 8080 127.0.0.1 3307 cs6510_selfcheckout root secret
+mkdir -p logs temp
+nginx -p "$(pwd)/" -c deploy/nginx.conf
+# later: nginx -p "$(pwd)/" -c deploy/nginx.conf -s stop
 ```
 
-The same settings can be supplied through `SERVER_PORT`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Positional arguments take precedence. `DB_POOL_SIZE` optionally controls the JDBC pool size (default: 10).
-
-| Environment variable | Default | Purpose |
-|---|---|---|
-| `SERVER_PORT` | `8080` | HTTP listen port |
-| `DB_HOST` | `127.0.0.1` | MySQL host |
-| `DB_PORT` | `3307` | MySQL port |
-| `DB_NAME` | `cs6510_selfcheckout` | MySQL database |
-| `DB_USER` | `root` | MySQL user |
-| `DB_PASSWORD` | empty | MySQL password |
-| `DB_POOL_SIZE` | `10` | JDBC connection-pool size |
-
-To avoid placing a password in shell history, prefer the environment variable:
+On Windows, use an extracted official Nginx for Windows distribution. Create an ASCII-only runtime directory with `conf/`, `logs/`, and `temp/`, copy `deploy/nginx.conf` to `conf/nginx.conf`, then run the following PowerShell commands, replacing the two paths with your local paths:
 
 ```powershell
-$env:DB_PASSWORD = Read-Host "MySQL password"
-bash ./server/run.sh
+$nginx = 'C:\path\to\nginx.exe'
+$prefix = 'C:\path\to\nginx-runtime'
+& $nginx -p "$prefix/" -c conf/nginx.conf -t
+Start-Process -FilePath $nginx -WorkingDirectory $prefix -ArgumentList @('-p',"$prefix/",'-c','conf/nginx.conf') -WindowStyle Hidden
+# later: & $nginx -p "$prefix/" -c conf/nginx.conf -s stop
 ```
 
-## Repeatable database reset
+The checked-in map sends only the seven established routes to their owners and reuses upstream connections. A stopped owner yields proxy 502/503 on its routes while live peers remain reachable. A reachable handler with a failed database operation returns JSON 500 `INTERNAL_ERROR`; uncommitted scans and completions are not acknowledged. On database recovery, committed checkout state remains available and Analytics resumes from its durable checkpoint. `/analytics/popular-items` may temporarily show an older complete window while the backlog catches up.
 
-`db/init-db.ps1` drops and recreates `cs6510_selfcheckout`, then seeds exactly 2,000 catalog items with 10,000 units of stock each. Run it before every load-test run:
+## Tests and disposable database reset
+
+With all three services, Nginx, and MySQL running:
+
+```bash
+./build-tests.sh
+SERVER_BASE_URL=http://localhost:8080 ./run-tests.sh
+```
+
+`run-tests.sh` uses `DB_USER` and `DB_PASSWORD` from the environment and fails if a live contract/integration test is skipped. The opt-in destructive `ResetBaselineTest` remains disabled by default. JUnit XML is written under `server/out/test-results/`. The live suite exercises independent service restarts, public routing, durable scans, crash recovery, and checkout conservation.
+
+Reset **only the disposable assignment database**. Stop all three JVMs first, since this drops and recreates `cs6510_selfcheckout`, then restart each JVM. On Windows from the repository root:
 
 ```powershell
 ./db/init-db.ps1 -MySqlUser root -MySqlHost 127.0.0.1 -Port 3307
 ```
 
-The script securely prompts for the password. You can also pass `-Password` or `-MySqlExe` when needed.
-
-After every database reset, stop any running server and start a fresh server process. This restart is required: `CatalogCache` and `AnalyticsService` load their state only once at server startup, so resetting MySQL alone does not refresh the already-running process's in-memory catalog, open baskets, scan counter, or analytics ring buffer.
-
-The required order for each independent run is therefore:
-
-1. Stop the server.
-2. Run `db/init-db.ps1`.
-3. Start a fresh server process with `server/run.sh`.
-4. Run the unmodified load client and save its JSON report.
-
-For the assignment validation gate, perform the sequence twice, resetting and restarting between runs:
+The reset prompts for the password and reports exactly 2,000 products, 2,000 inventory rows, and 20,000,000 initial units. With MySQL's CLI on `PATH`, wait for Analytics to catch up after a workload and run:
 
 ```bash
-# Default workload: 10 stations for 60 seconds
-cd load-client
-./run.sh --stations=10 --duration=60 --reportDir=./reports
-
-# After another database reset and server restart:
-./run.sh --stations=100 --duration=120 --reportDir=./reports
+mysql -h 127.0.0.1 -P 3307 -u root -p cs6510_selfcheckout < db/validate-invariants.sql
 ```
 
-## Tests
-
-Build and run the JUnit suite:
-
-```bash
-cd server
-./build.sh
-./build-tests.sh
-./run-tests.sh
-```
-
-HTTP contract and integration tests that need a live server skip themselves when the configured server is unavailable. A skipped test is useful for local unit-only work but is not evidence for the final validation gate. For final validation, start MySQL and the layered server first and confirm the JUnit summary reports no skipped live checks.
-
-Pass test configuration as arguments to `run-tests.sh`:
-
-```bash
-./run-tests.sh \
-  -DSERVER_BASE_URL=http://localhost:8080 \
-  -DDB_URL='jdbc:mysql://127.0.0.1:3307/cs6510_selfcheckout?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC' \
-  -DDB_USER=root \
-  -DDB_PASS=secret
-```
-
-`run-tests.sh` also maps the `DB_USER` and `DB_PASSWORD` environment variables to the default
-`DB_USER` and `DB_PASS` JVM properties. Explicit `-D` arguments override those defaults.
-
-`ResetBaselineTest` is intentionally opt-in because it drops and recreates the configured database. Run it only against a disposable assignment database:
-
-```bash
-./run-tests.sh -DRUN_RESET_BASELINE_TEST=true \
-  -DDB_URL='jdbc:mysql://127.0.0.1:3307/cs6510_selfcheckout?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC'
-```
-
-The test executes `db/init.sql`, starts a fresh server on an available local port, verifies that `/items` contains exactly 2,000 unique SKUs, and verifies that all 2,000 inventory rows contain exactly 10,000 units.
+The script raises SQLSTATE 45000 on a mismatch and prints `PASS` only after stock, transaction lines/totals, contiguous accepted scans, all eligible windows, checkpoint, and independently derived top-ten ranks agree. Run it from the repository root. See [the feature quickstart](../specs/004-distributed-domain-services/quickstart.md) and [load evidence](../load-client/reports/service-based-architecture/README.md) for the two reset-based workloads.

@@ -51,16 +51,18 @@ public final class ResetBaselineTest {
             ? serverDir.getParent()
             : serverDir;
         Path initSql = projectRoot.resolve("db").resolve("init.sql");
-        Path mainClasses = projectRoot.resolve("server").resolve("out").resolve("main");
+        Path inventoryJar = projectRoot.resolve("server/out/inventory.jar");
+        Path commonJar = projectRoot.resolve("server/out/common.jar");
         Path libraryDirectory = projectRoot.resolve("server").resolve("lib");
 
         assertTrue(Files.isRegularFile(initSql), "Missing database reset script: " + initSql);
-        assertTrue(Files.isDirectory(mainClasses), "Build the server before running this test");
+        assertTrue(Files.isRegularFile(inventoryJar), "Build Inventory Service before this test");
+        assertTrue(Files.isRegularFile(commonJar), "Build common utilities before this test");
 
         executeReset(initSql);
 
         int port = availablePort();
-        Process server = startServer(projectRoot, mainClasses, libraryDirectory, port);
+        Process server = startServer(projectRoot, inventoryJar, commonJar, libraryDirectory, port);
         try {
             URI itemsUri = URI.create("http://127.0.0.1:" + port + "/items");
             HttpResponse<String> response = awaitServer(itemsUri, server);
@@ -150,19 +152,24 @@ public final class ResetBaselineTest {
         }
     }
 
-    private static Process startServer(Path projectRoot, Path mainClasses,
+    private static Process startServer(Path projectRoot, Path inventoryJar, Path commonJar,
             Path libraryDirectory, int port)
             throws IOException {
         URI database = URI.create(DB_URL.substring("jdbc:".length()));
         String host = database.getHost();
         int dbPort = database.getPort() < 0 ? 3306 : database.getPort();
         String dbName = database.getPath().substring(1);
-        String classpath = mainClasses + System.getProperty("path.separator")
+        String classpath = inventoryJar + System.getProperty("path.separator")
+            + commonJar + System.getProperty("path.separator")
             + libraryDirectory + System.getProperty("file.separator") + "*";
 
         ProcessBuilder builder = new ProcessBuilder(
-            javaExecutable(), "-cp", classpath, "api.Main",
-            Integer.toString(port), host, Integer.toString(dbPort), dbName, DB_USER);
+            javaExecutable(), "-cp", classpath, "inventory.InventoryMain",
+            Integer.toString(port));
+        builder.environment().put("DB_HOST", host);
+        builder.environment().put("DB_PORT", Integer.toString(dbPort));
+        builder.environment().put("DB_NAME", dbName);
+        builder.environment().put("DB_USER", DB_USER);
         builder.directory(projectRoot.resolve("server").toFile());
         builder.environment().put("DB_PASSWORD", DB_PASS);
         builder.redirectErrorStream(true);

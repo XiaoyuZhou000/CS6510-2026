@@ -71,7 +71,8 @@ CREATE TABLE transaction (
     INDEX idx_transaction_status (status)
 ) ENGINE = InnoDB;
 
--- Basket lines: one row per SKU per transaction, with a scanned quantity.
+-- Basket lines are committed on each accepted scan, while the transaction is
+-- OPEN. They remain after completion and supply the receipt and stock changes.
 -- (Same SKU scanned twice -> quantity 2, enforced by the unique key + upsert.)
 CREATE TABLE transaction_line (
     transaction_id VARCHAR(40)    NOT NULL,
@@ -87,22 +88,51 @@ CREATE TABLE transaction_line (
     CONSTRAINT chk_quantity_positive CHECK (quantity > 0)
 ) ENGINE = InnoDB;
 
--- Persisted popularity snapshots. The recent-scans stream lives in an
--- in-memory ring buffer (last `windowSize` scans); every `slideInterval`
--- scans the app recomputes the top-10 and writes one popular_window header
--- plus up to `limit` popular_item rows here. The client's
--- GET /analytics/popular-items returns the latest window.
---
--- windowSize (1000) and slideInterval (500) are server constants and are not
--- stored per row. window_start/window_end are positions in the app's global
--- in-memory scan counter (window_end = total scans so far,
--- window_start = max(0, window_end - windowSize)).
+-- The singleton is locked after the transaction row during scan acceptance.
+-- Incrementing it and inserting the event in the same InnoDB transaction
+-- makes committed positions positive, contiguous, and visible in commit order.
+CREATE TABLE scan_sequence (
+    sequence_key  TINYINT NOT NULL,
+    last_position BIGINT  NOT NULL DEFAULT 0,
+    PRIMARY KEY (sequence_key),
+    CONSTRAINT chk_scan_sequence_singleton CHECK (sequence_key = 1),
+    CONSTRAINT chk_scan_sequence_nonnegative CHECK (last_position >= 0)
+) ENGINE = InnoDB;
+
+INSERT INTO scan_sequence (sequence_key, last_position) VALUES (1, 0);
+
+-- One immutable event is inserted per successful one-unit scan, including
+-- scans in transactions that never complete. Application writes must not
+-- update or delete accepted events. Position is allocated from scan_sequence,
+-- never from AUTO_INCREMENT; the event, basket line, and total commit together.
+CREATE TABLE accepted_scan (
+    position       BIGINT         NOT NULL,
+    transaction_id VARCHAR(40)   NOT NULL,
+    sku            VARCHAR(20)   NOT NULL,
+    unit_price     DECIMAL(10, 2) NOT NULL,
+    accepted_at    TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (position),
+    CONSTRAINT fk_scan_transaction
+        FOREIGN KEY (transaction_id) REFERENCES transaction (transaction_id),
+    CONSTRAINT fk_scan_sku
+        FOREIGN KEY (sku) REFERENCES catalog_item (sku),
+    CONSTRAINT chk_scan_position_positive CHECK (position > 0),
+    INDEX idx_scan_transaction (transaction_id)
+) ENGINE = InnoDB;
+
+-- A complete popular interval contains exactly 1,000 accepted positions.
+-- Ends are 1,000, 1,500, 2,000, ...; its start is end - 999.
 CREATE TABLE popular_window (
     window_id    BIGINT       NOT NULL AUTO_INCREMENT,
-    window_start BIGINT       NOT NULL,  -- global scan-counter position of the window's first scan
-    window_end   BIGINT       NOT NULL,  -- global scan-counter position of the window's last scan
+    window_start BIGINT       NOT NULL,
+    window_end   BIGINT       NOT NULL,
     computed_at  TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (window_id),
+    UNIQUE KEY uq_window_end (window_end),
+    CONSTRAINT chk_window_bounds CHECK (
+        window_end >= 1000 AND MOD(window_end - 1000, 500) = 0
+        AND window_start = window_end - 999
+    ),
     INDEX idx_window_computed (computed_at)
 ) ENGINE = InnoDB;
 
@@ -116,8 +146,27 @@ CREATE TABLE popular_item (
         FOREIGN KEY (window_id) REFERENCES popular_window (window_id)
         ON DELETE CASCADE,
     CONSTRAINT fk_popular_sku
-        FOREIGN KEY (sku) REFERENCES catalog_item (sku)
+        FOREIGN KEY (sku) REFERENCES catalog_item (sku),
+    CONSTRAINT chk_popular_rank CHECK (rank_pos BETWEEN 1 AND 10),
+    CONSTRAINT chk_popular_count CHECK (scan_count > 0)
 ) ENGINE = InnoDB;
+
+-- The Analytics writer locks this singleton and commits a complete header,
+-- zero to ten contiguous ranks (count descending, SKU ascending on ties),
+-- and the next checkpoint in one transaction. The next end is 1,000 after
+-- zero, then advances by 500. Normal queries read only committed windows.
+CREATE TABLE analytics_checkpoint (
+    checkpoint_key TINYINT NOT NULL,
+    last_window_end BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (checkpoint_key),
+    CONSTRAINT chk_checkpoint_singleton CHECK (checkpoint_key = 1),
+    CONSTRAINT chk_checkpoint_boundary CHECK (
+        last_window_end = 0 OR
+        (last_window_end >= 1000 AND MOD(last_window_end - 1000, 500) = 0)
+    )
+) ENGINE = InnoDB;
+
+INSERT INTO analytics_checkpoint (checkpoint_key, last_window_end) VALUES (1, 0);
 
 -- ----------------------------------------------------------------------------
 -- 2. Seed parameters

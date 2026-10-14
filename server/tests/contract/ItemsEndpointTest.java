@@ -1,6 +1,6 @@
 package contract;
 
-// Migration test inventory: GET /items -> US3 catalog reporting (1 of 7 retained routes).
+// Inventory Service contract through the stable public port 8080.
 
 import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
@@ -81,6 +81,9 @@ public class ItemsEndpointTest {
             assertNotNull(item.get("sku"),   "Each item must have a 'sku' field");
             assertNotNull(item.get("name"),  "Each item must have a 'name' field");
             assertNotNull(item.get("price"), "Each item must have a 'price' field");
+            assertInstanceOf(String.class, item.get("sku"));
+            assertInstanceOf(String.class, item.get("name"));
+            assertInstanceOf(Number.class, item.get("price"));
 
             String sku = item.get("sku").toString();
             assertFalse(sku.isBlank(), "SKU must not be blank");

@@ -19,11 +19,11 @@ import static org.junit.jupiter.api.Assertions.*;
 
 public class PopularItemsEndpointTest {
     @Test
-    void latestMeansHighestWindowIdAndNamesComeFromCatalog() throws Exception {
+    void latestMeansCommittedCheckpointAndNamesComeFromCatalog() throws Exception {
         try (AnalyticsDatabase db = new AnalyticsDatabase()) {
             assertTrue(db.windows.readLatest(10).isEmpty());
-            db.windows.writeWindow(snapshot(501, 1500, "sku1", 900));
             db.windows.writeWindow(snapshot(1, 1000, "sku2", 700));
+            db.windows.writeWindow(snapshot(501, 1500, "sku1", 900));
             java.sql.Connection conn = db.pool.borrow();
             try (java.sql.Statement sql = conn.createStatement()) {
                 sql.executeUpdate("UPDATE popular_window SET computed_at='2000-01-01 00:00:00' WHERE window_end=1000");
@@ -31,9 +31,9 @@ public class PopularItemsEndpointTest {
                 db.pool.release(conn);
             }
             var latest = db.windows.readLatest(10).orElseThrow();
-            assertEquals(1000, latest.windowEnd(), "Select by ID, not boundary or timestamp");
-            assertEquals("Item 2", latest.ranks().getFirst().name());
-            assertEquals(700, latest.ranks().getFirst().scanCount());
+            assertEquals(1500, latest.windowEnd(), "Select only the committed checkpoint boundary");
+            assertEquals("Item 1", latest.ranks().getFirst().name());
+            assertEquals(900, latest.ranks().getFirst().scanCount());
             assertTrue(db.windows.readLatest(0).orElseThrow().ranks().isEmpty());
             assertThrows(IllegalArgumentException.class, () -> db.windows.readLatest(-1));
         }
@@ -100,6 +100,33 @@ public class PopularItemsEndpointTest {
         }
     }
 
+    @Test
+    void publicPortPreservesPopularItemsShapeLimitAndErrors() throws Exception {
+        String publicBase = System.getProperty("SERVER_BASE_URL", System.getenv("SERVER_BASE_URL"));
+        org.junit.jupiter.api.Assumptions.assumeTrue(publicBase != null && !publicBase.isBlank(),
+                "public router not configured");
+        assertEquals(8080, URI.create(publicBase).getPort(), "contract checks must use the public port");
+        String endpoint = publicBase + "/analytics/popular-items";
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            Map<String, Object> report = get(client, endpoint);
+            assertEquals(Set.of("windowSize", "slideInterval", "windowStart", "windowEnd", "computedAt", "items"),
+                    report.keySet());
+            assertEquals(1000, number(report, "windowSize"));
+            assertEquals(500, number(report, "slideInterval"));
+            Instant.parse((String) report.get("computedAt"));
+            List<Object> items = Json.getList(report, "items");
+            assertTrue(items.size() <= 10);
+            assertEquals(items.subList(0, Math.min(3, items.size())),
+                    Json.getList(get(client, endpoint + "?limit=3"), "items"));
+            for (int index = 0; index < items.size(); index++) {
+                Map<String, Object> item = Json.asObject(items.get(index));
+                assertEquals(index + 1, number(item, "rank"));
+            }
+            assertEquals(400, request(client, endpoint + "?limit=-1", "GET").statusCode());
+            assertEquals(404, request(client, endpoint + "/extra", "GET").statusCode());
+            assertEquals(405, request(client, endpoint, "POST").statusCode());
+        }
+    }
     private static Map<String, Object> get(HttpClient client, String url) throws Exception {
         HttpResponse<String> response = request(client, url, "GET");
         assertEquals(200, response.statusCode(), response.body());

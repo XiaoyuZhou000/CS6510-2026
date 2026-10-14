@@ -129,6 +129,14 @@ public class TransactionLifecycleTest {
     }
 
     @Test
+    void scanItem_missingSku_returns400WithEstablishedErrorShape() throws Exception {
+        String transactionId = startAndGetId(STATION_ID);
+        HttpResponse<String> response = postJson("/transactions/" + transactionId + "/items", "{}");
+        assertEquals(400, response.statusCode());
+        assertApiError(response.body(), "MISSING_SKU");
+    }
+
+    @Test
     void scanItem_completedTransaction_returns409() throws Exception {
         String transactionId = startAndGetId(STATION_ID);
         scanItem(transactionId, KNOWN_SKU);
@@ -254,6 +262,7 @@ public class TransactionLifecycleTest {
 
     private static void assertApiError(String body, String expectedCode) {
         Map<String, Object> err = Json.parseObject(body);
+        assertEquals(java.util.Set.of("error", "message"), err.keySet());
         assertEquals(expectedCode, err.get("error"),
             "ApiError.error must be '" + expectedCode + "', got body: " + body);
         assertNotNull(err.get("message"), "ApiError.message must be present");

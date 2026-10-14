@@ -48,6 +48,7 @@ class JdbcPopularWindowStoreTest {
             assertThrows(StoreFailure.class, () -> db.windows.writeWindow(invalidForeignKey));
             assertEquals(0, rowCount(db, "popular_window"));
             assertEquals(0, rowCount(db, "popular_item"));
+            assertEquals(0, checkpoint(db));
         }
     }
 
@@ -62,12 +63,42 @@ class JdbcPopularWindowStoreTest {
 
             assertEquals(1, rowCount(db, "popular_window"));
             assertEquals(2, rowCount(db, "popular_item"));
-            assertThrows(StoreFailure.class, () -> db.windows.writeWindow(snapshot(
+            assertThrows(IllegalStateException.class, () -> db.windows.writeWindow(snapshot(
                     1, 1000, rank(1, "sku1", 1000))));
             assertEquals(1, rowCount(db, "popular_window"));
         }
     }
 
+    @Test
+    void checkpointRejectsOutOfOrderBoundariesAndTracksOnlyCompleteWrites() throws Exception {
+        try (AnalyticsDatabase db = open()) {
+            assertEquals(0, checkpoint(db));
+            assertThrows(IllegalStateException.class, () -> db.windows.writeWindow(snapshot(
+                    501, 1500, rank(1, "sku1", 1000))));
+            assertEquals(0, checkpoint(db));
+            assertTrue(db.windows.readLatest(10).isEmpty());
+
+            db.windows.writeWindow(snapshot(1, 1000, rank(1, "sku1", 1000)));
+            assertEquals(1000, checkpoint(db));
+            assertThrows(IllegalStateException.class, () -> db.windows.writeWindow(snapshot(
+                    1001, 2000, rank(1, "sku1", 1000))));
+            assertEquals(1000, db.windows.readLatest(10).orElseThrow().windowEnd());
+            db.windows.writeWindow(snapshot(501, 1500, rank(1, "sku2", 1000)));
+            assertEquals(1500, checkpoint(db));
+        }
+    }
+
+    private static long checkpoint(AnalyticsDatabase db) throws SQLException {
+        Connection connection = db.pool.borrow();
+        try (Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery(
+                     "SELECT last_window_end FROM analytics_checkpoint WHERE checkpoint_key=1")) {
+            assertTrue(rows.next());
+            return rows.getLong(1);
+        } finally {
+            db.pool.release(connection);
+        }
+    }
     private static AnalyticsDatabase open() throws Exception {
         try {
             return new AnalyticsDatabase();
