@@ -9,11 +9,13 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class ConnectionPool implements AutoCloseable {
     private final BlockingQueue<Connection> pool;
     private final List<Connection> connections = new ArrayList<>();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicInteger waiters = new AtomicInteger();
 
     public ConnectionPool(String host, int port, String dbName, String user, String password, int size)
             throws SQLException {
@@ -39,6 +41,7 @@ public final class ConnectionPool implements AutoCloseable {
 
     /** Waits for a connection, including a prompt exit when this pool shuts down. */
     public Connection borrow() {
+        waiters.incrementAndGet();
         try {
             while (!closed.get()) {
                 Connection conn = pool.poll(100, TimeUnit.MILLISECONDS);
@@ -56,8 +59,17 @@ public final class ConnectionPool implements AutoCloseable {
             throw new RuntimeException("Interrupted while waiting for a DB connection", e);
         } catch (SQLException e) {
             throw new StoreFailure("Failed to close a borrowed DB connection", e);
+        } finally {
+            waiters.decrementAndGet();
         }
     }
+
+    public Occupancy occupancy() {
+        int idle = pool.size();
+        return new Occupancy(connections.size(), connections.size() - idle, idle, waiters.get());
+    }
+
+    public record Occupancy(int size, int active, int idle, int waiters) { }
 
     /** Returns a connection after use; a shutdown pool closes it instead. */
     public void release(Connection conn) {

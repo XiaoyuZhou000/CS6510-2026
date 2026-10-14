@@ -228,3 +228,16 @@ The original checked tasks above document the previous commit-time sequence impl
 - [X] T058 Add live tests for concurrent Scans, out-of-order ID commits, rollback, both Materializer crash points, duplicates, and existing pipeline restart, window, and ranking behavior.
 - [X] T059 Run isolated unchanged-client default and stress benchmarks and record Scan throughput, p95/p99, Materializer rate, lag, row-lock contention, and comparison to the 173–177 scans/sec baseline.
 - [X] T060 Verify full live suite and invariants; document deployment migration and remaining risks.
+
+
+## Phase 11: Measured Scan path optimization
+
+- [X] T061 Add opt-in aggregate Scan handler, pool occupancy, JDBC phase, transaction execution/commit, connection return, and Materializer batch timing without changing the public API or durability.
+- [X] T062 Run fresh isolated 10-station/60-second and 100-station/120-second baselines with the unchanged client; rank pool, SQL round-trip, Materializer, and schema candidates using the measured bottleneck.
+- [X] T063 Raise only Transaction Service's default pool size from 10 to 32 after measuring sustained stress acquisition waits; repeat stress A/B, run both standard workloads, check expected versus unexpected errors and SQL invariants, and document the unchanged default-workload result.
+- [X] T064 Add a regression test for first-scan captured price after a catalog change; benchmark a joined catalog/line lookup separately, then revert it because the default-workload gain did not repeat.
+- [X] T065 Benchmark small-batch Materializer coalescing and redundant pending-index removal separately; revert both after inconclusive throughput, higher pending lag for coalescing, and no index-plan improvement.
+- [X] T066 Rebuild and pass the strict live suite with the three services and Nginx, reconcile each fresh benchmark database, and preserve A/B evidence in `load-client/reports/scan-optimization/`.
+- [ ] T067 If a future default-workload gain is required, first profile a representative durable-commit device. Only consider a persisted incremental basket count/total after a measured benefit justifies its backfill, migration, and cross-check risks. Keep MySQL durability settings unchanged.
+
+T053 remains open: this optimization did not change pool recovery after a temporary MySQL connection loss.

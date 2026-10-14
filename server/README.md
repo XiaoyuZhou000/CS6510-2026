@@ -21,7 +21,7 @@ From `server/` with JDK 21 on `PATH`:
 ./build.sh analytics       # common and Analytics only
 ```
 
-Set the **same** `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` for each JVM. Defaults are `127.0.0.1`, `3307`, `cs6510_selfcheckout`, `root`, and an empty password. `DB_POOL_SIZE` defaults to 10. Pass passwords by environment variable rather than a command argument. `TRANSACTION_PORT`, `INVENTORY_PORT`, and `ANALYTICS_PORT` override the private defaults; an optional numeric argument to each run script overrides its port. The fixed Nginx map in `deploy/nginx.conf` assumes 8081/8082/8083, so update the map when overriding a private port.
+Set the **same** `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` for each JVM. Defaults are `127.0.0.1`, `3307`, `cs6510_selfcheckout`, `root`, and an empty password. `DB_POOL_SIZE` defaults to 32 for Transaction Service and 10 for Inventory and Analytics; set it per process when overriding. Pass passwords by environment variable rather than a command argument. `TRANSACTION_PORT`, `INVENTORY_PORT`, and `ANALYTICS_PORT` override the private defaults; an optional numeric argument to each run script overrides its port. The fixed Nginx map in `deploy/nginx.conf` assumes 8081/8082/8083, so update the map when overriding a private port.
 
 ## Start, stop, and restart independently
 
@@ -54,6 +54,10 @@ Start-Process -FilePath $nginx -WorkingDirectory $prefix -ArgumentList @('-p',"$
 ```
 
 The checked-in map sends only the seven established routes to their owners and reuses upstream connections. A stopped owner yields proxy 502/503 on its routes while live peers remain reachable. A reachable handler with a failed database operation returns JSON 500 `INTERNAL_ERROR`; uncommitted scans and completions are not acknowledged. On database recovery, committed checkout state remains available and Analytics resumes from its durable checkpoint. `/analytics/popular-items` may temporarily show an older complete window while the backlog catches up.
+
+## Scan performance profiling
+
+Set `SCAN_PROFILE=true` on Transaction and Analytics Service to log cumulative aggregate timings for Scan handler, JDBC phases, pool occupancy, and Materializer batches. The default Transaction pool size of 32 was selected from fresh 10- and 100-station A/B benchmarks. See the [Scan optimization evidence](../load-client/reports/scan-optimization/README.md) and `benchmark-scan.ps1` for reproducible commands and limitations.
 
 ## SQL Materializer schema upgrade
 

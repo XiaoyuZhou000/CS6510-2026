@@ -4,6 +4,8 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import api.json.Json;
 import transaction.TransactionOperations;
+import database.ScanProfiler;
+import database.ScanProfiler.Phase;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -70,13 +72,21 @@ public final class TransactionHttpHandler implements HttpHandler {
     }
 
     private void scan(HttpExchange exchange, String transactionId) throws IOException {
+        long httpStart = System.nanoTime();
         String sku = Json.getString(HttpSupport.readJsonBody(exchange), "sku");
         if (sku == null || sku.isBlank()) {
             HttpSupport.respondError(exchange, 400, "MISSING_SKU", "sku is required and must not be blank");
             return;
         }
-        HttpSupport.respond(exchange, 200, serialize(transactions.scan(
-                new TransactionOperations.ScanCommand(transactionId, sku))));
+        String response = serialize(transactions.scan(
+                new TransactionOperations.ScanCommand(transactionId, sku)));
+        long responseStart = System.nanoTime();
+        try {
+            HttpSupport.respond(exchange, 200, response);
+        } finally {
+            ScanProfiler.record(Phase.RESPONSE_WRITE, responseStart);
+            ScanProfiler.record(Phase.REQUEST_TOTAL, httpStart);
+        }
     }
 
     private void complete(HttpExchange exchange, String transactionId) throws IOException {

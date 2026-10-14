@@ -8,6 +8,8 @@ import database.JdbcCheckoutCompletionStore;
 import database.JdbcTransactionStore;
 import java.net.InetSocketAddress;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import database.ScanProfiler;
 
 /** Independent Transaction Service entry point. */
 public final class TransactionMain {
@@ -19,7 +21,7 @@ public final class TransactionMain {
         try {
             pool = new ConnectionPool(env("DB_HOST","127.0.0.1"),intEnv("DB_PORT",3307),
                 env("DB_NAME","cs6510_selfcheckout"),env("DB_USER","root"),
-                env("DB_PASSWORD",""),intEnv("DB_POOL_SIZE",10));
+                env("DB_PASSWORD",""),intEnv("DB_POOL_SIZE",32));
         } catch (Exception failure) {
             System.err.println("Transaction Service cannot connect to MySQL: " + failure.getMessage());
             throw failure;
@@ -34,6 +36,14 @@ public final class TransactionMain {
             pool.close();
         }));
         server.start();
+        if (ScanProfiler.enabled()) {
+            var reporter = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread thread = new Thread(r, "scan-profile-reporter");
+                thread.setDaemon(true);
+                return thread;
+            });
+            reporter.scheduleAtFixedRate(() -> ScanProfiler.log(pool), 10, 10, TimeUnit.SECONDS);
+        }
         System.out.println("Transaction Service listening on port " + port);
     }
 

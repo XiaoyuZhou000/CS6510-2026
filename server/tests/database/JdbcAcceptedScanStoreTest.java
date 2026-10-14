@@ -34,6 +34,28 @@ class JdbcAcceptedScanStoreTest {
     }
 
     @Test
+    void repeatedSkuKeepsFirstCapturedPriceAfterCatalogChange() throws Exception {
+        try (Fixture db = Fixture.open()) {
+            String id = db.createTransaction();
+            var first = (AcceptedScanStore.Accepted) db.scans.scanAtomically(id, "SKU-000001");
+            try (Statement update = db.admin.createStatement()) {
+                update.executeUpdate("UPDATE catalog_item SET price=1.10 WHERE sku='SKU-000001'");
+            }
+            var second = (AcceptedScanStore.Accepted) db.scans.scanAtomically(id, "SKU-000001");
+            assertEquals(new BigDecimal("0.85"), first.unitPrice());
+            assertEquals(first.unitPrice(), second.unitPrice());
+            assertEquals(2, second.itemCount());
+            assertEquals(new BigDecimal("1.70"), second.runningTotal());
+            assertEquals(second.runningTotal(),
+                db.money("SELECT total_amount FROM transaction WHERE transaction_id='" + id + "'"));
+            assertEquals(1, db.integer("SELECT COUNT(DISTINCT unit_price) FROM accepted_scan WHERE transaction_id='" + id + "'"));
+            String another = db.createTransaction();
+            var fresh = (AcceptedScanStore.Accepted) db.scans.scanAtomically(another, "SKU-000001");
+            assertEquals(new BigDecimal("1.10"), fresh.unitPrice());
+        }
+    }
+
+    @Test
     void invalidSkuAndSqlFailureLeaveNoPartialScan() throws Exception {
         try (Fixture db = Fixture.open()) {
             String id = db.createTransaction();
