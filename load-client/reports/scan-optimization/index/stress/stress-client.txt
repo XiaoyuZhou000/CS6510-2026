@@ -1,0 +1,37 @@
+Self-Checkout Load Client starting...
+  baseUrl=http://127.0.0.1:18080 stations=100 duration=120s basket=[1..20]
+Fetching catalog...
+Catalog loaded: 2000 items.
+Starting 100 simulated station(s) for 120s...
+Duration elapsed, waiting for in-flight transactions to finish...
+Fetching low-stock alerts and popular items...
+
+================ LOAD TEST REPORT ================
+Base URL:        http://127.0.0.1:18080
+Stations:        100
+Duration:        120.5s (requested 120s)
+Transactions:    11785 (97.8/sec)
+Items scanned:   209339 (1737.3/sec)
+
+Operation                    OK   Errors   Mean(ms)    P50(ms)    P95(ms)    P99(ms)    Max(ms)     Err%
+START_TRANSACTION         19970        0      43.45      35.20      96.05     183.74     903.54    0.00%
+SCAN_ITEM                209339        0      43.69      36.51      92.97     155.59     911.88    0.00%
+COMPLETE_TRANSACTION      11785     8185     140.15      78.04     340.51     423.20     780.58   40.99%
+
+Low-stock alerts (1):
+  SKU-000001   Item 1                         stock=0      threshold=50
+
+Most popular items (top 10):
+  #1   SKU-000001   Item 1                         scans=109
+  #2   SKU-000002   Item 2                         scans=60
+  #3   SKU-000003   Item 3                         scans=40
+  #4   SKU-000005   Item 5                         scans=33
+  #5   SKU-000008   Item 8                         scans=24
+  #6   SKU-000006   Item 6                         scans=23
+  #7   SKU-000004   Item 4                         scans=20
+  #8   SKU-000007   Item 7                         scans=16
+  #9   SKU-000009   Item 9                         scans=14
+  #10  SKU-000013   Item 13                        scans=10
+===================================================
+
+JSON report written to: E:\Wen\ѧϰ\NEU\CS6510\CS6510-2026\load-client\reports\scan-optimization\index\stress\report-20261013-195639.json
