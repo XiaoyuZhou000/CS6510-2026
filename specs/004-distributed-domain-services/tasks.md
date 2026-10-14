@@ -216,4 +216,15 @@ Phase 1 Setup → Phase 2 Foundation ─┬→ US1 Checkout ─────┐
 ## Phase 9: Convergence
 
 - [ ] T053 CRITICAL: Recreate or validate pooled JDBC connections after a temporary MySQL connection loss in `server/common/src/database/ConnectionPool.java`; add a live outage/recovery test that keeps the three service processes running, verifies failed writes receive no success, then verifies checkout, inventory queries, and Analytics backlog catch-up after MySQL returns per FR-022 and Constitution V (partial).
-- [ ] T054 Profile and optimize the durable scan path in `server/transaction/src/database/JdbcAcceptedScanStore.java`, focusing on per-scan SQL round trips and scan-sequence lock hold time while preserving atomic basket/event commits and contiguous order; rerun both unchanged-client workloads from separate fresh resets, verify stock/windows/recovery, and record scan p99, throughput, errors, and Analytics catch-up against the prior pipeline and current distributed reports per plan: Complexity Tracking and FR-025 (partial).
+- [X] T054 Profile and optimize the durable scan path in `server/transaction/src/database/JdbcAcceptedScanStore.java`, focusing on per-scan SQL round trips and scan-sequence lock hold time while preserving atomic basket/event commits and contiguous order; rerun both unchanged-client workloads from separate fresh resets, verify stock/windows/recovery, and record scan p99, throughput, errors, and Analytics catch-up against the prior pipeline and current distributed reports per plan: Complexity Tracking and FR-025 (resolved by T055–T060 SQL Materializer redesign; see the benchmark report).
+
+## Phase 10: SQL Materializer redesign
+
+The original checked tasks above document the previous commit-time sequence implementation. This phase replaces that ordering mechanism under FR-013 and FR-019.
+
+- [X] T055 Document Scan and Materializer transaction boundaries, pending discovery, constraints, recovery, and bottlenecks in `sql-materializer-design.md`.
+- [X] T056 Change the Scan writer and schema to commit unique raw event IDs and NULL positions without the global sequence lock.
+- [X] T057 Add bounded atomic SQL position assignment and integrate it before Analytics polling.
+- [X] T058 Add live tests for concurrent Scans, out-of-order ID commits, rollback, both Materializer crash points, duplicates, and existing pipeline restart, window, and ranking behavior.
+- [X] T059 Run isolated unchanged-client default and stress benchmarks and record Scan throughput, p95/p99, Materializer rate, lag, row-lock contention, and comparison to the 173–177 scans/sec baseline.
+- [X] T060 Verify full live suite and invariants; document deployment migration and remaining risks.

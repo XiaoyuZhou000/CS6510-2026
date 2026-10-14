@@ -42,7 +42,7 @@ public final class CheckoutDatabase implements AutoCloseable {
             sql.executeUpdate("INSERT INTO " + name + ".scan_sequence VALUES (1,0)");
             sql.executeUpdate("CREATE TABLE " + name + ".analytics_checkpoint (checkpoint_key TINYINT PRIMARY KEY,last_window_end BIGINT NOT NULL)");
             sql.executeUpdate("INSERT INTO " + name + ".analytics_checkpoint VALUES (1,0)");
-            sql.executeUpdate("CREATE TABLE " + name + ".accepted_scan (position BIGINT PRIMARY KEY,transaction_id VARCHAR(40),sku VARCHAR(20),unit_price DECIMAL(10,2),accepted_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3))");
+            sql.executeUpdate("CREATE TABLE " + name + ".accepted_scan (event_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,position BIGINT NULL UNIQUE KEY,transaction_id VARCHAR(40),sku VARCHAR(20),unit_price DECIMAL(10,2),accepted_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3),KEY idx_scan_pending(position,event_id))");
             sql.executeUpdate("INSERT INTO " + name + ".catalog_item VALUES ('" + SKU + "','Race Item',2.50),('" + OTHER_SKU + "','Other Item',1.25)");
             sql.executeUpdate("INSERT INTO " + name + ".inventory VALUES ('" + SKU + "'," + stock + ",1),('" + OTHER_SKU + "'," + stock + ",1)");
         }
@@ -104,9 +104,9 @@ public final class CheckoutDatabase implements AutoCloseable {
             }
         }
     }
-    public long position() throws Exception {
+    public long eventCount() throws Exception {
         try (Statement s=admin.createStatement();ResultSet r=s.executeQuery(
-                "SELECT last_position FROM " + name + ".scan_sequence WHERE sequence_key=1")) {
+                "SELECT COUNT(*) FROM " + name + ".accepted_scan")) {
             r.next(); return r.getLong(1);
         }
     }

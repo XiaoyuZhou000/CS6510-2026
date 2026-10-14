@@ -29,6 +29,7 @@ public final class AcceptedScanPoller implements Runnable {
             while (!Thread.currentThread().isInterrupted()) {
                 List<PipelineMessage.AcceptedScan> scans;
                 try {
+                    reader.materializeBatch(BATCH_SIZE);
                     scans = reader.readAfter(cursor, BATCH_SIZE);
                     consecutiveReadFailures = 0;
                 } catch (StoreFailure unavailable) {

@@ -30,7 +30,7 @@ class DatabaseOutageContractTest {
                 HttpResponse<String> started = post(base + "/transactions", "{\"stationId\":\"db-outage\"}");
                 assertEquals(201, started.statusCode());
                 String id = Json.parseObject(started.body()).get("transactionId").toString();
-                long beforePosition = db.position();
+                long beforePosition = db.eventCount();
 
                 db.setTransactionTableUnavailable(true);
                 try {
@@ -40,7 +40,7 @@ class DatabaseOutageContractTest {
                 } finally {
                     db.setTransactionTableUnavailable(false);
                 }
-                assertEquals(beforePosition, db.position(), "failed scan must not commit an event");
+                assertEquals(beforePosition, db.eventCount(), "failed scan must not commit an event");
                 assertEquals(2, db.stock(), "failed completion must not deduct stock");
                 Map<String,Object> afterOutage = Json.parseObject(get(base + "/transactions/" + id).body());
                 assertEquals("OPEN", afterOutage.get("status"));
@@ -48,7 +48,7 @@ class DatabaseOutageContractTest {
 
                 assertEquals(200, post(base + "/transactions/" + id + "/items",
                     "{\"sku\":\"" + CheckoutDatabase.SKU + "\"}").statusCode());
-                assertEquals(beforePosition + 1, db.position());
+                assertEquals(beforePosition + 1, db.eventCount());
                 db.setTransactionTableUnavailable(true);
                 try {
                     assertInternal(post(base + "/transactions/" + id + "/complete", "{}"));

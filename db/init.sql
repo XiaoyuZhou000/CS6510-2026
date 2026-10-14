@@ -88,9 +88,8 @@ CREATE TABLE transaction_line (
     CONSTRAINT chk_quantity_positive CHECK (quantity > 0)
 ) ENGINE = InnoDB;
 
--- The singleton is locked after the transaction row during scan acceptance.
--- Incrementing it and inserting the event in the same InnoDB transaction
--- makes committed positions positive, contiguous, and visible in commit order.
+-- Only Analytics Materializer locks this singleton, once per bounded batch.
+-- Transaction Service never touches it. Assignment and checkpoint commit together.
 CREATE TABLE scan_sequence (
     sequence_key  TINYINT NOT NULL,
     last_position BIGINT  NOT NULL DEFAULT 0,
@@ -101,22 +100,23 @@ CREATE TABLE scan_sequence (
 
 INSERT INTO scan_sequence (sequence_key, last_position) VALUES (1, 0);
 
--- One immutable event is inserted per successful one-unit scan, including
--- scans in transactions that never complete. Application writes must not
--- update or delete accepted events. Position is allocated from scan_sequence,
--- never from AUTO_INCREMENT; the event, basket line, and total commit together.
+-- Scan commits an immutable event identity with no analytics position.
+-- Materializer later assigns the nullable position once in a bounded batch.
 CREATE TABLE accepted_scan (
-    position       BIGINT         NOT NULL,
+    event_id       BIGINT         NOT NULL AUTO_INCREMENT,
+    position       BIGINT         NULL,
     transaction_id VARCHAR(40)   NOT NULL,
     sku            VARCHAR(20)   NOT NULL,
     unit_price     DECIMAL(10, 2) NOT NULL,
     accepted_at    TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    PRIMARY KEY (position),
+    PRIMARY KEY (event_id),
+    UNIQUE KEY uq_scan_position (position),
+    KEY idx_scan_pending (position, event_id),
     CONSTRAINT fk_scan_transaction
         FOREIGN KEY (transaction_id) REFERENCES transaction (transaction_id),
     CONSTRAINT fk_scan_sku
         FOREIGN KEY (sku) REFERENCES catalog_item (sku),
-    CONSTRAINT chk_scan_position_positive CHECK (position > 0),
+    CONSTRAINT chk_scan_position_positive CHECK (position IS NULL OR position > 0),
     INDEX idx_scan_transaction (transaction_id)
 ) ENGINE = InnoDB;
 

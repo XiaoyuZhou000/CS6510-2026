@@ -18,14 +18,14 @@ class JdbcAcceptedScanStoreTest {
     private static final String PASS = System.getProperty("DB_PASS", "");
 
     @Test
-    void eachSuccessfulScanCommitsLineTotalSequenceAndEventTogether() throws Exception {
+    void eachSuccessfulScanCommitsLineTotalAndUnpositionedEventTogether() throws Exception {
         try (Fixture db = Fixture.open()) {
             String id = db.createTransaction();
-            long before = db.position();
+            long before = db.eventCount();
             var scan = db.scans.scanAtomically(id, "SKU-000001");
             assertInstanceOf(AcceptedScanStore.Accepted.class, scan);
-            assertEquals(before + 1, db.position());
-            assertEquals(1, db.integer("SELECT COUNT(*) FROM accepted_scan WHERE transaction_id='" + id + "'"));
+            assertEquals(before + 1, db.eventCount());
+            assertEquals(1, db.integer("SELECT COUNT(*) FROM accepted_scan WHERE transaction_id='" + id + "' AND position IS NULL"));
             assertEquals(1, db.integer("SELECT quantity FROM transaction_line WHERE transaction_id='" + id + "'"));
             assertEquals(1, db.integer("SELECT SUM(quantity) FROM transaction_line WHERE transaction_id='" + id + "'"));
             assertEquals(db.money("SELECT price FROM catalog_item WHERE sku='SKU-000001'"),
@@ -37,15 +37,14 @@ class JdbcAcceptedScanStoreTest {
     void invalidSkuAndSqlFailureLeaveNoPartialScan() throws Exception {
         try (Fixture db = Fixture.open()) {
             String id = db.createTransaction();
-            long before = db.position();
+            long before = db.eventCount();
             assertInstanceOf(AcceptedScanStore.UnknownSku.class,
                 db.scans.scanAtomically(id, "DOES-NOT-EXIST"));
-            assertEquals(before, db.position());
+            assertEquals(before, db.eventCount());
             assertEquals(0, db.integer("SELECT COUNT(*) FROM transaction_line WHERE transaction_id='" + id + "'"));
             assertEquals(0, db.integer("SELECT COUNT(*) FROM accepted_scan WHERE transaction_id='" + id + "'"));
             try (Statement ddl = db.admin.createStatement()) { ddl.executeUpdate("DROP TABLE accepted_scan"); }
             assertThrows(StoreFailure.class, () -> db.scans.scanAtomically(id, "SKU-000001"));
-            assertEquals(before, db.position());
             assertEquals(0, db.integer("SELECT COUNT(*) FROM transaction_line WHERE transaction_id='" + id + "'"));
             assertEquals(BigDecimal.ZERO.setScale(2),
                 db.money("SELECT total_amount FROM transaction WHERE transaction_id='" + id + "'"));
@@ -53,11 +52,11 @@ class JdbcAcceptedScanStoreTest {
     }
 
     @Test
-    void concurrentScansReceiveContiguousCommittedPositions() throws Exception {
+    void concurrentScansCommitDistinctUnpositionedEvents() throws Exception {
         try (Fixture db = Fixture.open(); ExecutorService workers = Executors.newFixedThreadPool(4)) {
             String id = db.createTransaction();
             String other = db.createTransaction();
-            long before = db.position();
+            long before = db.eventCount();
             List<Callable<AcceptedScanStore.ScanResult>> calls = new ArrayList<>();
             for (int i = 0; i < 8; i++) {
                 String target = i % 2 == 0 ? id : other;
@@ -65,16 +64,12 @@ class JdbcAcceptedScanStoreTest {
             }
             for (Future<AcceptedScanStore.ScanResult> result : workers.invokeAll(calls))
                 assertInstanceOf(AcceptedScanStore.Accepted.class, result.get());
-            assertEquals(before + 8, db.position());
+            assertEquals(before + 8, db.eventCount());
             assertEquals(8, db.integer("SELECT COUNT(*) FROM accepted_scan"));
             assertEquals(4, db.integer("SELECT quantity FROM transaction_line WHERE transaction_id='" + id + "'"));
             assertEquals(4, db.integer("SELECT quantity FROM transaction_line WHERE transaction_id='" + other + "'"));
-            try (Statement query = db.admin.createStatement();
-                 ResultSet positions = query.executeQuery(
-                    "SELECT GROUP_CONCAT(position ORDER BY position) FROM accepted_scan")) {
-                positions.next();
-                assertEquals("1,2,3,4,5,6,7,8", positions.getString(1));
-            }
+            assertEquals(8, db.integer("SELECT COUNT(DISTINCT event_id) FROM accepted_scan"));
+            assertEquals(8, db.integer("SELECT COUNT(*) FROM accepted_scan WHERE position IS NULL"));
         }
     }
 
@@ -96,7 +91,7 @@ class JdbcAcceptedScanStoreTest {
                     ddl.executeUpdate("CREATE TABLE " + database + ".`" + table + "` LIKE cs6510_selfcheckout.`" + table + "`");
                 ddl.executeUpdate("CREATE TABLE " + database + ".scan_sequence (sequence_key TINYINT PRIMARY KEY,last_position BIGINT NOT NULL)");
                 ddl.executeUpdate("INSERT INTO " + database + ".scan_sequence VALUES (1,0)");
-                ddl.executeUpdate("CREATE TABLE " + database + ".accepted_scan (position BIGINT PRIMARY KEY,transaction_id VARCHAR(40),sku VARCHAR(20),unit_price DECIMAL(10,2),accepted_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3))");
+                ddl.executeUpdate("CREATE TABLE " + database + ".accepted_scan (event_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,position BIGINT NULL UNIQUE KEY,transaction_id VARCHAR(40),sku VARCHAR(20),unit_price DECIMAL(10,2),accepted_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3),KEY idx_scan_pending(position,event_id))");
                 ddl.executeUpdate("INSERT INTO " + database + ".catalog_item VALUES ('SKU-000001','Item 1',0.85)");
             }
             admin.setCatalog(database);
@@ -110,9 +105,9 @@ class JdbcAcceptedScanStoreTest {
             new JdbcTransactionStore(pool).insertOpen(id, "phase3-test");
             return id;
         }
-        long position() throws SQLException {
+        long eventCount() throws SQLException {
             try (Statement s = admin.createStatement(); ResultSet r =
-                    s.executeQuery("SELECT last_position FROM scan_sequence WHERE sequence_key=1")) {
+                    s.executeQuery("SELECT COUNT(*) FROM accepted_scan")) {
                 r.next(); return r.getLong(1);
             }
         }

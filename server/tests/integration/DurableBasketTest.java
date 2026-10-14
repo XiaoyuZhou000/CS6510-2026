@@ -61,7 +61,7 @@ class DurableBasketTest {
     }
 
     @Test
-    void concurrentScansCommitPositiveQuantitiesAndOneContiguousPositionEach() throws Exception {
+    void concurrentScansCommitPositiveQuantitiesAndDistinctEvents() throws Exception {
         try (CheckoutDatabase db = open(20);
              var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             String id = db.checkout.start(new TransactionOperations.StartCommand("station-3")).transactionId();
@@ -77,7 +77,7 @@ class DurableBasketTest {
             }
             start.countDown();
             for (Future<?> result : results) result.get(30, TimeUnit.SECONDS);
-            assertEquals(count, db.position());
+            assertEquals(count, db.eventCount());
             assertEquals(count, db.checkout.get(id).itemCount());
             var receipt = db.checkout.complete(id);
             assertEquals(count, receipt.itemCount());

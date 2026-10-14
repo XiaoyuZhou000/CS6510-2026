@@ -17,7 +17,7 @@ class ScanCompletionConvergenceTest {
         try (CheckoutDatabase db = open(10); ExecutorService workers = Executors.newFixedThreadPool(2)) {
             String id = db.checkout.start(new TransactionOperations.StartCommand("race-station")).transactionId();
             db.checkout.scan(new TransactionOperations.ScanCommand(id,CheckoutDatabase.SKU));
-            long before = db.position();
+            long before = db.eventCount();
             Connection blocker = db.pool.borrow();
             blocker.setAutoCommit(false);
             try (PreparedStatement lock=blocker.prepareStatement(
@@ -39,7 +39,7 @@ class ScanCompletionConvergenceTest {
                     assertEquals(count,receipt.itemCount());
                     assertEquals(count,receipt.lines().getFirst().quantity());
                     assertEquals(10-count,db.stock());
-                    assertEquals(before+(accepted ? 1 : 0),db.position());
+                    assertEquals(before+(accepted ? 1 : 0),db.eventCount());
                     assertThrows(TransactionFailure.class,
                         () -> db.checkout.scan(new TransactionOperations.ScanCommand(id,CheckoutDatabase.SKU)));
                 }

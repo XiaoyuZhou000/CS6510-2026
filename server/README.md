@@ -55,6 +55,10 @@ Start-Process -FilePath $nginx -WorkingDirectory $prefix -ArgumentList @('-p',"$
 
 The checked-in map sends only the seven established routes to their owners and reuses upstream connections. A stopped owner yields proxy 502/503 on its routes while live peers remain reachable. A reachable handler with a failed database operation returns JSON 500 `INTERNAL_ERROR`; uncommitted scans and completions are not acknowledged. On database recovery, committed checkout state remains available and Analytics resumes from its durable checkpoint. `/analytics/popular-items` may temporarily show an older complete window while the backlog catches up.
 
+## SQL Materializer schema upgrade
+
+The current schema gives each accepted Scan an immutable `event_id` and a nullable unique analytics `position`. Transaction Service commits the raw event and basket without locking `scan_sequence`. Analytics Materializer assigns positions in batches and commits the position checkpoint atomically. Existing deployments with the former position-primary-key schema can stop Transaction and Analytics, back up MySQL, run `db/migrate-sql-materializer.sql` once, verify its two counts and checkpoint, then deploy the new JARs. Fresh benchmark resets use the updated `db/init.sql`. Keep MySQL durability settings unchanged.
+
 ## Tests and disposable database reset
 
 With all three services, Nginx, and MySQL running:

@@ -5,7 +5,7 @@ import java.sql.*;
 import java.util.Objects;
 import transaction.database.JdbcCatalogStore;
 
-/** A scan, basket update, sequence advance, and event are one InnoDB commit. */
+/** A basket update and unpositioned durable event are one InnoDB commit. */
 public final class JdbcAcceptedScanStore implements AcceptedScanStore {
     private static final int MAX_ATTEMPTS = 3;
     private final ConnectionPool pool;
@@ -68,31 +68,23 @@ public final class JdbcAcceptedScanStore implements AcceptedScanStore {
                     s.setString(2, transactionId);
                     if (s.executeUpdate() != 1) throw new SQLException("Transaction disappeared");
                 }
-                long position;
+                long eventId;
                 try (PreparedStatement s = c.prepareStatement(
-                        "SELECT last_position FROM scan_sequence WHERE sequence_key=1 FOR UPDATE");
-                     ResultSet r = s.executeQuery()) {
-                    if (!r.next()) throw new SQLException("Scan sequence singleton missing");
-                    position = Math.addExact(r.getLong(1), 1L);
-                }
-                try (PreparedStatement s = c.prepareStatement(
-                        "UPDATE scan_sequence SET last_position=? WHERE sequence_key=1")) {
-                    s.setLong(1, position);
-                    if (s.executeUpdate() != 1) throw new SQLException("Scan sequence singleton missing");
-                }
-                try (PreparedStatement s = c.prepareStatement(
-                        "INSERT INTO accepted_scan (position,transaction_id,sku,unit_price) " +
-                        "VALUES (?,?,?,?)")) {
-                    s.setLong(1, position);
-                    s.setString(2, transactionId);
-                    s.setString(3, sku);
-                    s.setBigDecimal(4, unitPrice);
-                    s.executeUpdate();
+                        "INSERT INTO accepted_scan (transaction_id,sku,unit_price) " +
+                        "VALUES (?,?,?)", Statement.RETURN_GENERATED_KEYS)) {
+                    s.setString(1, transactionId);
+                    s.setString(2, sku);
+                    s.setBigDecimal(3, unitPrice);
+                    if (s.executeUpdate() != 1) throw new SQLException("Event insert failed");
+                    try (ResultSet keys = s.getGeneratedKeys()) {
+                        if (!keys.next()) throw new SQLException("Event identity missing");
+                        eventId = keys.getLong(1);
+                    }
                 }
                 // A commit error is ambiguous: never retry or acknowledge it as success.
                 commitAttempted = true;
                 c.commit();
-                return new Accepted(position, name, unitPrice, count, total);
+                return new Accepted(eventId, name, unitPrice, count, total);
             } catch (SQLException e) {
                 try { c.rollback(); } catch (SQLException rollback) { e.addSuppressed(rollback); }
                 retry = !commitAttempted && isDeadlock(e) && attempt < MAX_ATTEMPTS;

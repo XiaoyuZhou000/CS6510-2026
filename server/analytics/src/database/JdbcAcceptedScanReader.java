@@ -14,9 +14,15 @@ import java.util.Objects;
 /** Fresh committed reads of the immutable accepted-scan log. */
 public final class JdbcAcceptedScanReader {
     private final ConnectionPool pool;
+    private final JdbcScanMaterializer materializer;
 
     public JdbcAcceptedScanReader(ConnectionPool pool) {
         this.pool = Objects.requireNonNull(pool, "pool");
+        this.materializer = new JdbcScanMaterializer(pool);
+    }
+
+    public int materializeBatch(int batchSize) {
+        return materializer.materializeBatch(batchSize);
     }
 
     public List<PipelineMessage.AcceptedScan> readAfter(long cursor, int batchSize) {

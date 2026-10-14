@@ -39,7 +39,7 @@ class TransactionRestartDurabilityTest {
                     "{\"sku\":\""+CheckoutDatabase.OTHER_SKU+"\"}").statusCode());
                 assertEquals(10,db.stock());
                 assertEquals(10,db.stock(CheckoutDatabase.OTHER_SKU));
-                assertEquals(3,db.position());
+                assertEquals(3,db.eventCount());
                 service.destroyForcibly();
                 assertTrue(service.waitFor(5,TimeUnit.SECONDS));
                 service=start(db,port);
@@ -136,7 +136,6 @@ class TransactionRestartDurabilityTest {
                 assertEquals("OPEN",open.get("status"));
                 assertEquals(0,((Number)open.get("itemCount")).intValue());
                 assertEquals(0,((Number)open.get("runningTotal")).doubleValue(),0.001);
-                assertEquals(0,db.position());
                 assertEquals(10,db.stock());
             } finally {
                 service.destroyForcibly();

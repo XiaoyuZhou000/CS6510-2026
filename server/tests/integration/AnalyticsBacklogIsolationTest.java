@@ -28,7 +28,7 @@ class AnalyticsBacklogIsolationTest {
                 String sku = position % 4 == 0 ? CheckoutDatabase.OTHER_SKU : CheckoutDatabase.SKU;
                 db.checkout.scan(new TransactionOperations.ScanCommand(id, sku));
             }
-            assertEquals(1000, db.position());
+            assertEquals(1000, db.eventCount());
             assertEquals(1000, db.checkout.get(id).itemCount());
             assertEquals(2000, db.stock(), "Analytics outage cannot deduct inventory");
 
@@ -41,7 +41,7 @@ class AnalyticsBacklogIsolationTest {
                 String sku = position % 4 == 0 ? CheckoutDatabase.OTHER_SKU : CheckoutDatabase.SKU;
                 db.checkout.scan(new TransactionOperations.ScanCommand(id, sku));
             }
-            assertEquals(1500, db.position());
+            assertEquals(1500, db.eventCount());
             assertEquals(1500, db.checkout.get(id).itemCount());
 
             AnalyticsService restarted = new AnalyticsService(windows, new JdbcAcceptedScanReader(db.pool));

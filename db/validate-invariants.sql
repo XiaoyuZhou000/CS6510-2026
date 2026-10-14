@@ -53,12 +53,14 @@ CALL assert_zero('accepted scans have matching lines',
 
 CALL assert_zero('scan sequence singleton exists',
     (SELECT ABS(COUNT(*) - 1) FROM scan_sequence));
-CALL assert_zero('scan sequence equals event count and has no gaps',
+CALL assert_zero('all accepted scans materialized',
+    (SELECT COUNT(*) FROM accepted_scan WHERE position IS NULL));
+CALL assert_zero('materialized positions equal checkpoint and have no gaps',
     (SELECT CASE WHEN ss.last_position = stats.units
                   AND (stats.units = 0 OR (stats.first_position = 1
                        AND stats.last_position = stats.units)) THEN 0 ELSE 1 END
      FROM scan_sequence ss CROSS JOIN (
-        SELECT COUNT(*) units, MIN(position) first_position,
+        SELECT COUNT(position) units, MIN(position) first_position,
                MAX(position) last_position FROM accepted_scan
      ) stats WHERE ss.sequence_key = 1));
 
@@ -111,7 +113,7 @@ DROP TEMPORARY TABLE expected_popular_rank;
 SELECT 'PASS' invariant_status,
        (SELECT COUNT(*) FROM `transaction` WHERE status = 'COMPLETED') completed_transactions,
        (SELECT COALESCE(SUM(quantity), 0) FROM transaction_line) accepted_units,
-       (SELECT last_position FROM scan_sequence WHERE sequence_key = 1) accepted_scan_position,
+       (SELECT last_position FROM scan_sequence WHERE sequence_key = 1) materialized_scan_position,
        (SELECT MIN(stock_quantity) FROM inventory) minimum_stock,
        (SELECT COUNT(*) FROM popular_window) popular_windows,
        (SELECT last_window_end FROM analytics_checkpoint WHERE checkpoint_key = 1) latest_window_end;

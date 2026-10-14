@@ -25,7 +25,7 @@ public final class AnalyticsDatabase implements AutoCloseable {
                 sql.executeUpdate("CREATE TABLE " + name + "." + table + " LIKE " + table);
             }
             sql.executeUpdate("CREATE TABLE " + name + ".scan_sequence (sequence_key TINYINT PRIMARY KEY, last_position BIGINT NOT NULL)");
-            sql.executeUpdate("CREATE TABLE " + name + ".accepted_scan (position BIGINT PRIMARY KEY, transaction_id VARCHAR(40), sku VARCHAR(20), unit_price DECIMAL(10,2), accepted_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3))");
+            sql.executeUpdate("CREATE TABLE " + name + ".accepted_scan (event_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,position BIGINT NULL UNIQUE KEY,transaction_id VARCHAR(40),sku VARCHAR(20),unit_price DECIMAL(10,2),accepted_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3),KEY idx_scan_pending(position,event_id))");
             sql.executeUpdate("CREATE TABLE " + name + ".analytics_checkpoint (checkpoint_key TINYINT PRIMARY KEY, last_window_end BIGINT NOT NULL)");
             sql.executeUpdate("INSERT INTO " + name + ".scan_sequence VALUES (1, 0)");
             sql.executeUpdate("INSERT INTO " + name + ".analytics_checkpoint VALUES (1, 0)");
@@ -34,7 +34,7 @@ public final class AnalyticsDatabase implements AutoCloseable {
             }
         }
         java.net.URI uri = java.net.URI.create(url.substring(5));
-        pool = new ConnectionPool(uri.getHost(), uri.getPort() < 0 ? 3306 : uri.getPort(), name, user, password, 2);
+        pool = new ConnectionPool(uri.getHost(), uri.getPort() < 0 ? 3306 : uri.getPort(), name, user, password, 4);
         windows = new JdbcPopularWindowStore(pool);
     }
 
