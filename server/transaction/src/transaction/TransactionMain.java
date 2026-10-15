@@ -19,9 +19,12 @@ public final class TransactionMain {
         int port = args.length > 0 ? Integer.parseInt(args[0]) : intEnv("TRANSACTION_PORT", 8081);
         ConnectionPool pool;
         try {
+            int initialPoolSize = intEnv("DB_POOL_SIZE", 32);
+            int maxPoolSize = intEnv("DB_POOL_MAX_SIZE",
+                System.getenv("DB_POOL_SIZE") == null ? 64 : initialPoolSize);
             pool = new ConnectionPool(env("DB_HOST","127.0.0.1"),intEnv("DB_PORT",3307),
                 env("DB_NAME","cs6510_selfcheckout"),env("DB_USER","root"),
-                env("DB_PASSWORD",""),intEnv("DB_POOL_SIZE",32));
+                env("DB_PASSWORD",""),initialPoolSize,maxPoolSize);
         } catch (Exception failure) {
             System.err.println("Transaction Service cannot connect to MySQL: " + failure.getMessage());
             throw failure;

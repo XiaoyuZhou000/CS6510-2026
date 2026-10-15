@@ -60,6 +60,7 @@ public final class TransactionHttpHandler implements HttpHandler {
     }
 
     private void start(HttpExchange exchange) throws IOException {
+        long requestStart = System.nanoTime();
         Map<String, Object> body = HttpSupport.readJsonBody(exchange);
         String stationId = Json.getString(body, "stationId");
         if (stationId == null || stationId.isBlank()) {
@@ -69,6 +70,7 @@ public final class TransactionHttpHandler implements HttpHandler {
         }
         HttpSupport.respond(exchange, 201, serialize(transactions.start(
                 new TransactionOperations.StartCommand(stationId))));
+        ScanProfiler.record(Phase.START_REQUEST, requestStart);
     }
 
     private void scan(HttpExchange exchange, String transactionId) throws IOException {
@@ -90,8 +92,10 @@ public final class TransactionHttpHandler implements HttpHandler {
     }
 
     private void complete(HttpExchange exchange, String transactionId) throws IOException {
+        long requestStart = System.nanoTime();
         // The fixed client sends either an empty body or {}; neither carries domain input.
         HttpSupport.respond(exchange, 200, serialize(transactions.complete(transactionId)));
+        ScanProfiler.record(Phase.COMPLETE_REQUEST, requestStart);
     }
 
     private void get(HttpExchange exchange, String transactionId) throws IOException {

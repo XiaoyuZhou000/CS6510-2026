@@ -21,7 +21,7 @@ From `server/` with JDK 21 on `PATH`:
 ./build.sh analytics       # common and Analytics only
 ```
 
-Set the **same** `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` for each JVM. Defaults are `127.0.0.1`, `3307`, `cs6510_selfcheckout`, `root`, and an empty password. `DB_POOL_SIZE` defaults to 32 for Transaction Service and 10 for Inventory and Analytics; set it per process when overriding. Pass passwords by environment variable rather than a command argument. `TRANSACTION_PORT`, `INVENTORY_PORT`, and `ANALYTICS_PORT` override the private defaults; an optional numeric argument to each run script overrides its port. The fixed Nginx map in `deploy/nginx.conf` assumes 8081/8082/8083, so update the map when overriding a private port.
+Set the **same** `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` for each JVM. Defaults are `127.0.0.1`, `3307`, `cs6510_selfcheckout`, `root`, and an empty password. `DB_POOL_SIZE` defaults to an initial 32 connections for Transaction Service, which grows to at most 64 under contention. Inventory and Analytics remain fixed at 10. An explicit `DB_POOL_SIZE` override fixes the Transaction pool at that size unless `DB_POOL_MAX_SIZE` is also set. Pass passwords by environment variable rather than a command argument. `TRANSACTION_PORT`, `INVENTORY_PORT`, and `ANALYTICS_PORT` override the private defaults; an optional numeric argument to each run script overrides its port. The fixed Nginx map in `deploy/nginx.conf` assumes 8081/8082/8083, so update the map when overriding a private port.
 
 ## Start, stop, and restart independently
 
@@ -57,7 +57,7 @@ The checked-in map sends only the seven established routes to their owners and r
 
 ## Scan performance profiling
 
-Set `SCAN_PROFILE=true` on Transaction and Analytics Service to log cumulative aggregate timings for Scan handler, JDBC phases, pool occupancy, and Materializer batches. The default Transaction pool size of 32 was selected from fresh 10- and 100-station A/B benchmarks. See the [Scan optimization evidence](../load-client/reports/scan-optimization/README.md) and `benchmark-scan.ps1` for reproducible commands and limitations.
+Set `SCAN_PROFILE=true` on Transaction and Analytics Service to log cumulative aggregate timings for Start, Scan, Complete, pool occupancy, and Materializer batches. The bounded Transaction pool was selected from fresh 10- and 100-station A/B benchmarks. See the [transaction optimization evidence](../load-client/reports/transaction-optimization/README.md), the earlier [Scan optimization evidence](../load-client/reports/scan-optimization/README.md), and `benchmark-scan.ps1` for reproducible commands and limitations.
 
 ## SQL Materializer schema upgrade
 

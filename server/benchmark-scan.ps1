@@ -3,7 +3,10 @@ param(
   [Parameter(Mandatory=$true)][string]$NginxBin,
   [Parameter(Mandatory=$true)][string]$JavaExe,
   [Parameter(Mandatory=$true)][ValidateSet("baseline","retained")][string]$Variant,
-  [Parameter(Mandatory=$true)][ValidateSet("default","stress")][string]$Workload
+  [Parameter(Mandatory=$true)][ValidateSet("default","stress")][string]$Workload,
+  [ValidateRange(0,150)][int]$TransactionPoolSize = 0,
+  [ValidateRange(0,150)][int]$TransactionPoolMaxSize = 0,
+  [string]$OutputLabel = ""
 )
 # Creates/resets only cs6510_materializer_bench, then runs the unchanged load client.
 # Requires DB_USER and DB_PASSWORD in the environment and prebuilt service/client JARs.
@@ -11,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path '../').Path
 $server = (Resolve-Path '.').Path
 $client = Join-Path $repo 'load-client'
-$results = Join-Path $repo "load-client/reports/scan-optimization/$Variant"
+$results = if ($OutputLabel) { Join-Path $repo "load-client/reports/transaction-optimization/$OutputLabel" } else { Join-Path $repo "load-client/reports/scan-optimization/$Variant" }
 New-Item -ItemType Directory -Force -Path $results | Out-Null
 $runResults = Join-Path $results $Workload
 New-Item -ItemType Directory -Force -Path $runResults | Out-Null
@@ -19,7 +22,7 @@ $mysql = $MySqlExe
 $nginx = $NginxBin
 $java = $JavaExe
 $benchDb = 'cs6510_materializer_bench'
-$prefix = Join-Path $env:TEMP ('cs6510-materializer-nginx-' + $PID)
+$prefix = Join-Path $env:TEMP ('cs6510-materializer-nginx-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path (Join-Path $prefix 'conf'),(Join-Path $prefix 'logs'),(Join-Path $prefix 'temp') | Out-Null
 $config = (Get-Content (Join-Path $repo 'deploy/nginx.conf') -Raw).
     Replace('8081','18081').Replace('8082','18082').Replace('8083','18083').Replace('8080','18080')
@@ -47,12 +50,18 @@ function Start-Services {
   $script:running = @()
   foreach ($domain in @('transaction','inventory','analytics')) {
     $port = switch ($domain) { 'transaction' {18081} 'inventory' {18082} 'analytics' {18083} }
-    $env:DB_POOL_SIZE = if ($Variant -eq 'retained' -and $domain -eq 'transaction') { '32' } else { '10' }
+    $env:DB_POOL_SIZE = if ($domain -eq 'transaction') { if ($TransactionPoolSize -gt 0) { [string]$TransactionPoolSize } elseif ($Variant -eq 'retained') { '32' } else { '10' } } else { '10' }
+    if ($domain -eq 'transaction' -and $TransactionPoolMaxSize -gt 0) { $env:DB_POOL_MAX_SIZE = [string]$TransactionPoolMaxSize } else { Remove-Item Env:DB_POOL_MAX_SIZE -ErrorAction SilentlyContinue }
     $cp = "out/$domain.jar;out/common.jar;lib/mysql-connector-j-9.0.0.jar"
     $proc = Start-Process -FilePath $java -ArgumentList @('-cp',$cp,("$domain." + (Get-Culture).TextInfo.ToTitleCase($domain) + 'Main'),$port) -WorkingDirectory $server -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runResults "$domain-stdout.log") -RedirectStandardError (Join-Path $runResults "$domain-stderr.log")
     $script:running += $proc
   }
+  Start-Sleep -Milliseconds 500
   for ($i=0; $i -lt 30; $i++) {
+    foreach ($proc in $script:running) {
+      $proc.Refresh()
+      if ($proc.HasExited) { throw "Benchmark service exited during startup: PID $($proc.Id)" }
+    }
     try {
       $response = Invoke-WebRequest -Uri 'http://127.0.0.1:18080/items' -TimeoutSec 2
       if ($response.StatusCode -eq 200) { return }
@@ -108,6 +117,8 @@ function Run-Phase([string]$phase,[int]$stations,[int]$seconds) {
   }
 }
 try {
+  $occupied = Get-NetTCPConnection -LocalPort 18080,18081,18082,18083 -State Listen -ErrorAction SilentlyContinue
+  if ($occupied) { throw 'Disposable benchmark ports 18080-18083 are occupied' }
   'phase,utc_ms,raw_events,materialized_events,pending_events,oldest_pending_ms,row_lock_waits,row_lock_time_ms,threads_running,threads_connected,commits,log_fsyncs,log_waits' | Set-Content (Join-Path $runResults 'samples.csv')
   & $nginx -p "$prefix/" -c conf/nginx.conf -t
   if ($LASTEXITCODE -ne 0) { throw 'Nginx config invalid' }
@@ -118,8 +129,10 @@ try {
 } finally {
   Stop-Services
   & $nginx -p "$prefix/" -c conf/nginx.conf -s stop 2>$null
+  Get-CimInstance Win32_Process -Filter "name='nginx.exe'" | Where-Object { $_.CommandLine -like "*$prefix*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
   Remove-Item Env:SCAN_PROFILE -ErrorAction SilentlyContinue
+  Remove-Item Env:DB_POOL_MAX_SIZE -ErrorAction SilentlyContinue
 }
 
 

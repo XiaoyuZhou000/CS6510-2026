@@ -13,16 +13,23 @@ public final class JdbcTransactionStore implements TransactionStore {
 
     @Override
     public void insertOpen(String transactionId, String stationId) {
+        long storeStart = System.nanoTime();
         Connection c = pool.borrow();
+        ScanProfiler.record(ScanProfiler.Phase.START_POOL, storeStart);
+        long insertStart = System.nanoTime();
         try (PreparedStatement s = c.prepareStatement(
                 "INSERT INTO `transaction` (transaction_id,station_id,status,total_amount,started_at) " +
                 "VALUES (?,?,'OPEN',0.00,NOW(3))")) {
             s.setString(1, transactionId);
             s.setString(2, stationId);
             s.executeUpdate();
+            ScanProfiler.record(ScanProfiler.Phase.START_INSERT, insertStart);
         } catch (SQLException e) {
             throw new StoreFailure("Failed to create transaction", e);
-        } finally { pool.release(c); }
+        } finally {
+            pool.release(c);
+            ScanProfiler.record(ScanProfiler.Phase.START_STORE, storeStart);
+        }
     }
 
     @Override

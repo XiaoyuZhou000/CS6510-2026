@@ -4,12 +4,17 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
 
-/** Opt-in, aggregate Scan timings. Never logs request data or performs I/O on a request. */
+/** Opt-in, aggregate lifecycle timings. Never logs request data or performs I/O on a request. */
 public final class ScanProfiler {
     public enum Phase {
         REQUEST_TOTAL, RESPONSE_WRITE, POOL_ACQUIRE, BEGIN, TRANSACTION_LOCK,
         CATALOG_LOOKUP, LINE_UPSERT, LINE_PRICE, BASKET_AGGREGATE,
-        TOTAL_UPDATE, EVENT_INSERT, COMMIT, TRANSACTION_EXECUTION, POOL_RETURN, STORE_TOTAL
+        TOTAL_UPDATE, EVENT_INSERT, COMMIT, TRANSACTION_EXECUTION, POOL_RETURN, STORE_TOTAL,
+        START_POOL, START_INSERT, START_STORE, START_REQUEST,
+        COMPLETE_POOL, COMPLETE_BEGIN, COMPLETE_LOCK, COMPLETE_LINES,
+        COMPLETE_INVENTORY, COMPLETE_STATUS_UPDATE, COMPLETE_TIMESTAMP,
+        COMPLETE_COMMIT, COMPLETE_ROLLBACK, COMPLETE_POOL_RETURN,
+        COMPLETE_SUCCESS_STORE, COMPLETE_REJECTED_STORE, COMPLETE_REQUEST
     }
 
     private static final boolean ENABLED = Boolean.parseBoolean(System.getenv("SCAN_PROFILE"));

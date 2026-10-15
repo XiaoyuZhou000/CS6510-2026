@@ -3,31 +3,46 @@ package database;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class ConnectionPool implements AutoCloseable {
     private final BlockingQueue<Connection> pool;
-    private final List<Connection> connections = new ArrayList<>();
+    private final List<Connection> connections = new CopyOnWriteArrayList<>();
+    private final String url;
+    private final String user;
+    private final String password;
+    private final int maxSize;
+    private final AtomicInteger reserved = new AtomicInteger();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicInteger waiters = new AtomicInteger();
 
     public ConnectionPool(String host, int port, String dbName, String user, String password, int size)
             throws SQLException {
-        if (size <= 0) throw new IllegalArgumentException("DB_POOL_SIZE must be positive");
-        pool = new ArrayBlockingQueue<>(size);
-        String url = "jdbc:mysql://" + host + ":" + port + "/" + dbName
+        this(host, port, dbName, user, password, size, size);
+    }
+
+    public ConnectionPool(String host, int port, String dbName, String user, String password,
+                          int initialSize, int maxSize) throws SQLException {
+        if (initialSize <= 0 || maxSize < initialSize)
+            throw new IllegalArgumentException("Require 0 < initial pool size <= maximum pool size");
+        this.maxSize = maxSize;
+        this.user = user;
+        this.password = password;
+        this.url = "jdbc:mysql://" + host + ":" + port + "/" + dbName
                 + "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC";
+        pool = new ArrayBlockingQueue<>(maxSize);
         try {
-            for (int i = 0; i < size; i++) {
+            for (int i = 0; i < initialSize; i++) {
                 Connection conn = DriverManager.getConnection(url, user, password);
                 connections.add(conn);
                 pool.add(conn);
+                reserved.incrementAndGet();
             }
         } catch (SQLException e) {
             for (Connection conn : connections) {
@@ -44,7 +59,9 @@ public final class ConnectionPool implements AutoCloseable {
         waiters.incrementAndGet();
         try {
             while (!closed.get()) {
-                Connection conn = pool.poll(100, TimeUnit.MILLISECONDS);
+                Connection conn = pool.poll();
+                if (conn == null) conn = grow();
+                if (conn == null) conn = pool.poll(100, TimeUnit.MILLISECONDS);
                 if (conn != null) {
                     if (closed.get()) {
                         conn.close();
@@ -62,6 +79,27 @@ public final class ConnectionPool implements AutoCloseable {
         } finally {
             waiters.decrementAndGet();
         }
+    }
+
+    private Connection grow() {
+        while (!closed.get()) {
+            int current = reserved.get();
+            if (current >= maxSize) return null;
+            if (!reserved.compareAndSet(current, current + 1)) continue;
+            try {
+                Connection conn = DriverManager.getConnection(url, user, password);
+                connections.add(conn);
+                if (closed.get()) {
+                    conn.close();
+                    return null;
+                }
+                return conn;
+            } catch (SQLException e) {
+                reserved.decrementAndGet();
+                throw new StoreFailure("Failed to grow DB connection pool", e);
+            }
+        }
+        return null;
     }
 
     public Occupancy occupancy() {
