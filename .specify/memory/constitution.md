@@ -1,24 +1,50 @@
 <!--
 Sync Impact Report
 ==================
-Version change: 3.0.0 → 4.0.0
-Rationale: MAJOR. Independent domain-service deployment and durable scan-event recovery
-replace the single-process architecture and its allowance for non-durable accepted scans.
+Version change: 5.0.0 → 5.1.0
+Rationale: MINOR. Adds explicit rules for forward recovery after a Saga pivot, for
+transient versus settled Saga states, and for in-process coordination mechanisms. No
+principle is removed or renamed, and every design that complies with v5.0.0 still
+complies. Durable forward recovery and all existing safety invariants are preserved.
+Source: specs/005-microservices-architecture/constitution-amendment-proposal.md, approved
+2026-10-20 (changes 1-8, with the approved wording for change 8).
 
 Modified principles:
-  - I. Inventory Consistency → I. Checkout and Inventory Consistency
-  - II. Durable Completion & Reliability → III. Centralized Persistence and Durability
-  - III. Contract Fidelity → IV. REST Contract Fidelity
-  - IV. Performance Under Concurrency → VII. Performance and Operational Simplicity
-  - V. Analytics Window Accuracy → VI. Analytics Pipeline and Window Accuracy
-  - VI. Testability & Repeatability → VIII. Verification and Benchmark Evidence
-  - VII. Layer Boundary Integrity → II. Domain Service Boundaries
-  - VIII. Analytics Pipeline Integrity → VI. Analytics Pipeline and Window Accuracy
-Added sections: none; Core Principles now includes V. Recoverable Event Processing.
+  - II. Database per Service: added a bullet stating that in-process locks, caches, wait
+    registries, and retry schedules are optimizations, never the sole authority for
+    durability, idempotency, inventory correctness, or cross-instance consistency, and
+    that safety guarantees hold across crashes, restarts, and multiple instances.
+  - V. Distributed Transactions and Saga Coordination:
+    - the plan-definition bullet accepts a retry and idempotency rule for steps after a
+      forward-recovery pivot;
+    - new forward-recovery bullet;
+    - Inventory idempotency is keyed per checkout attempt, operation keys are still
+      durably recorded, and a transaction has at most one effective deduction;
+    - the consistency bullet applies once the Saga settles.
+  - VI. Checkout and Inventory Consistency: new bullet separating settled guarantees
+    from pending-state rules, with a narrow integrity-fault exception.
+  - IX. Verification and Benchmark Evidence: compensation tests are split into end-to-end
+    tests of triggerable compensations and direct tests of reserved capabilities.
+Modified sections:
+  - Development Workflow & Quality Gates: tracing covers forward-recovery rules.
+Added sections: none.
 Removed sections: none.
-Follow-up TODOs: none.
+Templates and commands (none restates a changed clause):
+  - .specify/templates/plan-template.md: ✅ no change needed
+  - .specify/templates/spec-template.md: ✅ no change needed
+  - .specify/templates/tasks-template.md: ✅ no change needed
+  - .specify/templates/checklist-template.md: ✅ no change needed
+  - .claude/skills/speckit-*: ✅ no change needed
+Dependent documents (updated alongside this amendment, outside this command):
+  - specs/005-microservices-architecture/: the plan's Constitution Check and Complexity
+    Tracking, the spec's Constitution Alignment (with new item 7), research R5, R8, R10,
+    R11, and R17, the checkout Saga contract, tasks (Implementation Rule 5, T133, and
+    multi-instance and compensation test bullets), the requirements checklist, and the
+    amendment record.
+Follow-up TODOs: none. The v5.0.0 report's TODO (Principle V derived from truncated
+  input; confirm or amend) is closed: Principle V was reviewed and amended explicitly.
 
-This report is temporary review material and should be removed before commit.
+This report is temporary review material and must be removed before commit.
 -->
 
 # Self-Checkout System Constitution
@@ -27,196 +53,274 @@ This report is temporary review material and should be removed before commit.
 
 When requirements compete, correctness and recoverability take precedence over
 throughput. Explicit assignment requirements take precedence over optional design
-preferences.
+preferences. Business rules, external API contracts, and correctness guarantees from
+prior iterations remain in force unless a principle below explicitly replaces them.
 
-### I. Checkout and Inventory Consistency (NON-NEGOTIABLE)
+### I. Independent Microservices and Domain Ownership (NON-NEGOTIABLE)
 
-- Scanning MUST NOT decrement stock; stock changes only when a transaction completes.
-- Completion MUST atomically commit the completed-transaction state and all required
-  inventory checks and decrements, or commit none of them. Repeated completion MUST NOT
-  decrement stock again.
+- The system MUST consist of three independently deployable microservices:
+  - **Transaction Service** owns the transaction lifecycle, shopping baskets, accepted
+    scans, captured prices, transaction states, and checkout orchestration. It
+    coordinates checkout completion with Inventory Service and owns the durable records
+    required for transaction recovery and idempotency.
+  - **Inventory Service** owns the product catalog, product availability, stock
+    quantities, and inventory reservations or deductions. It is the sole authority for
+    inventory mutations, MUST prevent overselling, and MUST apply inventory operations
+    atomically.
+  - **Analytics Service** owns accepted-scan analytics, event consumption progress,
+    sliding/hopping window computation, ranking, and persisted analytics results. It
+    MUST operate independently of synchronous checkout processing.
+- Each service MUST be independently buildable, startable, stoppable, and deployable,
+  with its own runtime, entry point, configuration, and port.
+- Service responsibilities MUST remain clearly separated. Business logic and persistence
+  ownership MUST NOT leak across service boundaries. Within each service, API, business,
+  and persistence layers MUST remain distinct; business rules MUST NOT live in HTTP/gRPC
+  handlers or generic database adapters.
+- Shared libraries (e.g., generated gRPC stubs, utilities) MAY be used but MUST NOT
+  contain cross-domain business logic or create runtime dependencies between services.
+- Additional services (other than an API Gateway) MUST have a documented business need.
+
+Rationale: Capability ownership is what makes independent deployment and independent
+data stores meaningful.
+
+### II. Database per Service (NON-NEGOTIABLE)
+
+- Each microservice MUST own an independent data store. For local development, separate
+  MySQL databases or schemas within one MySQL instance MAY be used, provided ownership
+  and access isolation are strictly enforced (e.g., separate schemas and per-service
+  credentials limited to the owning schema).
+- Each service MUST access only its own database. Direct SQL queries, joins, foreign
+  keys, or transactions spanning databases owned by different services are prohibited.
+  No service may directly read or modify another service's tables.
+- Cross-service data access MUST occur through explicitly defined service interfaces or
+  reliable event delivery. The architecture MUST NOT rely on a shared database as an
+  implicit communication mechanism.
+- Each service MUST manage its own local database transactions.
+- Data duplication across services MAY be used when justified by performance or
+  availability (e.g., a product/price replica in Transaction Service), but replicated
+  data MUST have a documented source of truth, synchronization mechanism, and
+  consistency model.
+- Acknowledged state MUST be durable in the owning service's database and recoverable
+  after that service restarts without manual reconstruction. In-memory caches MAY
+  accelerate access but MUST NOT be the sole record of acknowledged state.
+- In-process mechanisms such as locks, caches, wait registries, and retry schedules MAY
+  be used as performance and coordination optimizations, but MUST NOT be the sole
+  authority for durability, idempotency, inventory correctness, or cross-instance
+  consistency; durable state, database guards, and idempotent operations remain
+  authoritative. All safety guarantees MUST hold across process crashes, restarts, and
+  multiple concurrent instances of a service.
+
+Rationale: Independent data ownership is the defining property of this iteration and
+removes hidden coupling through shared tables.
+
+### III. gRPC and Protocol Buffers for Internal Communication (NON-NEGOTIABLE)
+
+- Internal synchronous service-to-service communication MUST use gRPC with Protocol
+  Buffers. Service interfaces MUST be defined in version-controlled `.proto` files.
+- RPC request and response messages MUST have clear validation and error semantics,
+  using defined gRPC status codes and documented business error details.
+- gRPC channels SHOULD be created once and reused rather than created per request.
+- Every remote call MUST have a defined deadline/timeout and retry policy. Retries MUST
+  NOT introduce duplicate business operations; operations that may be retried MUST be
+  idempotent, keyed by a stable identifier (e.g., transaction ID or event ID).
+- Internal interfaces MUST NOT expose database implementation details (table names,
+  SQL, row identifiers not part of the domain).
+- Unnecessary synchronous RPC MUST be avoided, particularly inside the high-frequency
+  Scan operation. Asynchronous communication MAY use a reliable event-delivery mechanism
+  when appropriate.
+- Performance optimizations MUST NOT compromise service ownership or consistency
+  guarantees.
+
+Rationale: Explicit, typed contracts make cross-service coupling visible, testable, and
+safe to retry.
+
+### IV. External REST API and Backward Compatibility (NON-NEGOTIABLE)
+
+- The existing Load Client and its REST contract MUST remain unchanged. Existing HTTP
+  endpoints, methods, request and response formats, status codes, and observable
+  business behavior as specified in `spec/self-checkout-openapi.yaml` MUST be preserved.
+  That OpenAPI specification remains authoritative for external compatibility.
+- The Load Client MUST run without source modifications. A microservices redesign MUST
+  NOT require any client-side change.
+- An API Gateway such as Nginx MAY expose the existing REST interface and route requests
+  to the owning service. Routing MUST be documented in deployment configuration.
+- Internal gRPC details MUST remain invisible to the external client. Internal errors,
+  timeouts, and unavailability MUST be translated into the established external HTTP
+  error contract.
+
+Rationale: A stable external contract keeps architecture iterations comparable and
+protects existing clients.
+
+### V. Distributed Transactions and Saga Coordination (NON-NEGOTIABLE)
+
+- Cross-service business operations MUST NOT assume a single ACID transaction across
+  independent service databases; two-phase commit across service databases is not used.
+- Checkout completion MUST use an explicitly designed orchestration-based Saga
+  coordinated by Transaction Service. The plan MUST define each Saga step, its local
+  transaction, its compensating action or, for a step after a forward-recovery pivot,
+  its retry and idempotency rule, and the persisted Saga/transaction states.
+- A Saga MAY use forward recovery after its pivot step. Once the pivot commits (for
+  checkout, Inventory Service's atomic stock deduction), the Saga MUST run to completion
+  by retrying its remaining steps; those steps MUST be idempotent and need no
+  compensating action. Steps before the pivot MUST have compensating actions. A
+  compensating action for the pivot MAY be kept as a reserved capability that no normal
+  path invokes; it MUST still be durable, idempotent, and directly tested.
+- Saga progress MUST be persisted in Transaction Service's database before and after
+  each remote step so an interrupted Saga can be resumed or compensated after restart
+  without manual intervention.
+- Inventory operations invoked by the Saga MUST be atomic within Inventory Service and
+  idempotent per checkout attempt, where each attempt has a stable identifier associated
+  with its transaction: a retried or duplicated request MUST NOT deduct or restore stock
+  more than once. Inventory Service MUST durably record processed operation keys. A
+  transaction MAY make a new attempt after a definitive rejection or a confirmed
+  restoration, but MUST NOT have more than one effective stock deduction.
+- Insufficient stock or any failed step MUST leave the system consistent once the Saga
+  settles: no partial stock deduction may remain for a transaction that is not
+  completed, and compensations MUST themselves be idempotent and retried until they
+  succeed.
+- The client MUST receive a success response only after the Saga reaches a committed
+  completed state. Repeated completion requests MUST return the established result
+  without re-executing inventory effects.
+- Choreography MAY be used only for non-critical asynchronous propagation (e.g.,
+  analytics events); it MUST NOT replace orchestration for checkout completion without
+  a documented amendment.
+
+Rationale: With separate databases, correctness depends on explicit, recoverable
+coordination rather than an implicit shared transaction.
+
+### VI. Checkout and Inventory Consistency (NON-NEGOTIABLE)
+
+- Scanning MUST NOT decrement stock; stock changes only through checkout completion.
+- The price captured at scan time MUST be the price recorded for that line; later
+  catalog changes MUST NOT alter accepted scans.
 - Concurrent completions MUST prevent overselling and lost updates. For each SKU,
   `initial_stock - final_stock` MUST equal the quantity sold in completed transactions,
-  and final stock MUST NOT be negative.
-- A success response and receipt MUST follow the successful commit of the required
-  transaction and inventory changes.
+  and final stock MUST NOT be negative, including after retries, crashes, and
+  compensations.
+- Each transaction MUST end in exactly one terminal outcome as observed by clients, and
+  that outcome MUST agree with Inventory Service's recorded effects.
+- Guarantees about completed transactions, final stock, and agreement between services
+  apply to settled Sagas. While a Saga is pending, its state MUST be durable, MUST NOT be
+  reported as success, and MUST settle automatically, without manual intervention, once
+  the required services are reachable. The only exception is a detected integrity fault,
+  meaning a contract violation that cannot occur in correct operation: the Saga MUST then
+  remain pending, MUST NOT be settled on an assumed outcome, and MUST raise an alarm
+  visible to operators. A server error returned while a Saga is pending is not a
+  terminal outcome; the settled state is.
 
-Rationale: A sale is valid only when its inventory and transaction records agree under
-concurrent checkout.
+Rationale: A sale is valid only when transaction records and inventory agree, regardless
+of how the work is distributed.
 
-### II. Domain Service Boundaries (NON-NEGOTIABLE)
+### VII. Reliable Event Delivery and Analytics Accuracy
 
-- The system MUST be decomposed by business capability into independently buildable,
-  runnable, configurable, and deployable services, each with its own runtime and entry
-  point. The preferred boundaries are Transaction (checkout lifecycle, scans, completion,
-  transaction state), Inventory (catalog, inventory queries, low-stock reporting), and
-  Analytics (popular-item processing and ranking). A different boundary MUST be justified
-  by business responsibility rather than a technical layer or table.
-- Each service MUST retain clear API, business, and persistence boundaries internally.
-  Business rules MUST NOT be placed in HTTP handlers or generic database adapters.
-- The Analytics Service MUST retain the existing Window, Ranking, and Persistence filter
-  pipeline. Services MUST NOT depend on another service's process or startup to perform
-  their own assigned responsibility, except for shared database availability.
-- Additional services MUST have a documented business need; decomposition solely to add
-  layers, tables, or infrastructure is insufficient.
-
-Rationale: Capability ownership makes independent deployment useful while preserving
-the separation of concerns gained in the layered and pipeline iterations.
-
-### III. Centralized Persistence and Durability (NON-NEGOTIABLE)
-
-- All domain services MUST use one centralized MySQL database. Persisted database state
-  MUST be the primary means of cross-service coordination. Services MAY access the same
-  tables when their responsibilities require it; for example, Transaction MAY update
-  inventory through JDBC within a checkout transaction.
-- Direct service-to-service REST, gRPC, or other RPC MUST NOT be introduced unless a
-  specific need is documented and the database-based approach is insufficient. gRPC is
-  not part of the required external interface.
-- Shared JDBC or persistence code SHOULD be factored into reusable components when it
-  prevents duplication. Shared components MUST NOT contain cross-domain business logic
-  or create runtime dependencies between services.
-- Accepted business events needed for analytics MUST be durably stored in MySQL. An event
-  MUST NOT be acknowledged as durably accepted before its required database transaction
-  commits. Transaction Service MUST persist the event information within the appropriate
-  transactional workflow. In-memory baskets or caches MAY accelerate access but MUST NOT
-  be the sole record of accepted events or committed transactions.
-- Acknowledged transaction state MUST be recoverable after Transaction Service restart
-  without manual reconstruction.
-- Database access MUST preserve transaction integrity and concurrency safety.
-
-Rationale: The shared database is the assignment's coordination boundary and the source
-of truth after a service crash.
-
-### IV. REST Contract Fidelity (NON-NEGOTIABLE)
-
-- The existing HTTP/REST endpoints MUST retain their request and response shapes,
-  status codes, and error semantics as specified in `spec/self-checkout-openapi.yaml`.
-  The provided load client MUST work without modification.
-- Any routing needed to expose multiple services through the existing client-facing
-  contract MUST be documented and justified. OpenAPI MAY document or validate that
-  contract without adding unnecessary runtime machinery.
-- External communication MUST remain HTTP/REST. gRPC MUST NOT be introduced without a
-  demonstrated technical requirement and a documented compatibility decision.
-
-Rationale: A stable contract keeps the architecture iterations comparable and protects
-existing clients.
-
-### V. Recoverable Event Processing (NON-NEGOTIABLE)
-
-- Analytics Service MUST consume persisted database events, not direct in-process calls
-  from Transaction Service. It MUST eventually reflect every relevant committed scan
-  event, including events accepted before an unexpected Analytics Service termination.
-- Processing MUST tolerate duplicate delivery, interrupted work, and restart without
-  losing or double-counting accepted events. Durable event order, checkpoint semantics,
-  and the boundary between processing and checkpoint commits MUST be defined in the
-  technical plan and tested against crash points.
-- Restart MUST reconstruct correct sliding-window and ranking state from durable data
-  without manual reconstruction of accepted transactions. Rebuilding from event history
-  MAY occur during initialization or recovery; normal queries SHOULD use the latest
-  complete materialized result.
-- Existing `AnalyticsLog`, `PersistenceFilter`, and related persistence mechanisms MUST
-  be evaluated for reuse before replacement.
-
-Rationale: A process-local queue cannot provide a recovery guarantee once Analytics runs
-separately from Transaction.
-
-### VI. Analytics Pipeline and Window Accuracy
-
-- Analytics Service MUST preserve separate Window, Ranking, and Persistence filter
-  responsibilities, ordered asynchronous queue-based pipes rather than direct downstream
-  calls, and immutable data passed between stages. In-memory sliding-window and ranking
-  structures SHOULD support incremental processing during normal operation; database
-  history remains the recoverable source.
+- Accepted-scan events MUST be durably recorded by Transaction Service within the same
+  local transaction that accepts the scan (e.g., a transactional outbox), and delivered
+  to Analytics Service through gRPC or another reliable mechanism. Analytics Service MUST
+  NOT read Transaction Service's database.
+- Delivery MAY be at-least-once; Analytics Service MUST deduplicate by stable event
+  identity and durably record its consumption progress in its own database so that
+  duplicates, interrupted work, and restarts of either service neither lose nor
+  double-count events. Event order and checkpoint semantics MUST be defined in the plan.
+- Analytics Service MUST preserve separate Window, Ranking, and Persistence
+  responsibilities with ordered, asynchronous hand-off between stages and immutable
+  data between them.
 - Popularity MUST count accepted scans, not completed sales. The established hopping
   window of the most recent 1,000 scans, recomputed every 500 scans, MUST retain its
-  current boundaries and business rules. Ranking MUST be deterministic, with SKU-ascending
-  tie breaking and the top 10 items for each complete window.
-- The endpoint MUST return only a complete, successfully persisted window and its
-  boundaries; it MUST NOT expose partial or in-flight state. Processing and persistence
-  MUST preserve event and window order across retry and recovery.
-- Analytics MAY be eventually consistent with committed scans. The plan MUST define the
-  visibility and failure behavior, and no accepted event may be silently discarded.
+  boundaries and rules. Ranking MUST be deterministic, with SKU-ascending tie breaking
+  and the top 10 items per complete window.
+- The popular-items endpoint MUST return only a complete, successfully persisted window
+  and its boundaries; it MUST NOT expose partial or in-flight state. Restart MUST
+  reconstruct correct window and ranking state from Analytics Service's durable data.
+- Analytics MAY be eventually consistent with accepted scans; the plan MUST define the
+  visibility delay and failure behavior. Analytics unavailability MUST NOT block Scan or
+  checkout.
 
-Rationale: Durable input and incremental in-memory filters preserve both recoverability
-and the prior pipeline's efficient query path.
+Rationale: Reliable, idempotent delivery preserves analytics correctness without coupling
+analytics to the checkout path.
 
-### VII. Performance and Operational Simplicity
+### VIII. Performance and Operational Simplicity
 
 - Correctness and recovery guarantees MUST NOT be weakened for throughput. Services
-  SHOULD avoid redundant queries, unnecessary synchronous writes, and excessive polling;
-  required durable event writes are not optional.
-- JDBC access, indexing, connection reuse, and incremental event consumption SHOULD be
-  chosen to sustain the existing default and stress workloads. Performance results MUST
+  SHOULD avoid redundant queries, unnecessary synchronous writes and RPCs, and excessive
+  polling; required durable writes are not optional.
+- Connection pooling, gRPC channel reuse, indexing, batching, and local replicas SHOULD
+  be chosen to sustain the default and stress workloads. Performance results MUST
   include throughput, error rate, and tail latency for comparison with prior iterations.
-- Message brokers, service meshes, API gateways, and other infrastructure MUST NOT be
-  added without a concrete requirement and documented benefit. Simple Java JARs are
-  acceptable; Docker MAY be used when it simplifies deployment.
-- Each service MUST document its build, startup, port, configuration, database connection,
-  and dependencies. Independent restart MUST preserve shared state correctness.
+- Infrastructure beyond the three services, their databases, and an optional API
+  Gateway (e.g., message brokers, service meshes) MUST NOT be added without a concrete
+  requirement and documented benefit. Simple Java JARs are acceptable; Docker MAY be
+  used when it simplifies deployment.
+- Each service MUST document its build, startup, ports (HTTP and gRPC), configuration,
+  database connection, and dependencies. Restarting any single service MUST preserve
+  correctness of the overall system.
 
-Rationale: This academic system needs measurable performance and repeatable operation,
-without infrastructure that obscures the required service boundaries.
+Rationale: The system needs measurable performance and repeatable operation without
+infrastructure that obscures service boundaries.
 
-### VIII. Verification and Benchmark Evidence
+### IX. Verification and Benchmark Evidence
 
 - Existing functional behavior and relevant automated tests MUST be preserved. Tests MUST
-  cover service isolation, API compatibility, concurrent checkout and inventory
-  invariants, durable event consumption, duplicate handling, and Analytics Service crash
-  and restart at persistence, processing, and checkpoint boundaries.
-- Recovery tests MUST verify that persisted events reconstruct the correct window and
-  ranking without loss or double counting. Concurrent completion tests MUST reconcile
-  final stock with completed sales.
-- The unchanged load client MUST run against the actual distributed deployment and
-  centralized MySQL database from a reproducible baseline. Two genuine JSON reports MUST
-  be committed: one with default parameters and one using
-  `java -cp out Main --stations=100 --duration=120`. Results MUST NOT be fabricated.
+  cover database isolation, `.proto` contract behavior, external API compatibility,
+  concurrent checkout and inventory invariants, Saga success, insufficient stock,
+  idempotent retries, and crash/restart at Saga steps. Tests MUST also cover every
+  compensation that a Saga path can trigger, tested end to end, and every reserved
+  compensation capability, tested directly; direct tests are not reported as end-to-end
+  Saga compensation tests.
+- Tests MUST verify reliable analytics delivery: no loss or double counting across
+  duplicate delivery and restart of Transaction or Analytics Service.
+- Concurrent completion tests MUST reconcile final stock with completed sales.
+- The unchanged Load Client MUST run against the actual microservice deployment from a
+  reproducible baseline. Two genuine JSON reports MUST be committed: one with default
+  parameters and one using `java -cp out Main --stations=100 --duration=120`. Results
+  MUST NOT be fabricated.
 
-Rationale: Architecture and recovery claims require executable evidence under the same
+Rationale: Distributed correctness claims require executable evidence under the same
 client and workloads used for earlier iterations.
 
 ## Architectural Constraints
 
-- This iteration MUST begin from the `pipeline-architecture` implementation and proceed
-  through incremental refactoring. Tested business logic, persistence adapters, HTTP
-  handlers, and pipeline filters SHOULD be reused where practical. Unrelated feature
-  changes SHOULD be avoided.
-- Transaction Service owns checkout lifecycle and atomic completion; Inventory Service
-  owns catalog and low-stock queries; Analytics Service owns persisted-event consumption,
-  windowing, ranking, and popular-item queries. Shared table access does not transfer
-  ownership of those business responsibilities.
-- Every service MUST connect to the same configurable MySQL instance. The existing REST
-  routes MUST remain reachable to the unchanged client; any routing arrangement MUST be
-  explicit in deployment documentation.
-- The system MUST preserve the established 2,000-item, 10,000-units-per-item reset
-  baseline for comparable runs. Default and stress reports MUST identify their settings
-  and the distributed deployment used.
+- This iteration MUST evolve from the existing service-based implementation through
+  incremental refactoring. Tested business logic, HTTP handlers, persistence adapters,
+  and analytics filters SHOULD be reused where practical. Unrelated feature changes
+  SHOULD be avoided.
+- Endpoint ownership: Transaction Service serves `/transactions/**`; Inventory Service
+  serves `/items` and `/inventory/low-stock`; Analytics Service serves
+  `/analytics/popular-items`. Each owning service's database is the source of truth for
+  that data.
+- Each service MUST use its own configurable database or schema and credentials. Any
+  data reset or seeding used for benchmarks MUST be performed per service through its
+  own interfaces or scripts, never by one service writing another's data.
+- The established 2,000-item, 10,000-units-per-item baseline MUST be preserved for
+  comparable runs. Default and stress reports MUST identify their settings and the
+  microservice deployment used.
 
 ## Development Workflow & Quality Gates
 
 - Work MUST follow constitution → specification → plan → tasks → implementation. The
-  specification and plan MUST trace service ownership, shared tables, event durability,
-  recovery, routing, and deployment back to these principles.
-- Plans MUST define event ordering, checkpoint and restart rules, transaction boundaries,
-  failure behavior, and the consistency delay visible to analytics users. Significant
-  changes to API behavior, consistency, or analytics semantics MUST be justified.
-- Reviews MUST verify independent service build and restart, no unapproved runtime
-  service coupling, transactional inventory invariants, unchanged REST behavior, and
-  crash-safe analytics without loss or double counting.
+  specification and plan MUST trace service ownership, data stores, `.proto` contracts,
+  Saga steps with their compensations or forward-recovery rules, event delivery, gateway
+  routing, and deployment back to these principles.
+- Plans MUST define deadlines, retry and idempotency keys, Saga states and recovery
+  rules, replicated-data consistency models, event ordering and checkpoints, and the
+  analytics visibility delay.
+- Reviews MUST verify independent build and restart, no cross-database access, gRPC-only
+  internal synchronous calls, idempotent retries, inventory invariants, unchanged REST
+  behavior, and loss-free, duplicate-free analytics.
 - Completion requires passing relevant automated tests and producing both reproducible
-  benchmark JSON files from the distributed deployment and centralized database.
+  benchmark JSON files from the microservice deployment.
 
 ## Governance
 
 - This constitution governs subsequent specifications, plans, tasks, implementation,
-  and code reviews. A conflicting artifact MUST be corrected or an explicit deviation
+  and code reviews. A conflicting artifact MUST be corrected, or an explicit deviation
   from a MUST requirement MUST be documented and justified before acceptance.
 - Amendments MUST record their rationale, affected principles, version, and amendment
   date in this file. The Sync Impact Report is review material and MUST be removed before
   the amended constitution is committed.
 - Semantic versioning applies: MAJOR for incompatible principle or governance changes,
   MINOR for new principles or material additions, and PATCH for non-semantic corrections.
-- Compliance reviews MUST prioritize simplicity, correctness, compatibility, durability,
-  and independent deployability. Implementation choices belong in the relevant
-  specification or plan unless a principle requires them.
+- Compliance reviews MUST prioritize correctness, data ownership, compatibility,
+  recoverability, and independent deployability. Implementation choices belong in the
+  relevant specification or plan unless a principle requires them.
 
-**Version**: 4.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-10-11
+**Version**: 5.1.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-10-20
