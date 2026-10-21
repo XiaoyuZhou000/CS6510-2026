@@ -71,7 +71,7 @@ These rules bind every task below.
 
 **Purpose**: Record the baseline before any change, then add the gRPC contract build.
 
-- [ ] T001 Run the CP0 attribution baseline (R22) on the current, unmodified implementation, commit 26c89af, before any other task, and record it in `load-client/reports/microservices-architecture/checkpoints.md`:
+- [X] T001 Run the CP0 attribution baseline (R22) on the current, unmodified implementation, commit 26c89af, before any other task, and record it in `load-client/reports/microservices-architecture/checkpoints.md`:
   - Build with `server/build.sh` and `load-client/build.sh`, and set `DB_USER` and `DB_PASSWORD`.
   - From `server/`, run three default runs with labels `cp0-default-1`, `cp0-default-2`, and `cp0-default-3`:
     `./benchmark-scan.ps1 -MySqlExe <mysql.exe> -NginxBin <nginx.exe> -JavaExe <JDK21-java.exe> -Variant retained -Workload default -TransactionPoolSize 32 -TransactionPoolMaxSize 64 -OutputLabel cp0-default-1`
@@ -80,29 +80,29 @@ These rules bind every task below.
     - **Columns**: checkpoint, label, workload, `totalTransactions`, change against the CP0 median of the same workload (%), Start/Scan/Complete p95/p99 (client JSON), Complete error count, `Innodb_row_lock_waits` delta, `innodb_flush_log_at_trx_commit`, `sync_binlog`, and a link to the harness output.
     - **Summary**: one row per workload with the median and the range (minimum to maximum) of `totalTransactions`.
   - These runs are the reference for attributing costs at CP1–CP3. The final CP0-versus-CP4 comparison uses fresh, interleaved runs (T152).
-- [ ] T002 Create `server/contracts/pom.xml` (R1):
+- [X] T002 Create `server/contracts/pom.xml` (R1):
   - **Module**: `jar` packaging, groupId `cs6510.selfcheckout`, artifactId `contracts`, Java release 21.
   - **Dependencies**: import `io.grpc:grpc-bom` at one pinned current stable release. Add `grpc-protobuf`, `grpc-stub`, `grpc-netty-shaded`, `grpc-inprocess`, and the matching `protobuf-java` at compile scope, plus the annotations dependency that the pinned grpc-java README requires for generated code on Java 9+, at provided scope.
   - **Code generation**: `kr.motd.maven:os-maven-plugin` as a build extension. The protobuf Maven plugin uses `com.google.protobuf:protoc:<pinned>:exe:${os.detected.classifier}` and `io.grpc:protoc-gen-grpc-java:<grpc version>:exe:${os.detected.classifier}`, with goals `compile` and `compile-custom`.
   - **Outputs**: maven-jar-plugin with `finalName` `contracts` and `outputDirectory` `${project.basedir}/../out`. maven-dependency-plugin `copy-dependencies` (includeScope runtime) to `${project.basedir}/../lib/grpc` at `package`.
-- [ ] T003 [P] Copy the proto files into `server/contracts/src/main/proto/` and make the server copies authoritative (Constitution III):
+- [X] T003 [P] Copy the proto files into `server/contracts/src/main/proto/` and make the server copies authoritative (Constitution III):
   - Copy `specs/005-microservices-architecture/contracts/proto/inventory_service.proto` verbatim to `server/contracts/src/main/proto/selfcheckout/inventory/v1/inventory_service.proto`.
   - Copy `contracts/proto/analytics_ingest.proto` verbatim to `server/contracts/src/main/proto/selfcheckout/analytics/v1/analytics_ingest.proto`.
   - Replace the body of each spec copy with a one-line comment pointing to its new server path.
-- [ ] T004 Update `server/build.sh`:
+- [X] T004 Update `server/build.sh`:
   - Add `build_contracts`. It exits with a clear message if `mvn` is missing, runs `mvn -q -f contracts/pom.xml -DskipTests package` (adding `-o` when `MAVEN_OFFLINE=1`), and verifies that `out/contracts.jar` and `lib/grpc/` exist.
   - Call it before `build_common` for `all` and for every single-service target.
   - Compile `common` with `out/contracts.jar${SEP}lib/grpc/*${SEP}${MYSQL_CONNECTOR}`, and each service with `out/common.jar${SEP}out/contracts.jar${SEP}lib/grpc/*${SEP}${MYSQL_CONNECTOR}`. Quote the wildcard.
   - Run `./build.sh` and `./build.sh inventory`, and confirm that the jars are produced.
-- [ ] T005 [P] Update `server/run-transaction.sh`, `server/run-inventory.sh`, and `server/run-analytics.sh`:
+- [X] T005 [P] Update `server/run-transaction.sh`, `server/run-inventory.sh`, and `server/run-analytics.sh`:
   - Fail clearly if `out/contracts.jar` or `lib/grpc/` is missing.
   - Launch with `out/<service>.jar${SEP}out/common.jar${SEP}out/contracts.jar${SEP}lib/grpc/*${SEP}lib/mysql-connector-j-9.0.0.jar`.
   - Keep the Windows `;` separator and the optional port argument.
-- [ ] T006 [P] Update `server/build-tests.sh` and `server/run-tests.sh`:
+- [X] T006 [P] Update `server/build-tests.sh` and `server/run-tests.sh`:
   - Add `out/contracts.jar` and `lib/grpc/*` to the javac and java classpaths, and keep recursive discovery under `server/tests/`. Never compile `server/tests-legacy/`.
   - When `SERVER_BASE_URL` is set, skipped tests in the `rpc.` and `performance.` packages also fail the run, alongside the existing `contract.` and `integration.` checks.
   - When `PARITY_GATE` is set, for example `PARITY_GATE=US2`, pass `-Dparity.gate=$PARITY_GATE` to the test JVM for `CoverageParityLedgerTest` (T134).
-- [ ] T007 [P] Add `server/lib/grpc/` and `server/contracts/target/` to `.gitignore`.
+- [X] T007 [P] Add `server/lib/grpc/` and `server/contracts/target/` to `.gitignore`.
 
 ---
 

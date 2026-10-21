@@ -1,0 +1,44 @@
+// Design baseline for Analytics Service's internal gRPC ingestion interface.
+// At implementation this file moves verbatim to
+// server/contracts/src/main/proto/selfcheckout/analytics/v1/analytics_ingest.proto,
+// which becomes the authoritative, version-controlled contract (Constitution III).
+// Semantics, deadlines, and status codes: ../grpc-internal-contracts.md and
+// ../scan-event-delivery.md
+//
+// Compatibility rules: only additive changes inside v1. Never renumber, reuse, or
+// change the type of an existing field; mark retired fields `reserved`.
+
+syntax = "proto3";
+
+package selfcheckout.analytics.v1;
+
+option java_multiple_files = true;
+option java_package = "contracts.analytics.v1";
+option java_outer_classname = "AnalyticsIngestProto";
+
+service AnalyticsIngestService {
+  // At-least-once delivery from Transaction Service's outbox relay (R10).
+  // Analytics commits every event of the batch durably before responding OK.
+  // Duplicates are ignored by event identity, so redelivery is always safe.
+  rpc DeliverScanEvents(DeliverScanEventsRequest) returns (DeliverScanEventsResponse);
+}
+
+// One accepted scan, which is one physical unit. Its identity is
+// (transaction_id, scan_sequence) and is unique across resets because
+// transaction IDs are UUIDs (R11).
+message ScanEvent {
+  string transaction_id = 1;          // 1–40 characters
+  uint32 scan_sequence = 2;           // >= 1; unit number within the transaction
+  string sku = 3;                     // 1–20 characters
+  string product_name = 4;            // 1–100 characters; captured at scan time (R12)
+  int64 accepted_at_epoch_millis = 5; // Transaction Service's commit-time timestamp
+}
+
+message DeliverScanEventsRequest {
+  repeated ScanEvent events = 1;      // 1–1000 events; a repeated identity counts as a duplicate
+}
+
+message DeliverScanEventsResponse {
+  uint32 stored = 1;                  // newly stored events
+  uint32 duplicates = 2;              // events that were already stored; stored + duplicates = request size
+}

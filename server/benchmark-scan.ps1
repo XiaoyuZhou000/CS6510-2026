@@ -92,6 +92,8 @@ function Run-Phase([string]$phase,[int]$stations,[int]$seconds) {
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
   $args = @('-cp','out','Main',"--baseUrl=http://127.0.0.1:18080","--stations=$stations","--duration=$seconds","--reportDir=$dir")
   $clientProc = Start-Process -FilePath $java -ArgumentList $args -WorkingDirectory $client -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runResults "$phase-client.txt") -RedirectStandardError (Join-Path $runResults "$phase-client-errors.txt")
+  # Windows PowerShell 5.1 reports a null ExitCode unless the process handle is opened before exit.
+  $null = $clientProc.Handle
   try {
     while (-not $clientProc.HasExited) {
       Start-Sleep -Seconds 2

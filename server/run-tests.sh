@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-if [ ! -f out/common.jar ] || [ ! -f out/transaction.jar ] ||
-   [ ! -f out/inventory.jar ] || [ ! -f out/analytics.jar ]; then
+if [ ! -f out/common.jar ] || [ ! -f out/contracts.jar ] || [ ! -d lib/grpc ] ||
+   [ ! -f out/transaction.jar ] || [ ! -f out/inventory.jar ] || [ ! -f out/analytics.jar ]; then
   echo "Build artifacts missing - running build.sh first..."
   ./build.sh
 fi
@@ -27,11 +27,16 @@ for arg in "$@"; do
     -DSERVER_BASE_URL=*) STRICT_LIVE=true ;;
   esac
 done
+# PARITY_GATE=US2 (for example) tells CoverageParityLedgerTest which story gate to enforce.
+if [ -n "${PARITY_GATE:-}" ]; then
+  JVM_ARGS+=("-Dparity.gate=$PARITY_GATE")
+fi
 
 REPORT_DIR="out/test-results/run-$(date +%Y%m%d%H%M%S)-$$"
 mkdir -p "$REPORT_DIR"
+# lib/* does not reach lib/grpc/, so the gRPC runtime is listed separately.
 java "${JVM_ARGS[@]}" "$@" \
-  -cp "lib/*${SEP}out/common.jar${SEP}out/transaction.jar${SEP}out/inventory.jar${SEP}out/analytics.jar${SEP}out/test" \
+  -cp "lib/*${SEP}lib/grpc/*${SEP}out/common.jar${SEP}out/contracts.jar${SEP}out/transaction.jar${SEP}out/inventory.jar${SEP}out/analytics.jar${SEP}out/test" \
   org.junit.platform.console.ConsoleLauncher execute --scan-classpath --reports-dir "$REPORT_DIR"
 
 # JUnit assumptions mark unavailable live tests as skipped. An explicitly
@@ -43,7 +48,7 @@ if [ "$STRICT_LIVE" = true ]; then
       sub(/^.*classname="/, "", current)
       sub(/".*$/, "", current)
     }
-    /<skipped/ && current ~ /^(contract|integration)\./ &&
+    /<skipped/ && current ~ /^(contract|integration|rpc|performance)\./ &&
         current != "integration.ResetBaselineTest" { print current }
   ' "$REPORT_DIR"/TEST-*.xml | LC_ALL=C sort -u)"
   if [ -n "$SKIPPED_LIVE" ]; then
