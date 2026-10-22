@@ -8,7 +8,8 @@ import api.json.Json;
 import com.sun.net.httpserver.HttpServer;
 import database.PopularWindowStore;
 import org.junit.jupiter.api.Test;
-import support.AnalyticsDatabase;
+import support.AnalyticsTestSchema;
+import support.InProcessAnalytics;
 
 import java.net.*;
 import java.net.http.*;
@@ -17,32 +18,36 @@ import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * {@code GET /analytics/popular-items} over Analytics' own schema. Analytics is seeded through
+ * {@code DeliverScanEvents}, so the names it reports are the catalog names captured at scan time and stored
+ * in {@code product_name} (R12), never read from another service's tables.
+ */
 public class PopularItemsEndpointTest {
     @Test
     void latestMeansCommittedCheckpointAndNamesComeFromCatalog() throws Exception {
-        try (AnalyticsDatabase db = new AnalyticsDatabase()) {
-            assertTrue(db.windows.readLatest(10).isEmpty());
-            db.windows.writeWindow(snapshot(1, 1000, "sku2", 700));
-            db.windows.writeWindow(snapshot(501, 1500, "sku1", 900));
-            java.sql.Connection conn = db.pool.borrow();
-            try (java.sql.Statement sql = conn.createStatement()) {
-                sql.executeUpdate("UPDATE popular_window SET computed_at='2000-01-01 00:00:00' WHERE window_end=1000");
-            } finally {
-                db.pool.release(conn);
-            }
-            var latest = db.windows.readLatest(10).orElseThrow();
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create(); InProcessAnalytics analytics = InProcessAnalytics.over(schema)) {
+            assertTrue(analytics.windows.readLatest(10).isEmpty());
+            analytics.deliver(List.of(InProcessAnalytics.event("tx-1", 1, "sku1", "Item 1"),
+                    InProcessAnalytics.event("tx-1", 2, "sku2", "Item 2")));
+            analytics.windows.writeWindow(snapshot(1, 1000, "sku2", 700));
+            analytics.windows.writeWindow(snapshot(501, 1500, "sku1", 900));
+            schema.update("UPDATE popular_window SET computed_at='2000-01-01 00:00:00' WHERE window_end=1000");
+            var latest = analytics.windows.readLatest(10).orElseThrow();
             assertEquals(1500, latest.windowEnd(), "Select only the committed checkpoint boundary");
             assertEquals("Item 1", latest.ranks().getFirst().name());
+            assertEquals(schema.productName("sku1"), latest.ranks().getFirst().name(), "the name captured at scan time");
             assertEquals(900, latest.ranks().getFirst().scanCount());
-            assertTrue(db.windows.readLatest(0).orElseThrow().ranks().isEmpty());
-            assertThrows(IllegalArgumentException.class, () -> db.windows.readLatest(-1));
+            assertTrue(analytics.windows.readLatest(0).orElseThrow().ranks().isEmpty());
+            assertThrows(IllegalArgumentException.class, () -> analytics.windows.readLatest(-1));
         }
     }
 
     @Test
     void reportsPersistedWindowWithRankedTopTenAndRequestLocalLimit() throws Exception {
-        try (AnalyticsDatabase db = new AnalyticsDatabase(); HttpClient client = HttpClient.newHttpClient()) {
-            AnalyticsService recorder = new AnalyticsService(db.windows);
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create(); InProcessAnalytics analytics = InProcessAnalytics.over(schema);
+             HttpClient client = HttpClient.newHttpClient()) {
+            AnalyticsService recorder = analytics.startPipeline();
             HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/analytics/popular-items", new AnalyticsHttpHandler(recorder));
             server.start();
@@ -54,12 +59,14 @@ public class PopularItemsEndpointTest {
                 assertTrue(Json.getList(empty, "items").isEmpty());
                 Instant.parse((String) empty.get("computedAt"));
 
+                List<String> scans = new ArrayList<>();
                 for (int i = 1; i <= 12; i++) {
-                    for (int n = 0; n < i * 10; n++) recorder.recordAcceptedScan("sku" + i);
+                    for (int n = 0; n < i * 10; n++) scans.add("sku" + i);
                 }
-                for (int n = 0; n < 220; n++) recorder.recordAcceptedScan("sku12");
-                db.awaitWindow(1000);
-                for (int n = 0; n < 123; n++) recorder.recordAcceptedScan("sku1");
+                for (int n = 0; n < 220; n++) scans.add("sku12");
+                analytics.deliverAll("tx-first", scans);
+                awaitWindow(analytics, 1000);
+                analytics.deliverAll("tx-next", Collections.nCopies(123, "sku1"));
 
                 Map<String, Object> report = get(client, base);
                 assertEquals(Set.of("windowSize", "slideInterval", "windowStart", "windowEnd", "computedAt", "items"), report.keySet());
@@ -67,7 +74,7 @@ public class PopularItemsEndpointTest {
                 assertEquals(500, number(report, "slideInterval"));
                 assertEquals(1, number(report, "windowStart"));
                 assertEquals(1000, number(report, "windowEnd"));
-                assertEquals(db.windows.readLatest(10).orElseThrow().computedAt(), Instant.parse((String) report.get("computedAt")));
+                assertEquals(analytics.windows.readLatest(10).orElseThrow().computedAt(), Instant.parse((String) report.get("computedAt")));
                 List<Object> items = Json.getList(report, "items");
                 assertEquals(10, items.size());
                 for (int rank = 1; rank <= 10; rank++) {
@@ -127,6 +134,15 @@ public class PopularItemsEndpointTest {
             assertEquals(405, request(client, endpoint, "POST").statusCode());
         }
     }
+
+    private static void awaitWindow(InProcessAnalytics analytics, long end) throws Exception {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+        while (analytics.windows.readMaxWindowEnd() < end) {
+            if (System.nanoTime() >= deadline) throw new AssertionError("Checkpoint did not persist: " + end);
+            Thread.sleep(10);
+        }
+    }
+
     private static Map<String, Object> get(HttpClient client, String url) throws Exception {
         HttpResponse<String> response = request(client, url, "GET");
         assertEquals(200, response.statusCode(), response.body());

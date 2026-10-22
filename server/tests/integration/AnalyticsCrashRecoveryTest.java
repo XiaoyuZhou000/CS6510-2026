@@ -1,18 +1,14 @@
 package integration;
 
 import analytics.AnalyticsService;
-import database.JdbcAcceptedScanReader;
 import database.PopularWindowStore;
 import database.StoreFailure;
+import io.grpc.StatusRuntimeException;
 import org.junit.jupiter.api.Test;
-import org.opentest4j.TestAbortedException;
-import support.AnalyticsDatabase;
+import support.AnalyticsTestSchema;
+import support.FaultInjection;
+import support.InProcessAnalytics;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -21,118 +17,130 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Analytics recovery from {@code analytics_checkpoint} and the 1,000-position overlap (FR-048), over an
+ * {@link AnalyticsTestSchema} seeded through ingestion. Every published window must appear exactly once and
+ * equal a recomputation over the durable positions; no partial or duplicate window is ever visible.
+ */
 class AnalyticsCrashRecoveryTest {
     @Test
     void outageBeforeReadReplaysEveryEligibleWindow() throws Exception {
-        try (AnalyticsDatabase db = open()) {
-            db.appendScans(stream(1500));
-            catchUp(db);
-            assertWindowsMatchAcceptedScans(db, 1500);
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create(); InProcessAnalytics analytics = InProcessAnalytics.over(schema)) {
+            analytics.deliverAll("tx-a", stream(0, 1500));
+            catchUp(schema, analytics);
+            schema.assertWindowsMatchPositions(1500);
         }
     }
 
     @Test
     void interruptionDuringPartialAssemblyReplaysFromCheckpoint() throws Exception {
-        try (AnalyticsDatabase db = open()) {
-            db.appendScans(stream(750));
-            AnalyticsService first = start(db, db.windows);
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create(); InProcessAnalytics analytics = InProcessAnalytics.over(schema)) {
+            analytics.deliverAll("tx-a", stream(0, 750));
+            AnalyticsService first = analytics.startPipeline();
             Thread.sleep(200);
             first.shutdown();
-            assertEquals(0, db.windows.readMaxWindowEnd());
-            db.appendScans(stream(750));
-            catchUp(db);
-            assertWindowsMatchAcceptedScans(db, 1500);
+            assertEquals(0, analytics.windows.readMaxWindowEnd());
+            analytics.deliverAll("tx-b", stream(750, 750));
+            catchUp(schema, analytics);
+            schema.assertWindowsMatchPositions(1500);
         }
     }
 
     @Test
     void failureBeforeWindowCommitReplaysCandidate() throws Exception {
-        try (AnalyticsDatabase db = open()) {
-            db.appendScans(stream(1500));
-            InterruptingStore failed = new InterruptingStore(db.windows, false);
-            AnalyticsService first = start(db, failed);
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create(); InProcessAnalytics analytics = InProcessAnalytics.over(schema)) {
+            analytics.deliverAll("tx-a", stream(0, 1500));
+            InterruptingStore failed = new InterruptingStore(analytics.windows, false);
+            AnalyticsService first = analytics.startPipeline(failed);
             assertTrue(failed.firstWrite.await(5, TimeUnit.SECONDS));
             first.shutdown();
-            assertEquals(0, db.windows.readMaxWindowEnd());
-            catchUp(db);
-            assertWindowsMatchAcceptedScans(db, 1500);
+            assertEquals(0, analytics.windows.readMaxWindowEnd());
+            assertTrue(schema.windowEnds().isEmpty(), "no partial window is visible");
+            catchUp(schema, analytics);
+            schema.assertWindowsMatchPositions(1500);
         }
     }
 
     @Test
     void failureAfterCommitBeforeAcknowledgementDoesNotDuplicateWindow() throws Exception {
-        try (AnalyticsDatabase db = open()) {
-            db.appendScans(stream(1500));
-            InterruptingStore failed = new InterruptingStore(db.windows, true);
-            AnalyticsService first = start(db, failed);
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create(); InProcessAnalytics analytics = InProcessAnalytics.over(schema)) {
+            analytics.deliverAll("tx-a", stream(0, 1500));
+            InterruptingStore failed = new InterruptingStore(analytics.windows, true);
+            AnalyticsService first = analytics.startPipeline(failed);
             assertTrue(failed.firstWrite.await(5, TimeUnit.SECONDS));
-            db.awaitWindow(1000);
+            awaitWindow(analytics, 1000);
             first.shutdown();
-            catchUp(db);
-            assertWindowsMatchAcceptedScans(db, 1500);
+            catchUp(schema, analytics);
+            schema.assertWindowsMatchPositions(1500);
         }
     }
 
-    private static AnalyticsService start(AnalyticsDatabase db, PopularWindowStore windows) {
-        return new AnalyticsService(windows, new JdbcAcceptedScanReader(db.pool));
+    @Test
+    void ingestionCrashBeforeCommitIsRedeliveredWithoutGapsOrDuplicateWindows() throws Exception {
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create(); InProcessAnalytics analytics = InProcessAnalytics.over(schema)) {
+            AnalyticsService pipeline = analytics.startPipeline();
+            try {
+                analytics.deliver(InProcessAnalytics.events("tx-a", 1, stream(0, 800)));
+                List<String> second = stream(800, 700);
+                try (FaultInjection.Armed armed = FaultInjection.spec().fail("analytics.ingest.beforeCommit").armInThisJvm()) {
+                    assertThrows(StatusRuntimeException.class, () -> analytics.deliver(InProcessAnalytics.events("tx-a", 801, second)));
+                }
+                assertEquals(800, schema.lastPosition(), "the crashed batch left no position");
+                Thread.sleep(300);
+                assertTrue(schema.windowEnds().isEmpty(), "no window exists before 1,000 positions");
+                assertEquals(700, analytics.deliver(InProcessAnalytics.events("tx-a", 801, second)).getStored());
+                awaitWindow(analytics, 1500);
+            } finally {
+                pipeline.shutdown();
+            }
+            schema.assertPositionsContiguous();
+            schema.assertWindowsMatchPositions(1500);
+        }
     }
 
-    private static void catchUp(AnalyticsDatabase db) throws Exception {
-        AnalyticsService service = start(db, db.windows);
-        try { db.awaitWindow(1500); }
+    @Test
+    void ingestionCrashAfterCommitIsRedeliveredAsDuplicatesWithoutDuplicateWindows() throws Exception {
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create(); InProcessAnalytics analytics = InProcessAnalytics.over(schema)) {
+            AnalyticsService pipeline = analytics.startPipeline();
+            try {
+                List<String> first = stream(0, 1000);
+                try (FaultInjection.Armed armed = FaultInjection.spec().fail("analytics.ingest.afterCommit").armInThisJvm()) {
+                    assertThrows(StatusRuntimeException.class, () -> analytics.deliver(InProcessAnalytics.events("tx-a", 1, first)));
+                }
+                assertEquals(1000, schema.lastPosition(), "the batch committed before the crash");
+                awaitWindow(analytics, 1000);
+                var redelivered = analytics.deliver(InProcessAnalytics.events("tx-a", 1, first));
+                assertEquals(0, redelivered.getStored());
+                assertEquals(1000, redelivered.getDuplicates());
+                assertEquals(500, analytics.deliver(InProcessAnalytics.events("tx-a", 1001, stream(1000, 500))).getStored());
+                awaitWindow(analytics, 1500);
+            } finally {
+                pipeline.shutdown();
+            }
+            schema.assertPositionsContiguous();
+            schema.assertWindowsMatchPositions(1500);
+        }
+    }
+
+    private static void catchUp(AnalyticsTestSchema schema, InProcessAnalytics analytics) throws Exception {
+        AnalyticsService service = analytics.startPipeline();
+        try { awaitWindow(analytics, 1500); }
         finally { service.shutdown(); }
     }
 
-    private static List<String> stream(int size) {
+    private static void awaitWindow(InProcessAnalytics analytics, long end) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (analytics.windows.readMaxWindowEnd() < end) {
+            if (System.nanoTime() >= deadline) throw new AssertionError("Checkpoint did not persist: " + end);
+            Thread.sleep(10);
+        }
+    }
+
+    /** {@code size} SKUs of the legacy fixture stream, starting at stream index {@code from}. */
+    private static List<String> stream(int from, int size) {
         List<String> skus = new ArrayList<>();
-        for (int i = 0; i < size; i++) skus.add("sku" + (1 + (i * 7) % 12));
+        for (int i = from; i < from + size; i++) skus.add("sku" + (1 + (i * 7) % 12));
         return skus;
-    }
-
-    private static void assertWindowsMatchAcceptedScans(AnalyticsDatabase db, long highest)
-            throws Exception {
-        Connection connection = db.pool.borrow();
-        try (Statement statement = connection.createStatement();
-             ResultSet windows = statement.executeQuery(
-                     "SELECT window_id,window_start,window_end FROM popular_window ORDER BY window_end")) {
-            long expectedEnd = 1000;
-            while (windows.next()) {
-                long end = windows.getLong("window_end");
-                assertEquals(expectedEnd, end);
-                assertEquals(end - 999, windows.getLong("window_start"));
-                long id = windows.getLong("window_id");
-                List<String> expected = new ArrayList<>();
-                try (PreparedStatement counts = connection.prepareStatement(
-                        "SELECT sku,COUNT(*) AS n FROM accepted_scan WHERE position BETWEEN ? AND ? "
-                        + "GROUP BY sku ORDER BY n DESC,sku ASC LIMIT 10")) {
-                    counts.setLong(1, end - 999);
-                    counts.setLong(2, end);
-                    try (ResultSet rows = counts.executeQuery()) {
-                        while (rows.next()) expected.add(rows.getString(1) + ":" + rows.getLong(2));
-                    }
-                }
-                List<String> actual = new ArrayList<>();
-                try (PreparedStatement ranks = connection.prepareStatement(
-                        "SELECT rank_pos,sku,scan_count FROM popular_item WHERE window_id=? ORDER BY rank_pos")) {
-                    ranks.setLong(1, id);
-                    try (ResultSet rows = ranks.executeQuery()) {
-                        while (rows.next()) {
-                            assertEquals(actual.size() + 1, rows.getInt(1));
-                            actual.add(rows.getString(2) + ":" + rows.getLong(3));
-                        }
-                    }
-                }
-                assertEquals(expected, actual, "independent ranks at " + end);
-                expectedEnd += 500;
-            }
-            assertEquals(highest + 500, expectedEnd);
-            assertEquals(highest, db.windows.readMaxWindowEnd());
-        } finally { db.pool.release(connection); }
-    }
-
-    private static AnalyticsDatabase open() throws Exception {
-        try { return new AnalyticsDatabase(); }
-        catch (SQLException unavailable) { throw new TestAbortedException("MySQL unavailable", unavailable); }
     }
 
     private static final class InterruptingStore implements PopularWindowStore {

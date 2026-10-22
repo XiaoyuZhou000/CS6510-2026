@@ -892,7 +892,7 @@ The receipt and every error match the established contract, with captured prices
 
 ### Tests for User Story 5 ⚠️ write first; they must fail before implementation
 
-- [ ] T087 [P] [US5] Write `server/tests/rpc/AnalyticsIngestContractTest.java`. Run an in-process `AnalyticsIngestGrpcService` over `AnalyticsTestSchema`, and assert that:
+- [X] T087 [P] [US5] Write `server/tests/rpc/AnalyticsIngestContractTest.java`. Run an in-process `AnalyticsIngestGrpcService` over `AnalyticsTestSchema`, and assert that:
   - a batch stores events with consecutive positions in batch order;
   - redelivery returns stored 0 and duplicates n;
   - an identity repeated inside one batch counts as a duplicate;
@@ -904,7 +904,7 @@ The receipt and every error match the established contract, with captured prices
     - with the ingestion commit delayed, the client receives no response before the commit returns;
     - a fault before the commit gives UNAVAILABLE, with no rows and an unchanged `scan_sequence`;
     - a fault after a successful commit gives UNAVAILABLE, the rows stay durable, and a retry returns stored 0 and duplicates n with the positions unchanged.
-- [ ] T088 [P] [US5] Write `server/tests/database/JdbcScanIngestStoreTest.java`, migrating `server/tests-legacy/database/JdbcScanMaterializerTest.java`. Assert that:
+- [X] T088 [P] [US5] Write `server/tests/database/JdbcScanIngestStoreTest.java`, migrating `server/tests-legacy/database/JdbcScanMaterializerTest.java`. Assert that:
   - positions are unique, contiguous from 1, and immutable;
   - a failure before commit leaves no rows and an unchanged `scan_sequence` (`rollbackLeavesNoPositionAndNoCheckpointAdvance`);
   - a `throw` at `analytics.ingest.beforeCommit` leaves no rows, and the retry stores the whole batch without gaps (`crashBeforeCommitRollsBackWholeBatchAndRetryKeepsItGapless`);
@@ -913,44 +913,44 @@ The receipt and every error match the established contract, with captured prices
   - concurrent ingestion calls serialize without gaps;
   - **multiple instances** (Constitution II): two ingestion stores, each with its own pool and name map, ingest overlapping batches concurrently over one schema. Every identity is stored exactly once, and positions stay unique, contiguous, and immutable.
   - after a restart, `ProductNameMap` is reloaded and no existing name is rewritten.
-- [ ] T089 [P] [US5] Write `server/tests/database/JdbcAcceptedScanReaderTest.java` over `AnalyticsTestSchema`. First move the original to `server/tests-legacy/database/JdbcAcceptedScanReaderTest.java`. Insert positioned rows directly, and migrate its three methods with every assertion, including the exact 1,000-position prewarm:
+- [X] T089 [P] [US5] Write `server/tests/database/JdbcAcceptedScanReaderTest.java` over `AnalyticsTestSchema`. First move the original to `server/tests-legacy/database/JdbcAcceptedScanReaderTest.java`. Insert positioned rows directly, and migrate its three methods with every assertion, including the exact 1,000-position prewarm:
   - `pollsAdjacentCommittedPositionsInBatchesAndRetainsBacklog`;
   - `freshPollDoesNotSeeConcurrentUncommittedInsert`;
   - `refusesMissingPositionDuringPollOrPrewarm`.
-- [ ] T090 [P] [US5] Write `server/tests/database/JdbcPopularWindowStoreTest.java` over `AnalyticsTestSchema`. First move the original to `server/tests-legacy/database/JdbcPopularWindowStoreTest.java`. Migrate its four methods with every assertion:
+- [X] T090 [P] [US5] Write `server/tests/database/JdbcPopularWindowStoreTest.java` over `AnalyticsTestSchema`. First move the original to `server/tests-legacy/database/JdbcPopularWindowStoreTest.java`. Migrate its four methods with every assertion:
   - `recoversMaximumEndAndReadsLatestRanksInStoredOrderWithALimit`, with `readRanks` joining `product_name`;
   - `headerAndRanksRollBackTogetherWhenAnyRankFails`;
   - `equivalentAlreadyCommittedWindowIsRecognizedWithoutDuplicatingItsBoundary`;
   - `checkpointRejectsOutOfOrderBoundariesAndTracksOnlyCompleteWrites`;
   - a new **multiple-instance** case (Constitution II): two stores over one schema write the same sequence of windows concurrently. Each window is published exactly once, the checkpoint only moves forward, and the later writer's attempt at a published boundary is a verified no-op.
-- [ ] T091 [P] [US5] Write `server/tests/database/JdbcRelayStoreTest.java`. Assert that:
+- [X] T091 [P] [US5] Write `server/tests/database/JdbcRelayStoreTest.java`. Assert that:
   - `selectUndelivered` orders by `scan_id` and skips delivered rows;
   - `markDelivered` sets `delivered_at` for exactly the given IDs in one statement;
   - a row committed late with a lower `scan_id` is selected in the next round. This is the relay half of `JdbcScanMaterializerTest#lowerEventIdCommittingLateIsStillDiscovered`.
-- [ ] T092 [P] [US5] Write `server/tests/performance/AnalyticsIngestStatementBudgetTest.java` (R22).
+- [X] T092 [P] [US5] Write `server/tests/performance/AnalyticsIngestStatementBudgetTest.java` (R22).
   - **Strict**: each batch's events, positions, and `scan_sequence` update share exactly one commit, and the OK reply follows that commit.
   - **Budget guard**, with keys `analytics.ingest.*`, for batches of 1, 100, 500, and 1,000 events:
     - statements per batch (design at most 5) and commits (design 1), independent of batch size;
     - `product_name` writes once the name map is warm (design 0).
-- [ ] T093 [P] [US5] Write `server/tests/performance/RelayStatementBudgetTest.java` (R22).
+- [X] T093 [P] [US5] Write `server/tests/performance/RelayStatementBudgetTest.java` (R22).
   - **Strict**:
     - `delivered_at` is written only after `DeliverScanEvents` returns OK, and never for a failed call;
     - one round makes exactly one `DeliverScanEvents` call for up to 500 events.
   - **Budget guard**, with keys `relay.round.*`: statements per round (design 2: 1 SELECT, 1 UPDATE) and commits (design 1).
-- [ ] T094 [P] [US5] Write `server/tests/integration/ScanEventDeliveryTest.java` covering US5 scenarios 3, 4, 6, and 8 and US2 scenario 3:
+- [X] T094 [P] [US5] Write `server/tests/integration/ScanEventDeliveryTest.java` covering US5 scenarios 3, 4, 6, and 8 and US2 scenario 3:
   - With Analytics stopped while scanning, scans succeed and undelivered rows grow; after Analytics restarts, every accepted scan is counted exactly once.
   - A `relay.afterAck` halt followed by a restart ignores the duplicates.
   - A Transaction halt after a scan commit but before delivery delivers the scan after restart.
   - Scans of failed or never-completed checkouts are counted.
   - With two Transaction processes on one schema (Constitution II), both relays may deliver the same rows, and every accepted scan is still counted exactly once.
-- [ ] T095 [P] [US5] Write `server/tests/integration/AnalyticsCrashRecoveryTest.java` over `AnalyticsTestSchema`, seeding events through ingestion. First move the original to `server/tests-legacy/integration/AnalyticsCrashRecoveryTest.java`.
+- [X] T095 [P] [US5] Write `server/tests/integration/AnalyticsCrashRecoveryTest.java` over `AnalyticsTestSchema`, seeding events through ingestion. First move the original to `server/tests-legacy/integration/AnalyticsCrashRecoveryTest.java`.
   - Migrate its four methods with every assertion: `outageBeforeReadReplaysEveryEligibleWindow`, `interruptionDuringPartialAssemblyReplaysFromCheckpoint`, `failureBeforeWindowCommitReplaysCandidate`, and `failureAfterCommitBeforeAcknowledgementDoesNotDuplicateWindow`.
   - Add crashes at ingestion before and after commit.
   - Every window must appear exactly once, with no partial or duplicate window visible.
-- [ ] T096 [P] [US5] Write `server/tests/integration/WindowBoundaryAccuracyTest.java` over `AnalyticsTestSchema`. First move the original to `server/tests-legacy/integration/WindowBoundaryAccuracyTest.java`. Migrate both methods with every assertion:
+- [X] T096 [P] [US5] Write `server/tests/integration/WindowBoundaryAccuracyTest.java` over `AnalyticsTestSchema`. First move the original to `server/tests-legacy/integration/WindowBoundaryAccuracyTest.java`. Migrate both methods with every assertion:
   - `concurrentBurstsPersistExactOverlappingWindows`: windows 1–1,000, then 501–1,500; ties broken by ascending SKU; at most 10 items; the established empty response under 1,000 scans.
   - `failedRankInsertNeverMakesItsWindowVisible`.
-- [ ] T149 [P] [US5] Write `server/tests/integration/AnalyticsIngestCrashTest.java`, an end-to-end crash test from reception to acknowledgement (FR-041–FR-043). Use Transaction and Analytics processes over disposable schemas.
+- [X] T149 [P] [US5] Write `server/tests/integration/AnalyticsIngestCrashTest.java`, an end-to-end crash test from reception to acknowledgement (FR-041–FR-043). Use Transaction and Analytics processes over disposable schemas.
   - **Crash points**, one per run:
     - `analytics.ingest.received`, after a batch arrives and before the ingestion transaction begins;
     - `analytics.ingest.beforeCommit`;
@@ -962,35 +962,35 @@ The receipt and every error match the established contract, with captured prices
     - after an `afterCommit` crash, the relay's redelivery reports the batch as duplicates; after the two earlier crashes, the batch is stored fresh;
     - `delivered_at` is set only after an OK reply;
     - every published window equals a recomputation from the stored positions.
-- [ ] T106 [P] [US5] Write `server/tests/contract/PopularItemsEndpointTest.java`. First move the original to `server/tests-legacy/contract/PopularItemsEndpointTest.java`. Seed Analytics through `DeliverScanEvents` instead of shared tables, and migrate its three methods with every assertion:
+- [X] T106 [P] [US5] Write `server/tests/contract/PopularItemsEndpointTest.java`. First move the original to `server/tests-legacy/contract/PopularItemsEndpointTest.java`. Seed Analytics through `DeliverScanEvents` instead of shared tables, and migrate its three methods with every assertion:
   - `latestMeansCommittedCheckpointAndNamesComeFromCatalog`: the latest window is the committed checkpoint, and names equal the catalog names captured at scan time, now held in `product_name`.
   - `reportsPersistedWindowWithRankedTopTenAndRequestLocalLimit`.
   - `publicPortPreservesPopularItemsShapeLimitAndErrors`: the empty response under 1,000 scans, the window fields, and `limit` 0, over 10, or invalid (400 `INVALID_LIMIT`).
-- [ ] T112 [P] [US5] Write `server/tests/integration/IndependentServiceDeploymentTest.java`, migrating `eachArtifactRestartsWithoutRestartingItsPeers` with every assertion:
+- [X] T112 [P] [US5] Write `server/tests/integration/IndependentServiceDeploymentTest.java`, migrating `eachArtifactRestartsWithoutRestartingItsPeers` with every assertion:
   - Run three JVMs over three disposable schemas with their own users.
   - Each service restarts while its peers keep serving.
   - Manifests and main classes are verified.
   - An OPEN basket survives the restarts and completes, with stock read through `InventoryTestSchema`.
-- [ ] T115 [P] [US5] Write `server/tests/integration/AnalyticsCheckoutIsolationTest.java`, migrating `failingAnalyticsPersistenceCannotCorruptConcurrentScanAndCompletionTraffic` with every assertion:
+- [X] T115 [P] [US5] Write `server/tests/integration/AnalyticsCheckoutIsolationTest.java`, migrating `failingAnalyticsPersistenceCannotCorruptConcurrentScanAndCompletionTraffic` with every assertion:
   - 20 stations of 75 scans each complete their checkouts while Analytics' window persistence fails, using the failing-store gate as before.
   - No window commits until persistence recovers; then windows 1,000 and 1,500 commit.
   - Events reach Analytics through the relay instead of a shared table.
-- [ ] T116 [P] [US5] Write `server/tests/integration/AnalyticsBacklogIsolationTest.java`, migrating `transactionContinuesDuringAnalyticsOutageAndPrewarmRestoresOverlap` with every assertion. Transaction keeps accepting scans and checkouts while Analytics is down. After Analytics restarts, prewarm restores the 1,000-position overlap and the windows match.
+- [X] T116 [P] [US5] Write `server/tests/integration/AnalyticsBacklogIsolationTest.java`, migrating `transactionContinuesDuringAnalyticsOutageAndPrewarmRestoresOverlap` with every assertion. Transaction keeps accepting scans and checkouts while Analytics is down. After Analytics restarts, prewarm restores the 1,000-position overlap and the windows match.
 
 ### Implementation for User Story 5
 
-- [ ] T097 [P] [US5] Create `server/analytics/src/database/ScanIngestStore.java` and `JdbcScanIngestStore.java` per contracts/scan-event-delivery.md §3:
+- [X] T097 [P] [US5] Create `server/analytics/src/database/ScanIngestStore.java` and `JdbcScanIngestStore.java` per contracts/scan-event-delivery.md §3:
   - steps 1–5 at READ COMMITTED;
   - `ingest` returns only after the commit has succeeded, so callers can acknowledge only durable, deduplicated batches. A commit failure, including one with `commitOutcomeUnknown`, raises `StoreFailure`.
   - hooks `analytics.ingest.beforeCommit` and `analytics.ingest.afterCommit`;
   - name-map updates applied only after commit;
   - metrics `analytics.ingest.batch|commit|duplicates`.
-- [ ] T098 [P] [US5] Create `server/analytics/src/analytics/ProductNameMap.java`. It loads `product_name` at startup (at most 2,000 rows), computes per-batch diffs of absent or changed names, and applies committed diffs.
-- [ ] T099 [US5] Create `server/analytics/src/analytics/ScanIngestionService.java` (contract validation) and `server/analytics/src/rpc/AnalyticsIngestGrpcService.java` (proto mapping):
+- [X] T098 [P] [US5] Create `server/analytics/src/analytics/ProductNameMap.java`. It loads `product_name` at startup (at most 2,000 rows), computes per-batch diffs of absent or changed names, and applies committed diffs.
+- [X] T099 [US5] Create `server/analytics/src/analytics/ScanIngestionService.java` (contract validation) and `server/analytics/src/rpc/AnalyticsIngestGrpcService.java` (proto mapping):
   - After validation, the handler calls the `analytics.ingest.received` hook, then `ScanIngestStore.ingest`.
   - It calls `onNext` and `onCompleted` only after `ingest` returns, so positions and deduplication keys are durable before any OK leaves the process.
   - Failures map to INVALID_ARGUMENT, UNAVAILABLE (any `StoreFailure`, including an unknown commit outcome), or INTERNAL.
-- [ ] T100 [P] [US5] Remove the materializer (`server/analytics/src/database/JdbcScanMaterializer.java`) and update its callers:
+- [X] T100 [P] [US5] Remove the materializer (`server/analytics/src/database/JdbcScanMaterializer.java`) and update its callers:
   - Delete `server/analytics/src/database/JdbcScanMaterializer.java`.
   - Remove the materializer field and `materializeBatch` from `server/analytics/src/database/JdbcAcceptedScanReader.java`, and remove its call from `server/analytics/src/analytics/AcceptedScanPoller.java`.
   - Count empty polls in `server/analytics/src/analytics/AcceptedScanPoller.java` as `analytics.poller.idlePolls`, leaving its timing and constructor unchanged.
@@ -1003,26 +1003,26 @@ The receipt and every error match the established contract, with captured prices
     - `integration/WindowBoundaryAccuracyTest` (T096);
     - `contract/PopularItemsEndpointTest` (T106);
     - `support/AnalyticsDatabase`.
-- [ ] T101 [US5] Rewire `server/analytics/src/analytics/AnalyticsMain.java`:
+- [X] T101 [US5] Rewire `server/analytics/src/analytics/AnalyticsMain.java`:
   - `DatabaseConfig.fromEnvironment("ANALYTICS", "cs6510_analytics", "cs6510_analytics_svc", 10, 10)` with `new ConnectionPool(...)`.
   - `ProductNameMap`, then `AnalyticsService` (prewarm and poller), started before the gRPC server on `ANALYTICS_GRPC_PORT` (9093).
   - HTTP on `ANALYTICS_PORT` (8083) and `MetricsReporter.start("analytics")`.
   - A shutdown hook that stops HTTP, then gRPC, then calls `running.shutdown()`, then stops the reporter, then the pool.
-- [ ] T102 [P] [US5] Create the relay's store `server/transaction/src/database/JdbcRelayStore.java` and delivery client `server/transaction/src/rpc/GrpcAnalyticsIngestClient.java` in Transaction:
+- [X] T102 [P] [US5] Create the relay's store `server/transaction/src/database/JdbcRelayStore.java` and delivery client `server/transaction/src/rpc/GrpcAnalyticsIngestClient.java` in Transaction:
   - `server/transaction/src/database/RelayStore.java` and `JdbcRelayStore.java`, with `selectUndelivered`, `markDelivered`, and `countUndelivered` per contracts/scan-event-delivery.md §2.
   - Port `server/transaction/src/transaction/ScanEventSink.java`.
   - `server/transaction/src/rpc/GrpcAnalyticsIngestClient.java`, with a 5 s deadline and status classification.
-- [ ] T103 [US5] Create `server/transaction/src/transaction/ScanEventRelay.java`, a single daemon thread:
+- [X] T103 [US5] Create `server/transaction/src/transaction/ScanEventRelay.java`, a single daemon thread:
   - batches of `OUTBOX_BATCH_SIZE` (500), a 50 ms idle poll, and backoff from 100 ms to 5 s;
   - the `relay.afterAck` hook, and an alarm on INVALID_ARGUMENT;
   - metrics `transaction.relay.batch|latency`, `transaction.relay.idlePolls` (empty selects), and a backlog gauge.
 
   Start and stop it in `server/transaction/src/transaction/TransactionMain.java`, with a channel to `ANALYTICS_GRPC_TARGET` (127.0.0.1:9093).
-- [ ] T150 [US5] Verify US5 and run its parity gate with `server/run-tests.sh`:
+- [X] T150 [US5] Verify US5 and run its parity gate with `server/run-tests.sh`:
   - With all three services on their own schemas, run `PARITY_GATE=US5 server/run-tests.sh` with `SERVER_BASE_URL` set.
   - The whole suite must pass, including T087–T096, T106, T112, T115, T116, and T149.
   - Record `T150` in `Verified at` for every row whose test passed.
-- [ ] T104 [US5] CP2 attribution checkpoint, recorded in `load-client/reports/microservices-architecture/checkpoints.md`:
+- [X] T104 [US5] CP2 attribution checkpoint, recorded in `load-client/reports/microservices-architecture/checkpoints.md`:
   - Run `server/benchmark-microservices.ps1` with all services: default twice (`cp2-default-1`, `cp2-default-2`) and stress once (`cp2-stress-1`).
   - Record in `checkpoints.md`:
     - the actual client-observed `totalTransactions` of each run, and its change against the CP0 median of the same workload (Implementation Rule 6);

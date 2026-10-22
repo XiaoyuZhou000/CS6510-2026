@@ -11,8 +11,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.UnaryOperator;
 
@@ -36,6 +38,7 @@ public abstract class TestSchema implements AutoCloseable {
     private final String ownPassword;
     private final Options options;
     private final List<ConnectionPool> pools = new ArrayList<>();
+    private final Set<String> unavailable = new HashSet<>();
     private ConnectionPool defaultPool;
     private boolean closed;
 
@@ -168,6 +171,22 @@ public abstract class TestSchema implements AutoCloseable {
 
     protected static void bind(PreparedStatement statement, Object... parameters) throws SQLException {
         for (int i = 0; i < parameters.length; i++) statement.setObject(i + 1, parameters[i]);
+    }
+
+    /**
+     * Simulates an outage of one of this schema's tables by renaming it away, without losing data.
+     * {@link #close()} restores nothing; the schema is dropped anyway.
+     */
+    public synchronized void setTableUnavailable(String table, boolean makeUnavailable) throws SQLException {
+        if (!table.matches("[a-z_]+")) throw new IllegalArgumentException("Unexpected table name: " + table);
+        if (unavailable.contains(table) == makeUnavailable) return;
+        try (Statement sql = admin().createStatement()) {
+            sql.executeUpdate(makeUnavailable
+                    ? "RENAME TABLE `" + name() + "`.`" + table + "` TO `" + name() + "`.`" + table + "_outage`"
+                    : "RENAME TABLE `" + name() + "`.`" + table + "_outage` TO `" + name() + "`.`" + table + "`");
+        }
+        if (makeUnavailable) unavailable.add(table);
+        else unavailable.remove(table);
     }
 
     @Override

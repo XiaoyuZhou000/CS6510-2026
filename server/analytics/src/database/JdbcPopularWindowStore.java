@@ -1,5 +1,8 @@
 package database;
 
+import metrics.LatencyHistogram;
+import metrics.PerfMetrics;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -12,8 +15,14 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Atomically publishes complete ranks and advances the durable checkpoint. */
+/**
+ * Atomically publishes complete ranks and advances the durable checkpoint, on Analytics' managed pool
+ * (R20): sessions stay in manual-commit mode, and every unit ends in a commit or a rollback. Names come
+ * from {@code product_name}, captured at scan time (R12). {@code analytics.window.publishLag} records the
+ * time from the boundary event's ingestion to its window's commit.
+ */
 public final class JdbcPopularWindowStore implements PopularWindowStore {
+    private static final LatencyHistogram PUBLISH_LAG = PerfMetrics.timer("analytics.window.publishLag");
     private final ConnectionPool pool;
 
     public JdbcPopularWindowStore(ConnectionPool pool) {
@@ -24,8 +33,11 @@ public final class JdbcPopularWindowStore implements PopularWindowStore {
     public long readMaxWindowEnd() {
         Connection connection = pool.borrow();
         try {
-            return readCheckpoint(connection, false);
+            long checkpoint = readCheckpoint(connection, false);
+            connection.rollback();
+            return checkpoint;
         } catch (SQLException failure) {
+            abortQuietly(connection, failure);
             throw new StoreFailure("Failed to read analytics checkpoint", failure);
         } finally {
             pool.release(connection);
@@ -37,7 +49,6 @@ public final class JdbcPopularWindowStore implements PopularWindowStore {
         Objects.requireNonNull(snapshot, "snapshot");
         Connection connection = pool.borrow();
         try {
-            connection.setAutoCommit(false);
             long checkpoint = readCheckpoint(connection, true);
             if (snapshot.windowEnd() <= checkpoint) {
                 verifyEquivalent(connection, snapshot);
@@ -56,16 +67,17 @@ public final class JdbcPopularWindowStore implements PopularWindowStore {
                 update.setLong(2, checkpoint);
                 if (update.executeUpdate() != 1) throw new SQLException("analytics checkpoint changed unexpectedly");
             }
+            long lagMicros = publishLagMicros(connection, snapshot.windowEnd());
             connection.commit();
+            PerfMetrics.increment("analytics.window.published");
+            if (lagMicros >= 0) PUBLISH_LAG.record(lagMicros * 1_000);
         } catch (SQLException failure) {
-            try { connection.rollback(); } catch (SQLException rollback) { failure.addSuppressed(rollback); }
+            abortQuietly(connection, failure);
             throw new StoreFailure("Failed to persist popular window at " + snapshot.windowEnd(), failure);
         } catch (RuntimeException failure) {
-            try { connection.rollback(); } catch (SQLException rollback) { failure.addSuppressed(rollback); }
+            abortQuietly(connection, failure);
             throw failure;
         } finally {
-            try { connection.setAutoCommit(true); }
-            catch (SQLException reset) { System.err.println("[analytics] JDBC reset failed: " + reset.getMessage()); }
             pool.release(connection);
         }
     }
@@ -75,13 +87,20 @@ public final class JdbcPopularWindowStore implements PopularWindowStore {
         if (limit < 0) throw new IllegalArgumentException("limit must be non-negative");
         Connection connection = pool.borrow();
         try {
+            // One READ COMMITTED snapshot per statement; the checkpoint commits with its header and ranks.
             long checkpoint = readCheckpoint(connection, false);
-            if (checkpoint == 0) return Optional.empty();
+            if (checkpoint == 0) {
+                connection.rollback();
+                return Optional.empty();
+            }
             Header header = readHeader(connection, checkpoint);
             if (header == null) throw new SQLException("checkpoint has no complete window at " + checkpoint);
+            List<StoredRank> ranks = readRanks(connection, header.id(), Math.min(limit, 10));
+            connection.rollback();
             return Optional.of(new PopularWindowView(header.id(), header.start(), header.end(),
-                    header.computedAt(), readRanks(connection, header.id(), Math.min(limit, 10))));
+                    header.computedAt(), ranks));
         } catch (SQLException failure) {
+            abortQuietly(connection, failure);
             throw new StoreFailure("Failed to read latest popular window", failure);
         } finally {
             pool.release(connection);
@@ -162,8 +181,8 @@ public final class JdbcPopularWindowStore implements PopularWindowStore {
             throws SQLException {
         List<StoredRank> ranks = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT pi.rank_pos,pi.sku,ci.name,pi.scan_count "
-                + "FROM popular_item pi JOIN catalog_item ci ON ci.sku=pi.sku "
+                "SELECT pi.rank_pos,pi.sku,pn.name,pi.scan_count "
+                + "FROM popular_item pi JOIN product_name pn ON pn.sku=pi.sku "
                 + "WHERE pi.window_id=? ORDER BY pi.rank_pos LIMIT ?")) {
             statement.setLong(1, id);
             statement.setInt(2, limit);
@@ -173,6 +192,29 @@ public final class JdbcPopularWindowStore implements PopularWindowStore {
             }
         }
         return List.copyOf(ranks);
+    }
+
+    /**
+     * Microseconds since the boundary event was ingested, or -1 when no event holds that position
+     * (fixtures). Computed by the server, because {@code received_at} is a server-generated timestamp.
+     */
+    private static long publishLagMicros(Connection connection, long position) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT TIMESTAMPDIFF(MICROSECOND, received_at, CURRENT_TIMESTAMP(3)) FROM accepted_scan WHERE position=?")) {
+            statement.setLong(1, position);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next() ? Math.max(0, rows.getLong(1)) : -1;
+            }
+        }
+    }
+
+    /** Explicit ROLLBACK statement, as {@link JdbcUnitOfWork#abort} explains. */
+    private static void abortQuietly(Connection connection, Throwable failure) {
+        try {
+            JdbcUnitOfWork.abort(connection);
+        } catch (SQLException rollback) {
+            failure.addSuppressed(rollback);
+        }
     }
 
     private record Header(long id, long start, long end, Instant computedAt) { }

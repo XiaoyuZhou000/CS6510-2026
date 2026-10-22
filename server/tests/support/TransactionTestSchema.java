@@ -1,6 +1,7 @@
 package support;
 
 import java.math.BigDecimal;
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -13,8 +14,6 @@ import java.util.Set;
 
 /** Disposable Transaction schema ({@code txn_test_<uuid>}) from {@code db/transaction/schema.sql}. */
 public final class TransactionTestSchema extends TestSchema {
-    private final Set<String> unavailable = new HashSet<>();
-
     private TransactionTestSchema(Options options) throws Exception {
         super("txn", "transaction", options);
     }
@@ -119,19 +118,56 @@ public final class TransactionTestSchema extends TestSchema {
                 + "WHERE meta_key = 1", version, products);
     }
 
+    /** Inserts an OPEN, empty transaction row directly, for outbox fixtures. */
+    public void insertOpenTransaction(String transactionId) throws SQLException {
+        update("INSERT INTO `transaction` (transaction_id, station_id, started_at) VALUES (?, 'fixture', NOW(3))",
+                transactionId);
+    }
+
+    /** Inserts one undelivered accepted_scan row on the admin connection and returns its scan_id. */
+    public long insertScan(String transactionId, int scanSequence, String sku) throws SQLException {
+        return insertScan(admin(), transactionId, scanSequence, sku);
+    }
+
     /**
-     * Simulates an outage of one of this schema's tables by renaming it away, without losing data.
-     * {@link #close()} restores nothing; the schema is dropped anyway.
+     * Inserts one undelivered accepted_scan row (price 1.00) on {@code connection}, which may hold it
+     * uncommitted, and returns its scan_id.
      */
-    public synchronized void setTableUnavailable(String table, boolean makeUnavailable) throws SQLException {
-        if (!table.matches("[a-z_]+")) throw new IllegalArgumentException("Unexpected table name: " + table);
-        if (unavailable.contains(table) == makeUnavailable) return;
-        try (Statement sql = admin().createStatement()) {
-            sql.executeUpdate(makeUnavailable
-                    ? "RENAME TABLE `" + name() + "`.`" + table + "` TO `" + name() + "`.`" + table + "_outage`"
-                    : "RENAME TABLE `" + name() + "`.`" + table + "_outage` TO `" + name() + "`.`" + table + "`");
+    public static long insertScan(Connection connection, String transactionId, int scanSequence, String sku)
+            throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("INSERT INTO accepted_scan "
+                + "(transaction_id, scan_sequence, sku, product_name, unit_price, accepted_at) "
+                + "VALUES (?, ?, ?, ?, 1.00, NOW(3))", Statement.RETURN_GENERATED_KEYS)) {
+            insert.setString(1, transactionId);
+            insert.setInt(2, scanSequence);
+            insert.setString(3, sku);
+            insert.setString(4, "Name of " + sku);
+            insert.executeUpdate();
+            try (ResultSet keys = insert.getGeneratedKeys()) {
+                if (!keys.next()) throw new SQLException("scan_id missing");
+                return keys.getLong(1);
+            }
         }
-        if (makeUnavailable) unavailable.add(table);
-        else unavailable.remove(table);
+    }
+
+    /** The scan_id of every row whose delivered_at is set, ascending. */
+    public List<Long> deliveredIds() throws SQLException {
+        List<Long> ids = new ArrayList<>();
+        try (PreparedStatement sql = admin().prepareStatement(
+                "SELECT scan_id FROM accepted_scan WHERE delivered_at IS NOT NULL ORDER BY scan_id");
+             ResultSet row = sql.executeQuery()) {
+            while (row.next()) ids.add(row.getLong(1));
+        }
+        return ids;
+    }
+
+    /** Every accepted scan's identity, {@code transaction_id#scan_sequence}. */
+    public Set<String> identities() throws SQLException {
+        Set<String> identities = new HashSet<>();
+        try (PreparedStatement sql = admin().prepareStatement("SELECT transaction_id, scan_sequence FROM accepted_scan");
+             ResultSet row = sql.executeQuery()) {
+            while (row.next()) identities.add(row.getString(1) + "#" + row.getInt(2));
+        }
+        return identities;
     }
 }

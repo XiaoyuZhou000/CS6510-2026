@@ -2,14 +2,18 @@ package analytics;
 
 import database.JdbcAcceptedScanReader;
 import database.StoreFailure;
+import metrics.PerfMetrics;
 
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.atomic.LongAdder;
 
 /** Reads committed scans into the bounded ingress pipe; the cursor is disposable. */
 public final class AcceptedScanPoller implements Runnable {
     private static final int BATCH_SIZE = 256;
+    /** Empty polls, so checkpoint CP2 can show whether idle reads matter (contracts/scan-event-delivery.md section 6). */
+    private static final LongAdder IDLE_POLLS = PerfMetrics.counter("analytics.poller.idlePolls");
     private final JdbcAcceptedScanReader reader;
     private final BlockingQueue<PipelineMessage.IngressMessage> ingress;
     private long cursor;
@@ -29,7 +33,6 @@ public final class AcceptedScanPoller implements Runnable {
             while (!Thread.currentThread().isInterrupted()) {
                 List<PipelineMessage.AcceptedScan> scans;
                 try {
-                    reader.materializeBatch(BATCH_SIZE);
                     scans = reader.readAfter(cursor, BATCH_SIZE);
                     consecutiveReadFailures = 0;
                 } catch (StoreFailure unavailable) {
@@ -40,6 +43,7 @@ public final class AcceptedScanPoller implements Runnable {
                     continue;
                 }
                 if (scans.isEmpty()) {
+                    IDLE_POLLS.increment();
                     Thread.sleep(100);
                     continue;
                 }

@@ -107,6 +107,13 @@ public final class ServiceProcesses {
         }
 
         public ServiceProcess start() throws IOException {
+            if (service.equals("transaction")) {
+                // A peer target nobody listens on unless the test wires one: a test Transaction must never
+                // reach the running deployment's Inventory (9092) or deliver scans to its Analytics (9093).
+                for (String peer : List.of("INVENTORY_GRPC_TARGET", "ANALYTICS_GRPC_TARGET")) {
+                    if (!environment.containsKey(peer)) environment.put(peer, "127.0.0.1:" + GrpcTestSupport.freePort());
+                }
+            }
             Path server = serverRoot();
             String classpath = String.join(File.pathSeparator,
                     server.resolve("out/" + service + ".jar").toString(),
@@ -157,6 +164,21 @@ public final class ServiceProcesses {
             } catch (IOException unreadable) {
                 return "<log unreadable: " + unreadable.getMessage() + ">";
             }
+        }
+
+        /**
+         * A counter from the latest metrics line the service printed (with {@code PERF_METRICS=true}):
+         * 0 when that line lacks it, -1 when no line was printed yet.
+         */
+        public long latestCounter(String name) {
+            String latest = null;
+            for (String line : output().split("\\R")) {
+                if (line.startsWith("{\"service\":")) latest = line;
+            }
+            if (latest == null) return -1;
+            java.util.regex.Matcher counter = java.util.regex.Pattern
+                    .compile("\"" + java.util.regex.Pattern.quote(name) + "\":(\\d+)").matcher(latest);
+            return counter.find() ? Long.parseLong(counter.group(1)) : 0;
         }
 
         /** Waits until {@code GET path} on the service's HTTP port returns {@code status}. */

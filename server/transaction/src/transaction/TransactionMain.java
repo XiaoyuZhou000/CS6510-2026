@@ -6,9 +6,11 @@ import database.ConnectionPool;
 import database.DatabaseConfig;
 import database.JdbcCheckoutAttemptStore;
 import database.JdbcProductReplicaStore;
+import database.JdbcRelayStore;
 import database.JdbcScanStore;
 import database.JdbcTransactionStore;
 import metrics.MetricsReporter;
+import rpc.GrpcAnalyticsIngestClient;
 import rpc.GrpcChannels;
 import rpc.GrpcInventoryGateway;
 
@@ -16,7 +18,10 @@ import java.net.InetSocketAddress;
 import java.time.Clock;
 import java.util.concurrent.Executors;
 
-/** Independent Transaction Service entry point. Transaction runs no gRPC server; it is a client only. */
+/**
+ * Independent Transaction Service entry point. Transaction runs no gRPC server; it is a client of
+ * Inventory (catalog and checkout) and of Analytics (the outbox relay).
+ */
 public final class TransactionMain {
     private TransactionMain() { }
 
@@ -46,6 +51,10 @@ public final class TransactionMain {
         CheckoutRecoveryWorker recovery = new CheckoutRecoveryWorker(attempts, inventory, cache, registry, schedule,
             CheckoutRecoveryWorker.Settings.fromEnvironment(System.getenv()), Clock.systemUTC());
         var service = new TransactionService(transactions, new JdbcScanStore(pool), checkout, replica, locks, cache);
+        ScanEventRelay relay = new ScanEventRelay(new JdbcRelayStore(pool),
+            GrpcAnalyticsIngestClient.forTarget(env("ANALYTICS_GRPC_TARGET", "127.0.0.1:9093"),
+                GrpcAnalyticsIngestClient.deadline(System.getenv())),
+            ScanEventRelay.Settings.fromEnvironment(System.getenv()));
         HttpServer server = HttpServer.create(new InetSocketAddress(port),0);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.createContext("/transactions",new TransactionHttpHandler(service));
@@ -53,6 +62,7 @@ public final class TransactionMain {
         MetricsReporter reporter = MetricsReporter.start("transaction");
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.stop(5);
+            relay.close();
             recovery.close();
             refresher.stop();
             GrpcChannels.shutdownAll();
@@ -61,6 +71,7 @@ public final class TransactionMain {
         }));
         server.start();
         recovery.start();
+        relay.start();
         System.out.println("Transaction Service listening on port " + port);
     }
 

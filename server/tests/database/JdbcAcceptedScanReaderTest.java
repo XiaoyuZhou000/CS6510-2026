@@ -1,24 +1,20 @@
 package database;
 
 import org.junit.jupiter.api.Test;
-import org.opentest4j.TestAbortedException;
-import support.AnalyticsDatabase;
+import support.AnalyticsTestSchema;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/** Fresh committed reads of positioned rows, over an {@link AnalyticsTestSchema} with rows inserted directly. */
 class JdbcAcceptedScanReaderTest {
     @Test
     void pollsAdjacentCommittedPositionsInBatchesAndRetainsBacklog() throws Exception {
-        try (AnalyticsDatabase db = open()) {
-            db.appendScans(Collections.nCopies(1200, "sku1"));
-            JdbcAcceptedScanReader reader = new JdbcAcceptedScanReader(db.pool);
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create()) {
+            schema.insertPositioned(1, 1200, "sku1");
+            JdbcAcceptedScanReader reader = new JdbcAcceptedScanReader(schema.pool());
             var first = reader.readAfter(0, 256);
             assertEquals(256, first.size());
             assertEquals(1, first.getFirst().position());
@@ -28,20 +24,23 @@ class JdbcAcceptedScanReaderTest {
             assertEquals(512, next.getLast().position());
             assertEquals(176, reader.readAfter(1024, 256).size());
             assertTrue(reader.readAfter(1200, 256).isEmpty());
-            assertEquals(1000, reader.prewarm(1000).size());
+            var overlap = reader.prewarm(1000);
+            assertEquals(1000, overlap.size());
+            assertEquals(1, overlap.getFirst().position());
+            assertEquals(1000, overlap.getLast().position());
         }
     }
 
     @Test
     void freshPollDoesNotSeeConcurrentUncommittedInsert() throws Exception {
-        try (AnalyticsDatabase db = open()) {
-            db.appendScans(List.of("sku1"));
-            JdbcAcceptedScanReader reader = new JdbcAcceptedScanReader(db.pool);
-            Connection writer = db.pool.borrow();
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create()) {
+            schema.insertPositioned(1, 1, "sku1");
+            JdbcAcceptedScanReader reader = new JdbcAcceptedScanReader(schema.pool());
+            // The managed pool hands out manual-commit sessions, so this insert stays uncommitted until commit().
+            Connection writer = schema.pool().borrow();
             try {
-                writer.setAutoCommit(false);
-                try (PreparedStatement insert = writer.prepareStatement(
-                        "INSERT INTO accepted_scan(position,transaction_id,sku,unit_price) VALUES (2,'tx','sku2',1.00)")) {
+                try (PreparedStatement insert = writer.prepareStatement("INSERT INTO accepted_scan "
+                        + "(position, source_transaction_id, source_scan_sequence, sku) VALUES (2, 'tx', 1, 'sku2')")) {
                     insert.executeUpdate();
                 }
                 assertTrue(reader.readAfter(1, 10).isEmpty());
@@ -49,30 +48,18 @@ class JdbcAcceptedScanReaderTest {
                 assertEquals(2, reader.readAfter(1, 10).getFirst().position());
             } finally {
                 writer.rollback();
-                writer.setAutoCommit(true);
-                db.pool.release(writer);
+                schema.pool().release(writer);
             }
         }
     }
 
     @Test
     void refusesMissingPositionDuringPollOrPrewarm() throws Exception {
-        try (AnalyticsDatabase db = open()) {
-            JdbcAcceptedScanReader reader = new JdbcAcceptedScanReader(db.pool);
-            Connection writer = db.pool.borrow();
-            try (PreparedStatement insert = writer.prepareStatement(
-                    "INSERT INTO accepted_scan(position,transaction_id,sku,unit_price) VALUES (2,'tx','sku1',1.00)")) {
-                insert.executeUpdate();
-            } finally {
-                db.pool.release(writer);
-            }
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create()) {
+            JdbcAcceptedScanReader reader = new JdbcAcceptedScanReader(schema.pool());
+            schema.insertPositioned(2, 2, "sku1");
             assertThrows(IllegalStateException.class, () -> reader.readAfter(0, 10));
             assertThrows(IllegalStateException.class, () -> reader.prewarm(1000));
         }
-    }
-
-    private static AnalyticsDatabase open() throws Exception {
-        try { return new AnalyticsDatabase(); }
-        catch (SQLException unavailable) { throw new TestAbortedException("MySQL unavailable", unavailable); }
     }
 }
