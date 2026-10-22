@@ -9,7 +9,9 @@ import database.JdbcProductReplicaStore;
 import database.JdbcRelayStore;
 import database.JdbcScanStore;
 import database.JdbcTransactionStore;
+import database.TransactionStatusQueries;
 import metrics.MetricsReporter;
+import metrics.StatusReporter;
 import rpc.GrpcAnalyticsIngestClient;
 import rpc.GrpcChannels;
 import rpc.GrpcInventoryGateway;
@@ -60,12 +62,15 @@ public final class TransactionMain {
         server.createContext("/transactions",new TransactionHttpHandler(service));
         refresher.start();
         MetricsReporter reporter = MetricsReporter.start("transaction");
+        TransactionStatusQueries statusQueries = new TransactionStatusQueries(pool);
+        StatusReporter status = StatusReporter.start("transaction", () -> statusQueries.read().line());
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.stop(5);
             relay.close();
             recovery.close();
             refresher.stop();
             GrpcChannels.shutdownAll();
+            status.stop();
             reporter.stop();
             pool.close();
         }));

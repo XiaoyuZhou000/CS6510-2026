@@ -113,6 +113,48 @@ class MicroserviceBoundaryTest {
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
     }
 
+    /**
+     * The Scan profiler and the SQL materializer are gone (R21, R12): neither source exists, and nothing
+     * that builds, runs, or benchmarks the services names {@code SCAN_PROFILE}. The CP0 baseline harnesses
+     * {@code benchmark-scan.ps1} and {@code benchmark-materializer.ps1} measure commit 26c89af and are retired
+     * by T129, so they are not checked.
+     */
+    @Test
+    void retiredProfilerAndMaterializerAreGone() throws Exception {
+        List<String> violations = new ArrayList<>();
+        Path server = serverRoot();
+        for (String owner : List.of("common", "transaction", "inventory", "analytics")) {
+            try (Stream<Path> paths = Files.walk(server.resolve(owner + "/src"))) {
+                paths.map(path -> path.getFileName().toString())
+                        .filter(name -> name.equals("ScanProfiler.java") || name.equals("JdbcScanMaterializer.java"))
+                        .forEach(name -> violations.add(owner + "/src still contains " + name));
+            }
+        }
+        List<Path> checked = new ArrayList<>(productionSources());
+        checked.addAll(serverScripts());
+        for (Path file : checked) {
+            if (Files.readString(file).contains("SCAN_PROFILE")) violations.add(file + " references SCAN_PROFILE");
+        }
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    /** No service source or launch script reads the former shared DB_NAME, DB_USER, or DB_PASSWORD (R3). */
+    @Test
+    void noServiceReadsTheFormerSharedDatabaseVariables() throws Exception {
+        Pattern javaLiteral = Pattern.compile("\"DB_(NAME|USER|PASSWORD)\"");
+        Pattern shellVariable = Pattern.compile("(?<![A-Za-z0-9_])DB_(NAME|USER|PASSWORD)(?![A-Za-z0-9_])");
+        List<String> violations = new ArrayList<>();
+        for (Path source : productionSources()) {
+            if (javaLiteral.matcher(Files.readString(source)).find()) violations.add(source + " reads a shared DB variable");
+        }
+        for (String service : SERVICES) {
+            Path script = serverRoot().resolve("run-" + service + ".sh");
+            assertTrue(Files.isRegularFile(script), "Missing " + script);
+            if (shellVariable.matcher(Files.readString(script)).find()) violations.add(script + " passes a shared DB variable");
+        }
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
     @Test
     void faultHooksAreInertWithoutTheProperty() {
         String previous = System.getProperty(FaultHooks.PROPERTY);
@@ -190,6 +232,17 @@ class MicroserviceBoundaryTest {
         }
         assertFalse(sources.isEmpty(), "No production sources found");
         return sources;
+    }
+
+    /** The build, run, test, and benchmark scripts in {@code server/}, except the retired CP0 harnesses. */
+    private static List<Path> serverScripts() throws Exception {
+        Set<String> retired = Set.of("benchmark-scan.ps1", "benchmark-materializer.ps1");
+        try (Stream<Path> paths = Files.list(serverRoot())) {
+            return paths.filter(Files::isRegularFile)
+                    .filter(path -> path.toString().endsWith(".sh") || path.toString().endsWith(".ps1"))
+                    .filter(path -> !retired.contains(path.getFileName().toString()))
+                    .toList();
+        }
     }
 
     /** The per-service schema, seed, and validation scripts plus the bootstrap template. */

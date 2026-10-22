@@ -1079,29 +1079,29 @@ The receipt and every error match the established contract, with captured prices
 
 ### Tests for User Story 6 ⚠️ write first; they must fail before implementation
 
-- [ ] T111 [P] [US6] Write `server/tests/integration/DatabaseIsolationTest.java` (SC-008). With disposable bootstrap-equivalent users, each service user's SELECT or INSERT on the other two schemas fails with MySQL error 1142, while full use of its own schema succeeds.
-- [ ] T113 [P] [US6] Write `server/tests/integration/ResetBaselineTest.java` for the per-service resets. T052 has already parked the legacy file. Migrate `resetProducesExactBaselineForFreshServer` with every baseline assertion. The test stays opt-in, destructive, and disabled by default. Running the per-service resets with only their own credentials must give:
+- [X] T111 [P] [US6] Write `server/tests/integration/DatabaseIsolationTest.java` (SC-008). With disposable bootstrap-equivalent users, each service user's SELECT or INSERT on the other two schemas fails with MySQL error 1142, while full use of its own schema succeeds.
+- [X] T113 [P] [US6] Write `server/tests/integration/ResetBaselineTest.java` for the per-service resets. T052 has already parked the legacy file. Migrate `resetProducesExactBaselineForFreshServer` with every baseline assertion. The test stays opt-in, destructive, and disabled by default. Running the per-service resets with only their own credentials must give:
   - 2,000 catalog rows, 2,000 inventory rows, and 20,000,000 units;
   - zero rows in Transaction and Analytics;
   - freshly started services that serve that baseline.
-- [ ] T117 [P] [US6] Write `server/tests/integration/RestartDuringWorkloadTest.java` (SC-009). During a short concurrent workload, restart each service once. After pending work drains, zero acknowledged scans are lost, and per-SKU reconciliation and window recomputation pass.
-- [ ] T118 [P] [US6] Extend `server/tests/architecture/CompositionRootTest.java`, keeping every existing assertion (ledger: `ADAPTED`):
+- [X] T117 [P] [US6] Write `server/tests/integration/RestartDuringWorkloadTest.java` (SC-009). During a short concurrent workload, restart each service once. After pending work drains, zero acknowledged scans are lost, and per-SKU reconciliation and window recomputation pass.
+- [X] T118 [P] [US6] Extend `server/tests/architecture/CompositionRootTest.java`, keeping every existing assertion (ledger: `ADAPTED`):
   - The Inventory and Analytics mains start a gRPC server through `GrpcServers`, and `TransactionMain` starts none.
   - Every main calls `DatabaseConfig.fromEnvironment` with its own prefix and starts `MetricsReporter`.
-- [ ] T119 [P] [US6] Extend `server/tests/architecture/MicroserviceBoundaryTest.java`:
+- [X] T119 [P] [US6] Extend `server/tests/architecture/MicroserviceBoundaryTest.java`:
   - `ScanProfiler.java` and `JdbcScanMaterializer.java` no longer exist, and no source references `SCAN_PROFILE`.
   - No service reads the former shared `DB_NAME`, `DB_USER`, or `DB_PASSWORD`.
 
 ### Implementation for User Story 6
 
-- [ ] T120 [US6] Add the FR-039 status summaries in `server/transaction/src/database/TransactionStatusQueries.java`, `server/inventory/src/database/InventoryStatusQueries.java`, and `server/analytics/src/database/AnalyticsStatusQueries.java`, one line every 30 s from each main:
+- [X] T120 [US6] Add the FR-039 status summaries in `server/transaction/src/database/TransactionStatusQueries.java`, `server/inventory/src/database/InventoryStatusQueries.java`, and `server/analytics/src/database/AnalyticsStatusQueries.java`, one line every 30 s from each main:
   - **Transaction**: pending attempts, alarmed attempts, undelivered rows, background completions, and replica version and age.
   - **Inventory**: `checkout_operation` counts by state.
   - **Analytics**: `last_position`, `last_window_end`, and the highest eligible boundary.
 
   Use read-only `JdbcUnitOfWork` queries in `server/transaction/src/database/TransactionStatusQueries.java`, `server/inventory/src/database/InventoryStatusQueries.java`, and `server/analytics/src/database/AnalyticsStatusQueries.java`, scheduled from each main.
-- [ ] T121 [US6] Verify independent builds (FR-050): delete `server/out`, then run `./build.sh transaction`, `./build.sh inventory`, and `./build.sh analytics` in separate clean runs. Each run must produce only `common.jar`, `contracts.jar`, and its own service jar. Record the commands and results for T122.
-- [ ] T122 [US6] Rewrite `server/README.md` for the microservice deployment, following contracts/service-deployment.md:
+- [X] T121 [US6] Verify independent builds (FR-050): delete `server/out`, then run `./build.sh transaction`, `./build.sh inventory`, and `./build.sh analytics` in separate clean runs. Each run must produce only `common.jar`, `contracts.jar`, and its own service jar. Record the commands and results for T122.
+- [X] T122 [US6] Rewrite `server/README.md` for the microservice deployment, following contracts/service-deployment.md:
   - prerequisites: JDK 21, Maven 3.9+, MySQL 8.4 on 3307, and Nginx;
   - build (the Maven contracts module, then `javac`), the independent-build commands from T121, and the configuration table;
   - the bootstrap, reset, seed, and validate scripts;
@@ -1110,7 +1110,7 @@ The receipt and every error match the established contract, with captured prices
   - the benchmark harness, `benchmark-compare.ps1`, the checkpoints, and the A/B decision rule;
   - the coverage ledger and the `PARITY_GATE` runs;
   - the statement that MySQL durability settings are retained unchanged.
-- [ ] T151 [US6] Run the US6 parity gate with `server/run-tests.sh`:
+- [X] T151 [US6] Run the US6 parity gate with `server/run-tests.sh`:
   - Run `PARITY_GATE=US6 server/run-tests.sh` with `SERVER_BASE_URL` set.
   - The whole suite must pass, including T111, T117, T118, and T119. T113 must pass when its opt-in property is set.
   - Record `T151` in `Verified at` for every row whose test passed.

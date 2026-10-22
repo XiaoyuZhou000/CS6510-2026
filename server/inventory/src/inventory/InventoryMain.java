@@ -8,8 +8,10 @@ import database.DatabaseConfig;
 import database.JdbcCatalogMetaStore;
 import database.JdbcCatalogStore;
 import database.JdbcCheckoutOperationStore;
+import database.InventoryStatusQueries;
 import database.JdbcInventoryStore;
 import metrics.MetricsReporter;
+import metrics.StatusReporter;
 import rpc.GrpcServers;
 import rpc.InventoryGrpcService;
 
@@ -45,10 +47,13 @@ public final class InventoryMain {
             CheckoutStockService checkouts = new CheckoutStockService(new JdbcCheckoutOperationStore(pool));
             grpc = GrpcServers.start(grpcPort, new InventoryGrpcService(catalog, checkouts));
             MetricsReporter reporter = MetricsReporter.start("inventory");
+            InventoryStatusQueries statusQueries = new InventoryStatusQueries(pool);
+            StatusReporter status = StatusReporter.start("inventory", () -> statusQueries.read().line());
             GrpcServers.Running grpcServer = grpc;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 server.stop(5);
                 grpcServer.stop(Duration.ofSeconds(5));
+                status.stop();
                 reporter.stop();
                 pool.close();
             }));

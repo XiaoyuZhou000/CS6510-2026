@@ -4,10 +4,12 @@ import api.AnalyticsHttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import database.ConnectionPool;
 import database.DatabaseConfig;
+import database.AnalyticsStatusQueries;
 import database.JdbcAcceptedScanReader;
 import database.JdbcPopularWindowStore;
 import database.JdbcScanIngestStore;
 import metrics.MetricsReporter;
+import metrics.StatusReporter;
 import rpc.AnalyticsIngestGrpcService;
 import rpc.GrpcServers;
 
@@ -48,12 +50,15 @@ public final class AnalyticsMain {
             server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
             server.createContext("/analytics/popular-items", new AnalyticsHttpHandler(service));
             MetricsReporter reporter = MetricsReporter.start("analytics");
+            AnalyticsStatusQueries statusQueries = new AnalyticsStatusQueries(pool);
+            StatusReporter status = StatusReporter.start("analytics", () -> statusQueries.read().line());
             AnalyticsService running = service;
             GrpcServers.Running grpcServer = grpc;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 server.stop(5);
                 grpcServer.stop(Duration.ofSeconds(5));
                 running.shutdown();
+                status.stop();
                 reporter.stop();
                 pool.close();
             }));

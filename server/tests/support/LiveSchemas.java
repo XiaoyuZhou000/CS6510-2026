@@ -20,11 +20,33 @@ public final class LiveSchemas {
     private LiveSchemas() { }
 
     public static Connection inventory() throws SQLException {
-        return connect("INVENTORY", "cs6510_inventory", "cs6510_inventory_svc");
+        return connect("inventory");
     }
 
     public static Connection transaction() throws SQLException {
-        return connect("TRANSACTION", "cs6510_transaction", "cs6510_transaction_svc");
+        return connect("transaction");
+    }
+
+    public static Connection analytics() throws SQLException {
+        return connect("analytics");
+    }
+
+    /** One deployed service's own connection settings; a missing password skips the test. */
+    public record Credentials(String service, String host, int port, String name, String user, String password) {
+        @Override
+        public String toString() {
+            return service + " as " + user + "@" + host + ":" + port + "/" + name;
+        }
+    }
+
+    /** The settings for {@code transaction}, {@code inventory}, or {@code analytics}. */
+    public static Credentials credentials(String service) {
+        String prefix = service.toUpperCase(java.util.Locale.ROOT);
+        String password = setting(prefix + "_DB_PASSWORD", null);
+        assumeTrue(password != null, prefix + "_DB_PASSWORD is needed to use cs6510_" + service + " with its own credentials");
+        return new Credentials(service, setting("DB_HOST", "127.0.0.1"), Integer.parseInt(setting("DB_PORT", "3307")),
+                setting(prefix + "_DB_NAME", "cs6510_" + service), setting(prefix + "_DB_USER", "cs6510_" + service + "_svc"),
+                password);
     }
 
     /** One SKU's stock in Inventory's schema. */
@@ -48,12 +70,11 @@ public final class LiveSchemas {
         }
     }
 
-    private static Connection connect(String prefix, String schema, String user) throws SQLException {
-        String password = setting(prefix + "_DB_PASSWORD", null);
-        assumeTrue(password != null, prefix + "_DB_PASSWORD is needed to read " + schema + " with its own credentials");
-        String url = "jdbc:mysql://" + setting("DB_HOST", "127.0.0.1") + ":" + setting("DB_PORT", "3307") + "/"
-                + setting(prefix + "_DB_NAME", schema) + "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC";
-        return DriverManager.getConnection(url, setting(prefix + "_DB_USER", user), password);
+    private static Connection connect(String service) throws SQLException {
+        Credentials own = credentials(service);
+        String url = "jdbc:mysql://" + own.host() + ":" + own.port() + "/" + own.name()
+                + "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC";
+        return DriverManager.getConnection(url, own.user(), own.password());
     }
 
     /** A JVM property, then the environment, then the fallback. */

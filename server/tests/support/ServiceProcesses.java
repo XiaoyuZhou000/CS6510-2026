@@ -62,11 +62,21 @@ public final class ServiceProcesses {
 
         /** Points the service at a disposable schema through its own {@code <SERVICE>_DB_*} variables. */
         public Builder database(TestSchema schema) {
-            environment.put("DB_HOST", schema.host());
-            environment.put("DB_PORT", Integer.toString(schema.port()));
-            environment.put(prefix() + "_DB_NAME", schema.name());
-            environment.put(prefix() + "_DB_USER", schema.user());
-            environment.put(prefix() + "_DB_PASSWORD", schema.password());
+            return database(schema.host(), schema.port(), schema.name(), schema.user(), schema.password());
+        }
+
+        /** Points the service at a deployed schema with that service's own credentials. */
+        public Builder database(LiveSchemas.Credentials credentials) {
+            return database(credentials.host(), credentials.port(), credentials.name(), credentials.user(),
+                    credentials.password());
+        }
+
+        private Builder database(String host, int port, String name, String user, String password) {
+            environment.put("DB_HOST", host);
+            environment.put("DB_PORT", Integer.toString(port));
+            environment.put(prefix() + "_DB_NAME", name);
+            environment.put(prefix() + "_DB_USER", user);
+            environment.put(prefix() + "_DB_PASSWORD", password);
             environment.putIfAbsent(prefix() + "_DB_POOL_SIZE", "4");
             environment.putIfAbsent(prefix() + "_DB_POOL_MAX_SIZE", "8");
             return this;

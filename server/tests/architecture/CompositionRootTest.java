@@ -8,7 +8,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -72,6 +75,32 @@ class CompositionRootTest {
         assertTrue(source.contains("running.shutdown()"));
         String facade = Files.readString(serverRoot().resolve("analytics/src/analytics/AnalyticsService.java"));
         assertTrue(facade.contains("shutdownTimeoutMillis <= 0"));
+    }
+
+    @Test
+    void eachMainOwnsItsGrpcRoleConfigurationMetricsAndStatus() throws Exception {
+        for (String domain : List.of("transaction", "inventory", "analytics")) {
+            Path main = mainSource(domain);
+            String source = Files.readString(main);
+            String prefix = domain.toUpperCase(java.util.Locale.ROOT);
+            if (domain.equals("transaction")) {
+                assertFalse(source.contains("GrpcServers"), main + " is a gRPC client only");
+                assertFalse(source.contains("ServerBuilder"), main + " is a gRPC client only");
+            } else {
+                assertTrue(source.contains("GrpcServers.start("), main + " serves gRPC through GrpcServers");
+            }
+            Matcher configs = Pattern.compile("DatabaseConfig\\.fromEnvironment\\(\\s*\"([A-Z]+)\",\\s*\"([a-z0-9_]+)\","
+                    + "\\s*\"([a-z0-9_]+)\"").matcher(source);
+            List<String> found = new ArrayList<>();
+            while (configs.find()) found.add(configs.group(1) + " " + configs.group(2) + " " + configs.group(3));
+            assertEquals(List.of(prefix + " cs6510_" + domain + " cs6510_" + domain + "_svc"), found,
+                    main + " reads only its own database settings");
+            assertTrue(source.contains("MetricsReporter.start(\"" + domain + "\")"), main + " starts its MetricsReporter");
+            String status = Character.toUpperCase(domain.charAt(0)) + domain.substring(1) + "StatusQueries";
+            assertTrue(source.contains("StatusReporter.start(\"" + domain + "\""), main + " schedules its status summary");
+            assertTrue(source.contains("new " + status + "(pool"), main + " reads its status with its own pool");
+            assertTrue(source.contains("status.stop()"), main + " stops its status summary on shutdown");
+        }
     }
 
     private static boolean isBusinessInterface(Class<?> type) {

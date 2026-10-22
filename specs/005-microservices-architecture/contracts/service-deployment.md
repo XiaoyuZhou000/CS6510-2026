@@ -48,6 +48,7 @@ cd server
 | `TRANSACTION_CACHE_MAX_ENTRIES` | Transaction | 100000 (0 disables the transaction state cache, for A/B runs and as a fallback; R19) |
 | `DB_SERVER_PREPARED_STATEMENTS` | all | `false`. When `true`, adds `useServerPrepStmts=true` to the JDBC URL. This is a checkpoint CP3 A/B switch (R20), and the default changes only with measured evidence. |
 | `PERF_METRICS`, `PERF_METRICS_INTERVAL_SECONDS` | all | `false`, 10. When enabled, each service logs a one-line JSON metrics summary every interval and at shutdown (R21). This replaces `SCAN_PROFILE`. |
+| `STATUS_INTERVAL_SECONDS` | all | 30. The interval of the operational status line (FR-039). |
 
 - **JDBC sessions** (R20): each service builds its JDBC URL with `useLocalSessionState=true`, `useLocalTransactionState=true`, `cachePrepStmts=true`, `prepStmtCacheSize=256`, `prepStmtCacheSqlLimit=2048`, and `rewriteBatchedStatements=true`. `useServerPrepStmts` is kept only if checkpoint CP3 shows a gain.
 - **Pooled connections**: opened once in manual-commit mode at READ COMMITTED. No code changes autocommit or isolation per transaction.
@@ -91,12 +92,12 @@ Resetting a single service is allowed for tests, but invariants are judged from 
 
 ## Operational status (FR-039)
 
-Each query runs with the owning service's credentials. Each service also logs a one-line status summary every 30 s.
+Each query runs with the owning service's credentials. Each service also logs a one-line status summary every 30 s (`STATUS_INTERVAL_SECONDS`), for example `status service=transaction pending_work=no pending_attempts=0 alarmed_attempts=0 undelivered_scans=0 …`, read by `TransactionStatusQueries`, `InventoryStatusQueries`, and `AnalyticsStatusQueries`.
 
 | Service | Question | Query (summary) |
 |---|---|---|
 | Transaction | Pending checkout attempts | `SELECT COUNT(*) FROM checkout_attempt WHERE state='PENDING'` |
-| Transaction | Alarmed attempts | Pending attempts whose `last_error` is `FAILED_PRECONDITION` or `INVALID_ARGUMENT` |
+| Transaction | Alarmed attempts | Pending attempts whose `last_error` is a `FAILED_PRECONDITION`, `INVALID_ARGUMENT`, or `INTEGRITY` alarm |
 | Transaction | Undelivered events | `SELECT COUNT(*) FROM accepted_scan WHERE delivered_at IS NULL` |
 | Transaction | Background completions | `SELECT COUNT(*) FROM checkout_attempt WHERE state='COMPLETED' AND client_outcome='PENDING_ERROR'` |
 | Transaction | Completions without a recorded response | `… state='COMPLETED' AND client_outcome='NONE'` |
