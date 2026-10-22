@@ -6,7 +6,12 @@ import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpContext;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpPrincipal;
+import database.StoreFailure;
 import org.junit.jupiter.api.Test;
+import transaction.CheckoutPendingFailure;
+import transaction.CheckoutRejectedFailure;
+import transaction.DependencyUnavailableFailure;
+import transaction.ProductCatalogUnavailableFailure;
 import transaction.TransactionFailure;
 import transaction.TransactionOperations;
 
@@ -19,7 +24,10 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -99,6 +107,79 @@ class TransactionHttpHandlerTest {
         assertEquals("INTERNAL_ERROR", infrastructure.json().get("error"));
         assertEquals("Internal server error", infrastructure.json().get("message"));
         assertFalse(infrastructure.body().contains("password"));
+    }
+
+    @Test
+    void internalCheckoutCatalogAndDependencyFailuresAnswerSanitized500() throws Exception {
+        FakeTransactions transactions = new FakeTransactions();
+        TransactionHttpHandler handler = new TransactionHttpHandler(transactions);
+        StoreFailure sql = new StoreFailure("SQLException: Table 'cs6510_transaction.checkout_attempt'",
+                new IllegalStateException("jdbc:mysql://cs6510_transaction_svc:secret@127.0.0.1:3307"), true);
+        Map<String, RuntimeException> failures = new LinkedHashMap<>();
+        failures.put("pending", new CheckoutPendingFailure("tx-1"));
+        failures.put("catalog", new ProductCatalogUnavailableFailure());
+        failures.put("dependency", new DependencyUnavailableFailure(
+                "io.grpc.StatusRuntimeException: UNAVAILABLE: io exception",
+                new IllegalStateException("DEADLINE_EXCEEDED after 2s on selfcheckout.inventory.v1")));
+        failures.put("invalid request", new CheckoutRejectedFailure("tx-1", "INVALID_REQUEST", "SKU-000042"));
+        failures.put("stock restored", new CheckoutRejectedFailure("tx-1", "STOCK_RESTORED", null));
+        failures.put("store", sql);
+        failures.put("unexpected", new IllegalStateException("NullPointerException in grpc-default-executor"));
+
+        for (Map.Entry<String, RuntimeException> failure : failures.entrySet()) {
+            transactions.failure = failure.getValue();
+            for (TestExchange exchange : List.of(
+                    TestExchange.request("POST", "/transactions/tx-1/complete", ""),
+                    TestExchange.request("POST", "/transactions/tx-1/items", "{\"sku\":\"SKU-000042\"}"),
+                    TestExchange.request("GET", "/transactions/tx-1", ""),
+                    TestExchange.request("POST", "/transactions", "{\"stationId\":\"station-7\"}"))) {
+                handler.handle(exchange);
+                String context = failure.getKey() + " " + exchange.getRequestMethod() + " "
+                        + exchange.getRequestURI();
+                assertEquals(500, exchange.status(), context);
+                assertEquals("application/json", exchange.getResponseHeaders().getFirst("Content-Type"), context);
+                assertEquals(Map.of("error", "INTERNAL_ERROR", "message", "Internal server error"),
+                        exchange.json(), context);
+                for (String leak : List.of("grpc", "UNAVAILABLE", "DEADLINE", "SQL", "jdbc", "cs6510",
+                        "secret", "SKU-000042", "STOCK_RESTORED", "INVALID_REQUEST", "pending", "tx-1")) {
+                    assertFalse(exchange.body().contains(leak), context + " leaked " + leak);
+                }
+            }
+        }
+    }
+
+    @Test
+    void publicClientErrorMappingsAreUnchanged() throws Exception {
+        FakeTransactions transactions = new FakeTransactions();
+        TransactionHttpHandler handler = new TransactionHttpHandler(transactions);
+
+        TestExchange missingSku = TestExchange.request("POST", "/transactions/tx-1/items", "{}");
+        handler.handle(missingSku);
+        assertEquals(400, missingSku.status());
+        assertEquals("MISSING_SKU", missingSku.json().get("error"));
+        assertNull(transactions.lastScan, "a 400 is decided before delegation");
+
+        TestExchange blankStation = TestExchange.request("POST", "/transactions", "{\"stationId\":\" \"}");
+        handler.handle(blankStation);
+        assertEquals(400, blankStation.status());
+        assertEquals("MISSING_STATION_ID", blankStation.json().get("error"));
+
+        Map<TransactionFailure.Code, Object[]> expected = new EnumMap<>(TransactionFailure.Code.class);
+        expected.put(TransactionFailure.Code.NOT_FOUND, new Object[] {404, "TRANSACTION_NOT_FOUND"});
+        expected.put(TransactionFailure.Code.UNKNOWN_SKU, new Object[] {404, "SKU_NOT_FOUND"});
+        expected.put(TransactionFailure.Code.NOT_OPEN, new Object[] {409, "TRANSACTION_NOT_OPEN"});
+        expected.put(TransactionFailure.Code.EMPTY_BASKET, new Object[] {409, "EMPTY_BASKET"});
+        expected.put(TransactionFailure.Code.INSUFFICIENT_STOCK, new Object[] {409, "INSUFFICIENT_STOCK"});
+        assertEquals(EnumSet.allOf(TransactionFailure.Code.class), expected.keySet(), "every domain code is mapped");
+        for (Map.Entry<TransactionFailure.Code, Object[]> mapping : expected.entrySet()) {
+            String message = "message for " + mapping.getKey();
+            transactions.failure = new TransactionFailure(mapping.getKey(), message);
+            TestExchange exchange = TestExchange.request("POST", "/transactions/tx-1/complete", "{}");
+            handler.handle(exchange);
+            assertEquals(mapping.getValue()[0], exchange.status(), mapping.getKey().name());
+            assertEquals(mapping.getValue()[1], exchange.json().get("error"), mapping.getKey().name());
+            assertEquals(message, exchange.json().get("message"), mapping.getKey().name());
+        }
     }
 
     @Test

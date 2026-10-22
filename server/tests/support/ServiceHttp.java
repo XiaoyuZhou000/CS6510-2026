@@ -16,7 +16,12 @@ public final class ServiceHttp {
     private final String base;
 
     public ServiceHttp(int port) {
-        this.base = "http://127.0.0.1:" + port;
+        this("http://127.0.0.1:" + port);
+    }
+
+    /** Requests to {@code baseUrl}, for example a gateway in front of the services. */
+    public ServiceHttp(String baseUrl) {
+        this.base = baseUrl;
     }
 
     public HttpResponse<String> post(String path, String body) throws IOException, InterruptedException {

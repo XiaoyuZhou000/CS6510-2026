@@ -1049,17 +1049,17 @@ The receipt and every error match the established contract, with captured prices
 
 ### Tests for User Story 4 ⚠️ write first; they must fail before implementation
 
-- [ ] T107 [P] [US4] Extend `server/tests/unit/api/TransactionHttpHandlerTest.java`, keeping every existing method (ledger: `ADAPTED`):
+- [X] T107 [P] [US4] Extend `server/tests/unit/api/TransactionHttpHandlerTest.java`, keeping every existing method (ledger: `ADAPTED`):
   - `CheckoutPendingFailure`, `ProductCatalogUnavailableFailure`, `DependencyUnavailableFailure`, the INVALID_REQUEST and STOCK_RESTORED failure, and an unexpected `RuntimeException` each produce 500 `{"error":"INTERNAL_ERROR","message":"Internal server error"}` with no gRPC or SQL text.
   - The existing 400, 404, and 409 mappings are unchanged.
-- [ ] T108 [P] [US4] Write `server/tests/integration/GatewayServiceOutageTest.java`, which runs the real services behind the checked-in route map through `server/tests/integration/PublicRouterTestSupport.java`. `PublicRoutingIsolationTest` and `PublicRouterTestSupport` stay unchanged (ledger: `RETAINED`), because they use stand-in owners and no database. Assert that:
+- [X] T108 [P] [US4] Write `server/tests/integration/GatewayServiceOutageTest.java`, which runs the real services behind the checked-in route map through `server/tests/integration/PublicRouterTestSupport.java`. `PublicRoutingIsolationTest` and `PublicRouterTestSupport` stay unchanged (ledger: `RETAINED`), because they use stand-in owners and no database. Assert that:
   - stopping each service gives 502 only on its own routes;
   - with Inventory stopped, Complete returns 500 within 10 s and lookup shows OPEN;
   - after Inventory returns, the attempt settles as COMPLETED.
 
 ### Implementation for User Story 4
 
-- [ ] T110 [US4] Verify the unchanged public interface (`deploy/nginx.conf`, `server/tests/contract/`) and run the US4 parity gate:
+- [X] T110 [US4] Verify the unchanged public interface (`deploy/nginx.conf`, `server/tests/contract/`) and run the US4 parity gate:
   - Confirm that `deploy/nginx.conf` is unchanged: seven routes, upstreams 8081, 8082, and 8083, `error_page 504 =502`, a 1 s connect timeout, and a 30 s read timeout.
   - With `SERVER_BASE_URL=http://localhost:8080`, run `PARITY_GATE=US4 server/run-tests.sh`. The whole suite must pass, including:
     - the unchanged `ItemsEndpointTest`, `TransactionLifecycleTest`, `TransactionLookupTest`, and `PublicRoutingIsolationTest`;
