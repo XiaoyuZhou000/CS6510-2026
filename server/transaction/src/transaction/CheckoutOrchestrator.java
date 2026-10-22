@@ -10,6 +10,7 @@ import database.StoreFailure;
 import database.TransactionStore;
 import metrics.LatencyHistogram;
 import metrics.PerfMetrics;
+import rpc.FaultHooks;
 import rpc.ResponseBudget;
 import transaction.SettlementRegistry.Settlement;
 import transaction.TransactionOperations.ReceiptLineView;
@@ -25,6 +26,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -44,13 +49,17 @@ import java.util.concurrent.atomic.LongAdder;
  *
  * When the budget runs out with the attempt still pending, the request commits
  * {@code client_outcome = PENDING_ERROR}, queues the attempt in {@link RecoverySchedule}, and answers 500
- * through {@link CheckoutPendingFailure}. A 500 is never a cancellation (FR-017). Every process-local
+ * through {@link CheckoutPendingFailure}. A 500 is never a cancellation (FR-017).
+ *
+ * <p>A Scan or Complete that finds another attempt pending waits for its settlement within its own budget
+ * ({@link #waitFor}, {@link #awaitSettlement}; FR-035, R7), then restarts from the beginning. Every process-local
  * structure here is an optimization: the database guards and Inventory's idempotency decide every
- * outcome, also when several instances or the recovery worker race (Implementation Rule 3).
+ * outcome, also when several instances or the recovery worker race (Implementation Rule 3).</p>
  */
 public final class CheckoutOrchestrator {
     public static final Duration DEFAULT_RESPONSE_BUDGET = Duration.ofMillis(8_000);
     public static final Duration DEFAULT_RPC_DEADLINE = Duration.ofMillis(2_000);
+    public static final Duration DEFAULT_WAIT_BACKSTOP = Duration.ofMillis(1_000);
     public static final List<Duration> DEFAULT_RETRY_DELAYS = List.of(Duration.ofMillis(50), Duration.ofMillis(100),
             Duration.ofMillis(200), Duration.ofMillis(400));
     /** Reloads after T1 guard misses before a Complete gives up with a 500. */
@@ -63,6 +72,10 @@ public final class CheckoutOrchestrator {
     private static final LongAdder APPLY_RETRIES = PerfMetrics.counter("transaction.complete.applyRetries");
     private static final LongAdder ALARMS = PerfMetrics.counter("transaction.complete.integrityAlarms");
     private static final LongAdder FOREIGN = PerfMetrics.counter("transaction.complete.foreignSettlements");
+    private static final LatencyHistogram WAIT = PerfMetrics.timer("transaction.wait");
+    private static final LongAdder WAIT_SIGNALLED = PerfMetrics.counter("transaction.wait.signalled");
+    private static final LongAdder WAIT_DB_CHECKS = PerfMetrics.counter("transaction.wait.dbChecks");
+    private static final LongAdder WAIT_TIMED_OUT = PerfMetrics.counter("transaction.wait.timedOut");
 
     private final TransactionStore transactions;
     private final CheckoutAttemptStore attempts;
@@ -95,27 +108,48 @@ public final class CheckoutOrchestrator {
         if (registry.locks() != locks) throw new IllegalArgumentException("The registry must check the cache's locks");
     }
 
-    /** The response budget, the per-call Inventory deadline, and the in-request retry delays (R6). */
-    public record Settings(Duration responseBudget, Duration rpcDeadline, List<Duration> retryDelays) {
+    /**
+     * The response budget, the per-call Inventory deadline, the in-request retry delays (R6), and the
+     * database backstop of a bounded wait (R7).
+     */
+    public record Settings(Duration responseBudget, Duration rpcDeadline, List<Duration> retryDelays,
+                           Duration waitBackstop) {
         public Settings {
             requirePositive(responseBudget, "responseBudget");
             requirePositive(rpcDeadline, "rpcDeadline");
             retryDelays = List.copyOf(retryDelays);
             if (retryDelays.isEmpty()) throw new IllegalArgumentException("retryDelays must not be empty");
             retryDelays.forEach(delay -> requirePositive(delay, "retryDelays"));
+            requirePositive(waitBackstop, "waitBackstop");
+        }
+
+        public Settings(Duration responseBudget, Duration rpcDeadline, List<Duration> retryDelays) {
+            this(responseBudget, rpcDeadline, retryDelays, DEFAULT_WAIT_BACKSTOP);
         }
 
         public static Settings defaults() {
             return new Settings(DEFAULT_RESPONSE_BUDGET, DEFAULT_RPC_DEADLINE, DEFAULT_RETRY_DELAYS);
         }
 
-        /** {@code CHECKOUT_RESPONSE_BUDGET_MS} (8,000) and {@code INVENTORY_RPC_DEADLINE_MS} (2,000). */
+        /**
+         * {@code CHECKOUT_RESPONSE_BUDGET_MS} (8,000), {@code INVENTORY_RPC_DEADLINE_MS} (2,000), and
+         * {@code CHECKOUT_WAIT_BACKSTOP_MS} (1,000).
+         */
         public static Settings fromEnvironment(Map<String, String> environment) {
             return new Settings(millis(environment, "CHECKOUT_RESPONSE_BUDGET_MS", DEFAULT_RESPONSE_BUDGET),
-                    millis(environment, "INVENTORY_RPC_DEADLINE_MS", DEFAULT_RPC_DEADLINE), DEFAULT_RETRY_DELAYS);
+                    millis(environment, "INVENTORY_RPC_DEADLINE_MS", DEFAULT_RPC_DEADLINE), DEFAULT_RETRY_DELAYS,
+                    millis(environment, "CHECKOUT_WAIT_BACKSTOP_MS", DEFAULT_WAIT_BACKSTOP));
         }
 
-        private static Duration millis(Map<String, String> environment, String key, Duration fallback) {
+        public Settings withResponseBudget(Duration budget) {
+            return new Settings(budget, rpcDeadline, retryDelays, waitBackstop);
+        }
+
+        public Settings withWaitBackstop(Duration backstop) {
+            return new Settings(responseBudget, rpcDeadline, retryDelays, backstop);
+        }
+
+        static Duration millis(Map<String, String> environment, String key, Duration fallback) {
             String configured = environment.get(key);
             return configured == null || configured.isBlank() ? fallback
                     : Duration.ofMillis(Long.parseLong(configured.trim()));
@@ -154,27 +188,141 @@ public final class CheckoutOrchestrator {
         Instant now();
 
         void sleep(Duration duration) throws InterruptedException;
+
+        /** Waits up to {@code timeout} for {@code future}; null when it did not complete in time. */
+        default <T> T await(CompletableFuture<T> future, Duration timeout) throws InterruptedException {
+            try {
+                return future.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
+            } catch (TimeoutException | ExecutionException notSettled) {
+                return null;
+            }
+        }
     }
 
     public TransactionStateCache cache() {
         return cache;
     }
 
+    public Settings settings() {
+        return settings;
+    }
+
+    /** A request's response budget, started now on this orchestrator's clock (R6). */
+    public ResponseBudget startBudget() {
+        return ResponseBudget.start(settings.responseBudget(), timing::nanoTime);
+    }
+
     public ReceiptView complete(String id) {
         Objects.requireNonNull(id, "id");
-        ResponseBudget budget = ResponseBudget.start(settings.responseBudget(), timing::nanoTime);
-        Begun begun = begin(id);
-        try {
-            return settle(begun, budget);
-        } finally {
-            registry.release(begun.key());
+        ResponseBudget budget = startBudget();
+        boolean restarted = false;
+        while (true) {
+            Start start = begin(id, restarted ? budget : null);
+            if (start.pending() != null) {
+                awaitSettlement(start.pending(), budget);
+                restarted = true;
+                continue;
+            }
+            Begun begun = start.begun();
+            try {
+                FaultHooks.hit("checkout.afterBegin");
+                return settle(begun, budget);
+            } finally {
+                registry.release(begun.key());
+            }
         }
     }
 
     /** A committed T1: the attempt, the basket snapshot it froze, and the lines sent to Inventory. */
     private record Begun(AttemptKey key, State state, List<InventoryGateway.CheckoutLine> lines) { }
 
-    private Begun begin(String id) {
+    /** Either a committed T1, or another attempt this request must wait for first. */
+    private record Start(Begun begun, PendingWait pending) { }
+
+    /**
+     * A pending attempt a request waits for: its key and its settlement future, taken under the stripe
+     * so that no settlement in this process can be missed.
+     */
+    public record PendingWait(AttemptKey key, CompletableFuture<Settlement> future) {
+        public PendingWait {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(future, "future");
+        }
+    }
+
+    /**
+     * Registers a wait for the pending attempt of {@code state}, which the caller confirmed against the
+     * database under the transaction's stripe; the caller releases the stripe before waiting.
+     */
+    public PendingWait waitFor(State state) {
+        if (!state.pending()) throw new IllegalArgumentException("Transaction " + state.transactionId() + " is not pending");
+        AttemptKey key = new AttemptKey(state.transactionId(), state.activeAttemptNumber());
+        return new PendingWait(key, registry.futureFor(key));
+    }
+
+    /**
+     * Bounded waiting (FR-035, R7): waits within the request's remaining budget for the attempt to
+     * settle, holding no lock or connection. A settlement in this process completes the future at once.
+     * Without a signal, the database is read once per {@code waitBackstop} to catch settlements made
+     * elsewhere, except while a live request of this process owns the attempt and will signal, and once
+     * more at the bound; each check borrows a connection for one read. Returns once the attempt is
+     * settled, so the caller restarts; at the bound, raises {@link CheckoutPendingFailure} with no write.
+     */
+    public void awaitSettlement(PendingWait wait, ResponseBudget budget) {
+        Objects.requireNonNull(wait, "wait");
+        Objects.requireNonNull(budget, "budget");
+        AttemptKey key = wait.key();
+        if (budget.expired()) {
+            // A restart after the check at the bound found another attempt pending: the bound has passed.
+            WAIT_TIMED_OUT.increment();
+            throw new CheckoutPendingFailure(key.transactionId());
+        }
+        long started = System.nanoTime();
+        try {
+            while (true) {
+                Duration slice = budget.nextDeadline(settings.waitBackstop());
+                if (!slice.isZero()) {
+                    Settlement settlement;
+                    try {
+                        settlement = timing.await(wait.future(), slice);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new CheckoutPendingFailure(key.transactionId());
+                    }
+                    if (settlement != null) {
+                        WAIT_SIGNALLED.increment();
+                        return;
+                    }
+                    if (!budget.expired() && registry.owned(key)) continue;
+                }
+                WAIT_DB_CHECKS.increment();
+                Optional<CheckoutAttemptStore.AttemptRecord> attempt = attempts.findAttempt(key);
+                if (attempt.isEmpty() || attempt.get().state() != CheckoutAttemptStore.State.PENDING) {
+                    settledElsewhere(key, attempt);
+                    return;
+                }
+                if (budget.expired()) {
+                    WAIT_TIMED_OUT.increment();
+                    throw new CheckoutPendingFailure(key.transactionId());
+                }
+            }
+        } finally {
+            WAIT.record(System.nanoTime() - started);
+        }
+    }
+
+    /** A database check found the attempt settled: wake this process's other waiters and drop the future. */
+    private void settledElsewhere(AttemptKey key, Optional<CheckoutAttemptStore.AttemptRecord> attempt) {
+        Settlement settlement = attempt.isPresent() && attempt.get().state() == CheckoutAttemptStore.State.COMPLETED
+                ? Settlement.COMPLETED : Settlement.REOPENED;
+        try (var held = locks.acquire(key.transactionId())) {
+            cache.invalidate(key.transactionId());
+            registry.settled(key, settlement);
+        }
+    }
+
+    /** {@code restartBudget} is set after a wait: with nothing left of it, no new attempt is begun. */
+    private Start begin(String id, ResponseBudget restartBudget) {
         long started = System.nanoTime();
         try (var held = locks.acquire(id)) {
             int guardMisses = 0;
@@ -186,10 +334,14 @@ public final class CheckoutOrchestrator {
                 });
                 RuntimeException rejection = rejection(id, found);
                 if (rejection != null) {
-                    if (fresh[0]) throw rejection;
-                    cache.invalidate(id);
-                    continue;
+                    if (!fresh[0]) {
+                        cache.invalidate(id);
+                        continue;
+                    }
+                    if (rejection instanceof CheckoutPendingFailure) return new Start(null, waitFor(found.orElseThrow()));
+                    throw rejection;
                 }
+                if (restartBudget != null && restartBudget.expired()) throw new CheckoutPendingFailure(id);
                 State state = found.orElseThrow();
                 AttemptKey key = new AttemptKey(id, state.attemptCount() + 1);
                 List<InventoryGateway.CheckoutLine> lines = lines(state);
@@ -210,7 +362,7 @@ public final class CheckoutOrchestrator {
                 if (result == WriteResult.OK) {
                     cache.put(state.withActiveAttempt(key.attemptNumber()));
                     registry.own(key);
-                    return new Begun(key, state, lines);
+                    return new Start(new Begun(key, state, lines), null);
                 }
                 cache.recordGuardMiss();
                 cache.invalidate(id);
@@ -243,10 +395,12 @@ public final class CheckoutOrchestrator {
             if (deadline.isZero()) throw handOver(key);
             InventoryGateway.ApplyResult result;
             try {
+                FaultHooks.hit("checkout.beforeApply");
                 result = inventory.applyCheckout(key, begun.lines(), deadline);
             } catch (RuntimeException unexpected) {
                 result = new InventoryGateway.Uncertain(unexpected.getClass().getSimpleName());
             }
+            FaultHooks.hit("checkout.afterApplyReply");
             switch (result) {
                 case InventoryGateway.Applied applied -> {
                     return recordCompletion(begun, budget);
@@ -275,6 +429,7 @@ public final class CheckoutOrchestrator {
         Instant completedAt = completionTime(begun.state());
         for (int retry = 0; ; retry++) {
             long started = System.nanoTime();
+            boolean recorded = false;
             try (var held = locks.acquire(id)) {
                 WriteResult result = null;
                 try {
@@ -286,7 +441,7 @@ public final class CheckoutOrchestrator {
                 if (result == WriteResult.OK) {
                     cache.evict(id);
                     registry.settled(key, Settlement.COMPLETED);
-                    return receipt(begun.state(), completedAt);
+                    recorded = true;
                 }
                 if (result == WriteResult.GUARD_MISS) {
                     cache.recordGuardMiss();
@@ -295,6 +450,10 @@ public final class CheckoutOrchestrator {
                 }
             } finally {
                 T3.record(System.nanoTime() - started);
+            }
+            if (recorded) {
+                FaultHooks.hit("checkout.afterRecordCompletion");
+                return receipt(begun.state(), completedAt);
             }
             if (!pause(budget, retry)) throw handOver(key);
         }

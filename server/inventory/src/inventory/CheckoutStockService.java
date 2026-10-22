@@ -3,6 +3,7 @@ package inventory;
 import api.json.Json;
 import database.CheckoutOperationStore;
 import metrics.PerfMetrics;
+import rpc.FaultHooks;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -65,6 +66,8 @@ public final class CheckoutStockService {
             throw alarm(new CheckoutConflict("A second checkout deduction for transaction " + transactionId
                     + " was refused", integrity));
         }
+        // Only a fresh commit pauses here; a replay answers at once, so a delayed first reply can be repeated.
+        if (!result.replayed()) FaultHooks.hit("inventory.apply.afterCommit");
         return switch (result.outcome()) {
             case APPLIED -> new ApplyResult(Outcome.APPLIED, null, result.replayed());
             case INSUFFICIENT_STOCK -> new ApplyResult(Outcome.INSUFFICIENT_STOCK, result.rejectedSku(), result.replayed());
@@ -90,6 +93,7 @@ public final class CheckoutStockService {
     /** The reserved restoration (FR-032); no normal checkout path calls it. */
     public RestoreResult restore(String transactionId, int attemptNumber) {
         CheckoutOperationStore.RestoreResult result = operations.restore(attempt(transactionId, attemptNumber));
+        if (result.outcome() == CheckoutOperationStore.RestoreOutcome.RESTORED) FaultHooks.hit("inventory.restore.afterCommit");
         List<Line> lines = result.lines() == null ? List.of() : parse(result.lines());
         return new RestoreResult(RestoreOutcome.valueOf(result.outcome().name()), lines);
     }

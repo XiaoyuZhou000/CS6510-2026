@@ -10,6 +10,7 @@ import database.ProductReplicaStore;
 import database.ScanStore;
 import database.TransactionStore;
 import transaction.CheckoutOrchestrator;
+import transaction.CheckoutRecoveryWorker;
 import transaction.InventoryGateway;
 import transaction.ProductCatalogReplica;
 import transaction.RecoverySchedule;
@@ -21,14 +22,17 @@ import transaction.TransactionStateCache;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.Clock;
 import java.util.UUID;
 import java.util.function.UnaryOperator;
 
 /**
  * One in-process Transaction Service over a {@link TransactionTestSchema}, wired like
- * {@code TransactionMain} but without HTTP or background workers, for the performance and cache
- * tests (R19, R22). The schema's product replica must be seeded first; it is loaded from the durable
- * store, as at startup. Complete calls {@link Builder#inventory}, which by default fails the test.
+ * {@code TransactionMain} but without HTTP, for the performance, cache, and recovery tests (R19, R22).
+ * The schema's product replica must be seeded first; it is loaded from the durable store, as at startup.
+ * Complete calls {@link Builder#inventory}, which by default fails the test. The recovery worker is
+ * built over the same schedule and registry but runs only after {@link #startRecovery()}, or when a
+ * test drives it directly.
  */
 public final class InProcessTransaction {
     public final ConnectionPool pool;
@@ -42,6 +46,7 @@ public final class InProcessTransaction {
     public final RecoverySchedule schedule;
     public final CheckoutOrchestrator checkout;
     public final TransactionService service;
+    public final CheckoutRecoveryWorker recovery;
 
     private InProcessTransaction(Builder builder) throws SQLException {
         pool = builder.pool != null ? builder.pool : builder.schema.newPool(
@@ -63,6 +68,19 @@ public final class InProcessTransaction {
         checkout = new CheckoutOrchestrator(transactions, attempts, builder.inventory, cache, registry, schedule,
                 builder.settings, builder.timing);
         service = new TransactionService(transactions, scans, checkout, replica, locks, cache);
+        recovery = new CheckoutRecoveryWorker(attempts, builder.inventory, cache, registry, schedule,
+                builder.recoverySettings, Clock.systemUTC());
+    }
+
+    /** Starts the recovery worker thread, as {@code TransactionMain} does after its HTTP server. */
+    public InProcessTransaction startRecovery() {
+        recovery.start();
+        return this;
+    }
+
+    /** Stops the recovery worker, if it runs. */
+    public void stopRecovery() {
+        recovery.close();
     }
 
     public static Builder over(TransactionTestSchema schema) {
@@ -95,6 +113,7 @@ public final class InProcessTransaction {
         private InventoryGateway inventory = FakeInventoryGateway.failing();
         private CheckoutOrchestrator.Settings settings = CheckoutOrchestrator.Settings.defaults();
         private CheckoutOrchestrator.Timing timing = CheckoutOrchestrator.Timing.SYSTEM;
+        private CheckoutRecoveryWorker.Settings recoverySettings = CheckoutRecoveryWorker.Settings.defaults();
 
         private Builder(TransactionTestSchema schema) {
             this.schema = schema;
@@ -114,6 +133,7 @@ public final class InProcessTransaction {
         public Builder inventory(InventoryGateway gateway) { this.inventory = gateway; return this; }
         public Builder settings(CheckoutOrchestrator.Settings checkoutSettings) { this.settings = checkoutSettings; return this; }
         public Builder timing(CheckoutOrchestrator.Timing checkoutTiming) { this.timing = checkoutTiming; return this; }
+        public Builder recovery(CheckoutRecoveryWorker.Settings settings) { this.recoverySettings = settings; return this; }
 
         public InProcessTransaction build() throws SQLException {
             return new InProcessTransaction(this);

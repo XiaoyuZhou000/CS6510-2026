@@ -204,13 +204,18 @@ class TransactionServiceTest {
 
     @Test
     void aPendingCheckoutFreezesTheBasket() {
-        String id = service.start(new TransactionOperations.StartCommand("station-1")).transactionId();
-        service.scan(new TransactionOperations.ScanCommand(id, "A"));
+        TransactionService waiting = newService(replica, 100,
+                CheckoutOrchestrator.Settings.defaults().withResponseBudget(java.time.Duration.ofMillis(300)));
+        String id = waiting.start(new TransactionOperations.StartCommand("station-1")).transactionId();
+        waiting.scan(new TransactionOperations.ScanCommand(id, "A"));
         database.beginAttempt(id);
-        assertThrows(CheckoutPendingFailure.class, () -> service.scan(new TransactionOperations.ScanCommand(id, "A")),
-                "no unit joins a basket that is being completed (FR-035)");
+        long started = System.nanoTime();
+        assertThrows(CheckoutPendingFailure.class, () -> waiting.scan(new TransactionOperations.ScanCommand(id, "A")),
+                "no unit joins a basket that is being completed (FR-035): the Scan waits, and answers 500 at the bound");
+        assertTrue(System.nanoTime() - started >= java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(300),
+                "it waited for the whole budget");
         assertEquals(1, database.sequences(id).size());
-        assertEquals(TransactionOperations.TransactionStatus.OPEN, service.get(id).status(), "Lookup still says OPEN");
+        assertEquals(TransactionOperations.TransactionStatus.OPEN, waiting.get(id).status(), "Lookup still says OPEN");
     }
 
     @Test
@@ -290,10 +295,15 @@ class TransactionServiceTest {
     }
 
     private TransactionService newService(ProductCatalogReplica catalog, int cacheEntries) {
+        return newService(catalog, cacheEntries, CheckoutOrchestrator.Settings.defaults());
+    }
+
+    private TransactionService newService(ProductCatalogReplica catalog, int cacheEntries,
+                                          CheckoutOrchestrator.Settings settings) {
         TransactionLocks locks = new TransactionLocks();
         TransactionStateCache cache = new TransactionStateCache(locks, cacheEntries);
         CheckoutOrchestrator checkout = new CheckoutOrchestrator(database, database, inventory, cache,
-                new SettlementRegistry(locks), new RecoverySchedule(), CheckoutOrchestrator.Settings.defaults());
+                new SettlementRegistry(locks), new RecoverySchedule(), settings);
         return new TransactionService(database, database, checkout, catalog, locks, cache);
     }
 
@@ -485,10 +495,16 @@ class TransactionServiceTest {
             throw new UnsupportedOperationException("recovery is not part of this test");
         }
 
+        /** Another instance's T1: the row's active attempt and its PENDING attempt row. */
         synchronized void beginAttempt(String id) {
             Row row = rows.get(id);
-            rows.put(id, new Row(row.stationId(), row.status(), row.itemCount(), row.total(), row.attemptCount() + 1,
-                    row.attemptCount() + 1, row.startedAt()));
+            int number = row.attemptCount() + 1;
+            rows.put(id, new Row(row.stationId(), row.status(), row.itemCount(), row.total(), number, number,
+                    row.startedAt()));
+            AttemptKey key = new AttemptKey(id, number);
+            Instant now = Instant.now();
+            attempts.put(key, new AttemptRecord(key, State.PENDING, null, null, "[]", row.itemCount(), row.total(),
+                    ClientOutcome.NONE, now, null, 0, now, null));
         }
 
         synchronized List<Integer> sequences(String id) {

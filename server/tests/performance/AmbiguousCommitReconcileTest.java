@@ -16,7 +16,9 @@ import support.InventoryTestSchema;
 import support.TransactionTestSchema;
 import transaction.CheckoutPendingFailure;
 import transaction.InventoryGateway;
+import transaction.TransactionFailure;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -29,7 +31,8 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * An ambiguous Scan or Complete commit is never acknowledged, and the cache is reconciled from the
  * database before the next mutation, whichever way the commit went (R19 rule 1). An ambiguous T1 also
- * queues a reconcile entry; an ambiguous T3 is retried and answers from the durable completion.
+ * queues a reconcile entry, which the recovery worker settles or drops; an ambiguous T3 is retried and
+ * answers from the durable completion.
  */
 class AmbiguousCommitReconcileTest {
 
@@ -135,16 +138,50 @@ class AmbiguousCommitReconcileTest {
 
             events.clear();
             if (durable) {
-                assertThrows(CheckoutPendingFailure.class, () -> service.complete(id),
-                        "the next Complete finds the committed attempt pending");
-                assertEquals(0, inventory.applyCalls());
+                // The next Complete finds the committed attempt pending and waits; the worker's reconcile
+                // entry settles it (T147), and the waiter resumes from the settled state.
+                CompletableFuture<String> next = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return "OK " + service.complete(id).itemCount();
+                    } catch (TransactionFailure refused) {
+                        return refused.code().name();
+                    } catch (CheckoutPendingFailure pending) {
+                        return "PENDING";
+                    }
+                });
+                awaitWaiter(service);
+                assertEquals(0, inventory.applyCalls(), "the waiting Complete never calls Inventory itself");
+                assertTrue(service.recovery.runOnce(Duration.ofSeconds(5)), "the reconcile entry is due at once");
+                assertEquals("NOT_OPEN", next.get(10, TimeUnit.SECONDS), "settled COMPLETED: the waiter answers 409");
+                assertEquals(List.of(1), inventory.calls().stream().map(call -> call.key().attemptNumber()).toList(),
+                        "the worker replayed attempt 1 once");
+                var attempts = schema.attempts(id);
+                assertEquals("COMPLETED", attempts.get(0).state());
+                assertEquals("NONE", attempts.get(0).clientOutcome(), "recovery never sets client_outcome");
+                assertEquals("COMPLETED", schema.transaction(id).orElseThrow().status());
+                assertEquals(0, service.registry.waiting(), "no local future is left behind");
             } else {
+                assertTrue(service.recovery.runOnce(Duration.ofSeconds(5)), "the reconcile entry is due at once");
+                assertEquals(0, schema.attempts(id).size(), "no attempt: the reconcile entry is dropped");
+                var row = schema.transaction(id).orElseThrow();
+                assertEquals(0, row.attemptCount(), "and nothing was written");
+                assertNull(row.activeAttemptNumber());
+                assertEquals(0, inventory.applyCalls());
+                assertEquals(0, service.schedule.size());
                 assertEquals(1, service.complete(id).itemCount(), "the next Complete begins attempt 1 again");
                 assertEquals(List.of(1), inventory.calls().stream().map(call -> call.key().attemptNumber()).toList());
             }
             assertEquals("load " + id, events.get(0), "the next Complete reloaded before any mutation");
             assertEquals(1, schema.attempts(id).size(), "never a second attempt");
             assertTrue(schema.pendingAttemptCount() <= 1);
+        }
+    }
+
+    private static void awaitWaiter(InProcessTransaction service) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (service.registry.waiting() == 0) {
+            assertTrue(System.nanoTime() < deadline, "the next Complete never started waiting");
+            Thread.sleep(5);
         }
     }
 

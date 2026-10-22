@@ -8,11 +8,13 @@ import support.CountingConnections;
 import support.FakeInventoryGateway;
 import support.InProcessTransaction;
 import support.TransactionTestSchema;
+import transaction.CheckoutOrchestrator;
 import transaction.CheckoutPendingFailure;
 import transaction.InventoryGateway;
 import transaction.TransactionFailure;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -27,13 +29,21 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class TransactionCacheCorrectnessTest {
     private static final String MISSES = "transaction.cache.guardMisses";
+    /**
+     * The pending cases simulate another instance's attempt that never settles, so each waits out the
+     * whole budget (FR-035); a short budget keeps them quick and gives exactly one check, at the bound.
+     */
+    private static final CheckoutOrchestrator.Settings SHORT_WAIT =
+            CheckoutOrchestrator.Settings.defaults().withResponseBudget(Duration.ofMillis(300));
 
     @Test
     void aRowChangedBehindAWarmEntryGivesTheUncachedOutcomeThroughAGuardMissAndAReload() throws Exception {
         CountingConnections counting = new CountingConnections();
         try (TransactionTestSchema schema = seeded()) {
-            InProcessTransaction cached = InProcessTransaction.over(schema).decorator(counting::wrap).build();
-            InProcessTransaction uncached = InProcessTransaction.over(schema).pool(cached.pool).cacheEntries(0).build();
+            InProcessTransaction cached = InProcessTransaction.over(schema).decorator(counting::wrap)
+                    .settings(SHORT_WAIT).build();
+            InProcessTransaction uncached = InProcessTransaction.over(schema).pool(cached.pool).cacheEntries(0)
+                    .settings(SHORT_WAIT).build();
 
             for (Change change : Change.values()) {
                 String warm = cached.start();
@@ -47,7 +57,8 @@ class TransactionCacheCorrectnessTest {
                 String withCache;
                 try (CountingConnections.Scope scope = counting.scope()) {
                     withCache = outcome(() -> cached.scan(warm, "SKU-000003"));
-                    assertEquals(2, scope.counts().selects(), change + ": the entry reloads once after the miss");
+                    assertEquals(change == Change.PENDING ? 3 : 2, scope.counts().selects(),
+                            change + ": the entry reloads once after the miss; a wait checks the attempt once at its bound");
                 }
                 assertEquals(misses + 1, PerfMetrics.counterValue(MISSES), change + ": the guarded write missed");
                 String withoutCache = outcome(() -> uncached.scan(cold, "SKU-000003"));
@@ -78,8 +89,9 @@ class TransactionCacheCorrectnessTest {
         try (TransactionTestSchema on = seeded(); TransactionTestSchema off = seeded()) {
             List<String> onIds = new ArrayList<>();
             List<String> offIds = new ArrayList<>();
-            List<String> withCache = script(on, InProcessTransaction.over(on).build(), onIds);
-            List<String> withoutCache = script(off, InProcessTransaction.over(off).cacheEntries(0).build(), offIds);
+            List<String> withCache = script(on, InProcessTransaction.over(on).settings(SHORT_WAIT).build(), onIds);
+            List<String> withoutCache = script(off, InProcessTransaction.over(off).cacheEntries(0).settings(SHORT_WAIT)
+                    .build(), offIds);
             assertEquals(anonymous(withoutCache, offIds), anonymous(withCache, onIds));
             assertEquals(dump(off, offIds), dump(on, onIds), "identical accepted_scan rows and transaction rows");
 
@@ -107,9 +119,10 @@ class TransactionCacheCorrectnessTest {
             for (CompleteChange change : CompleteChange.values()) {
                 FakeInventoryGateway cachedInventory = FakeInventoryGateway.applying();
                 FakeInventoryGateway uncachedInventory = FakeInventoryGateway.applying();
-                InProcessTransaction cached = InProcessTransaction.over(schema).inventory(cachedInventory).build();
+                InProcessTransaction cached = InProcessTransaction.over(schema).inventory(cachedInventory)
+                        .settings(SHORT_WAIT).build();
                 InProcessTransaction uncached = InProcessTransaction.over(schema).pool(cached.pool).cacheEntries(0)
-                        .inventory(uncachedInventory).build();
+                        .inventory(uncachedInventory).settings(SHORT_WAIT).build();
                 String warm = cached.start();
                 cached.scan(warm, "SKU-000001");
                 String cold = uncached.start();
@@ -301,10 +314,14 @@ class TransactionCacheCorrectnessTest {
             }
         },
         PENDING("PENDING") {
+            /** Another instance's T1: the row's active attempt and its PENDING attempt row. */
             @Override
             void apply(TransactionTestSchema schema, InProcessTransaction service, String id) throws Exception {
                 schema.update("UPDATE `transaction` SET attempt_count = attempt_count + 1, "
                         + "active_attempt_number = attempt_count WHERE transaction_id = ?", id);
+                schema.update("INSERT INTO checkout_attempt (transaction_id, attempt_number, state, `lines`, item_count, "
+                        + "total_amount, created_at, next_retry_at) SELECT transaction_id, attempt_count, 'PENDING', '[]', "
+                        + "item_count, total_amount, NOW(3), NOW(3) FROM `transaction` WHERE transaction_id = ?", id);
             }
         },
         ITEM_COUNT("OK") {

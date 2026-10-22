@@ -2,6 +2,7 @@ package transaction;
 
 import database.ScanStore;
 import database.TransactionStore;
+import rpc.ResponseBudget;
 import transaction.TransactionStateCache.Line;
 import transaction.TransactionStateCache.State;
 
@@ -21,7 +22,8 @@ import java.util.UUID;
  * is confirmed against the database before it is sent.</p>
  *
  * <p>Complete is the checkout Saga, delegated to {@link CheckoutOrchestrator}, which shares this
- * service's locks and cache.</p>
+ * service's locks and cache. A Scan that finds a checkout pending waits for its settlement within the
+ * response budget, holding nothing, then restarts (FR-035).</p>
  */
 public final class TransactionService implements TransactionOperations {
     /** Reloads after guarded-write misses before a Scan gives up with a 500. */
@@ -61,47 +63,65 @@ public final class TransactionService implements TransactionOperations {
     @Override
     public ScanView scan(ScanCommand command) {
         Objects.requireNonNull(command);
+        ResponseBudget budget = checkout.startBudget();
+        while (true) {
+            ScanStep step;
+            try (var held = locks.acquire(command.transactionId())) {
+                step = scanUnderLock(command);
+            }
+            if (step.view() != null) return step.view();
+            checkout.awaitSettlement(step.pending(), budget);
+        }
+    }
+
+    /** Either the accepted Scan, or a pending checkout to wait for before restarting. */
+    private record ScanStep(ScanView view, CheckoutOrchestrator.PendingWait pending) { }
+
+    private ScanStep scanUnderLock(ScanCommand command) {
         String id = command.transactionId();
         String sku = command.sku();
-        try (var held = locks.acquire(id)) {
-            int guardMisses = 0;
-            while (true) {
-                boolean[] fresh = {false};
-                Optional<State> found = cache.getOrLoad(id, key -> {
-                    fresh[0] = true;
-                    return TransactionStates.load(transactions, key);
-                });
-                RuntimeException rejection = rejection(id, sku, found);
-                if (rejection != null) {
-                    if (fresh[0]) throw rejection;
+        int guardMisses = 0;
+        while (true) {
+            boolean[] fresh = {false};
+            Optional<State> found = cache.getOrLoad(id, key -> {
+                fresh[0] = true;
+                return TransactionStates.load(transactions, key);
+            });
+            RuntimeException rejection = rejection(id, sku, found);
+            if (rejection != null) {
+                if (!fresh[0]) {
                     cache.invalidate(id);
                     continue;
                 }
-                State state = found.orElseThrow();
-                Line line = state.lines().get(sku);
-                ProductCatalogReplica.Product product = catalog.lookup(sku).orElseThrow();
-                String name = line != null ? line.name() : product.name();
-                BigDecimal unitPrice = line != null ? line.unitPrice() : product.price();
-                State next = state.withScan(sku, name, unitPrice);
-                ScanStore.AppendResult result;
-                try {
-                    result = scans.appendScan(id, state.itemCount(), next.totalAmount(), new ScanStore.AcceptedScan(
-                            next.itemCount(), sku, name, unitPrice, Instant.now().truncatedTo(ChronoUnit.MILLIS)));
-                } catch (RuntimeException failure) {
-                    // The commit may have happened: reconcile from the database before any further mutation.
-                    cache.invalidate(id);
-                    throw failure;
+                if (rejection instanceof CheckoutPendingFailure) {
+                    return new ScanStep(null, checkout.waitFor(found.orElseThrow()));
                 }
-                if (result == ScanStore.AppendResult.OK) {
-                    cache.put(next);
-                    return new ScanView(id, sku, name, unitPrice, next.itemCount(), next.totalAmount());
-                }
-                cache.recordGuardMiss();
+                throw rejection;
+            }
+            State state = found.orElseThrow();
+            Line line = state.lines().get(sku);
+            ProductCatalogReplica.Product product = catalog.lookup(sku).orElseThrow();
+            String name = line != null ? line.name() : product.name();
+            BigDecimal unitPrice = line != null ? line.unitPrice() : product.price();
+            State next = state.withScan(sku, name, unitPrice);
+            ScanStore.AppendResult result;
+            try {
+                result = scans.appendScan(id, state.itemCount(), next.totalAmount(), new ScanStore.AcceptedScan(
+                        next.itemCount(), sku, name, unitPrice, Instant.now().truncatedTo(ChronoUnit.MILLIS)));
+            } catch (RuntimeException failure) {
+                // The commit may have happened: reconcile from the database before any further mutation.
                 cache.invalidate(id);
-                if (++guardMisses > MAX_GUARD_RELOADS) {
-                    throw new IllegalStateException("Transaction " + id + " changed concurrently during "
-                            + guardMisses + " scan attempts");
-                }
+                throw failure;
+            }
+            if (result == ScanStore.AppendResult.OK) {
+                cache.put(next);
+                return new ScanStep(new ScanView(id, sku, name, unitPrice, next.itemCount(), next.totalAmount()), null);
+            }
+            cache.recordGuardMiss();
+            cache.invalidate(id);
+            if (++guardMisses > MAX_GUARD_RELOADS) {
+                throw new IllegalStateException("Transaction " + id + " changed concurrently during "
+                        + guardMisses + " scan attempts");
             }
         }
     }

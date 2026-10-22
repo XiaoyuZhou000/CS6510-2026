@@ -11,7 +11,8 @@ import java.util.concurrent.TimeUnit;
 /**
  * An Inventory process and a Transaction process, each over its own disposable schema and user (R3),
  * started from the built artifacts for process-level Saga tests. Transaction's product replica is seeded
- * with Inventory's catalog and version, so no refresh is needed before the first Scan.
+ * with Inventory's catalog and version, so no refresh is needed before the first Scan. Either service can
+ * be started with fault hooks armed (see {@link FaultInjection}) and restarted without them.
  */
 public final class CheckoutDeployment implements AutoCloseable {
     public final TransactionTestSchema transactionSchema;
@@ -26,7 +27,8 @@ public final class CheckoutDeployment implements AutoCloseable {
     private ServiceProcesses.ServiceProcess transaction;
     private ManagedChannel channel;
 
-    private CheckoutDeployment(int products, int stock, Map<String, String> transactionEnvironment) throws Exception {
+    private CheckoutDeployment(int products, int stock, Map<String, String> transactionEnvironment,
+                               String transactionFaults, String inventoryFaults) throws Exception {
         this.transactionEnvironment = new LinkedHashMap<>(transactionEnvironment);
         transactionSchema = TransactionTestSchema.create(TestSchema.Options.defaults().withOwnUser());
         InventoryTestSchema inventories;
@@ -44,8 +46,8 @@ public final class CheckoutDeployment implements AutoCloseable {
         inventoryHttp = new ServiceHttp(inventoryHttpPort);
         try {
             transactionSchema.seedReplica(products, inventorySchema.seed(products, stock));
-            startInventory();
-            startTransaction();
+            startInventory(inventoryFaults);
+            startTransaction(transactionFaults);
         } catch (Exception | Error failure) {
             close();
             throw failure;
@@ -53,28 +55,56 @@ public final class CheckoutDeployment implements AutoCloseable {
     }
 
     public static CheckoutDeployment start(int products, int stock) throws Exception {
-        return new CheckoutDeployment(products, stock, Map.of());
+        return new CheckoutDeployment(products, stock, Map.of(), null, null);
     }
 
     /** With extra Transaction variables, for example {@code CATALOG_REFRESH_SECONDS}. */
     public static CheckoutDeployment start(int products, int stock, Map<String, String> transactionEnvironment)
             throws Exception {
-        return new CheckoutDeployment(products, stock, transactionEnvironment);
+        return new CheckoutDeployment(products, stock, transactionEnvironment, null, null);
+    }
+
+    /** With fault specifications armed in the first Transaction and Inventory processes; null arms none. */
+    public static CheckoutDeployment start(int products, int stock, Map<String, String> transactionEnvironment,
+                                           String transactionFaults, String inventoryFaults) throws Exception {
+        return new CheckoutDeployment(products, stock, transactionEnvironment, transactionFaults, inventoryFaults);
     }
 
     public void startInventory() throws Exception {
+        startInventory(null);
+    }
+
+    /** Starts (or restarts) Inventory, with {@code faults} armed when it is not null. */
+    public void startInventory(String faults) throws Exception {
+        closeQuietly(inventory);
         inventory = ServiceProcesses.service("inventory").database(inventorySchema).httpPort(inventoryHttpPort)
-                .grpcPort(inventoryGrpcPort).start();
+                .grpcPort(inventoryGrpcPort).faults(faults).start();
         inventory.awaitHttp("/items", 200, Duration.ofSeconds(60));
         inventory.awaitPort(inventoryGrpcPort, Duration.ofSeconds(30));
     }
 
     public void startTransaction() throws Exception {
+        startTransaction(null);
+    }
+
+    /** Starts (or restarts) Transaction, with {@code faults} armed when it is not null. */
+    public void startTransaction(String faults) throws Exception {
+        closeQuietly(transaction);
         ServiceProcesses.Builder builder = ServiceProcesses.service("transaction").database(transactionSchema)
-                .httpPort(transactionHttpPort).grpcTarget("inventory", inventoryGrpcPort);
+                .httpPort(transactionHttpPort).grpcTarget("inventory", inventoryGrpcPort).faults(faults);
         transactionEnvironment.forEach(builder::env);
         transaction = builder.start();
         transaction.awaitHttp("/transactions/missing", 404, Duration.ofSeconds(60));
+    }
+
+    /** Kills Inventory without shutdown hooks, like a crash. */
+    public void killInventory() throws InterruptedException {
+        inventory.kill();
+    }
+
+    /** Stops a previous process of the same service, halted or not, before its replacement starts. */
+    private static void closeQuietly(ServiceProcesses.ServiceProcess process) throws InterruptedException {
+        if (process != null) process.close();
     }
 
     /** Kills Transaction without shutdown hooks, like a crash. */

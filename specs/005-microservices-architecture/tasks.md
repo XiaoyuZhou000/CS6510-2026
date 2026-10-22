@@ -789,7 +789,7 @@ The receipt and every error match the established contract, with captured prices
 
 ### Tests for User Story 3 ⚠️ write first; they must fail before implementation
 
-- [ ] T076 [P] [US3] Write `server/tests/unit/transaction/CheckoutRecoveryWorkerTest.java` with fake stores, a fake gateway, and a controllable clock. Assert that the worker:
+- [X] T076 [P] [US3] Write `server/tests/unit/transaction/CheckoutRecoveryWorkerTest.java` with fake stores, a fake gateway, and a controllable clock. Assert that the worker:
   - **Event-driven work**: settles handover and reconcile entries from `RecoverySchedule` as soon as they are due.
     - It first reads the attempt by key. A PENDING attempt is replayed with its stored lines under the same key.
     - An attempt that something else already settled, such as another instance, is dropped, and any local registry future for it is completed.
@@ -804,7 +804,7 @@ The receipt and every error match the established contract, with captured prices
   - **Uncertain outcomes**: increments `retry_count`, sets `next_retry_at` to now plus the smaller of 5 s and 100 ms × 2^`retry_count`, stores `last_error`, and re-enqueues the attempt in memory for that time.
   - **Alarms**: keeps FAILED_PRECONDITION and INVALID_ARGUMENT attempts pending and logs `[checkout-alarm]`.
   - **Client outcome**: never changes `client_outcome`.
-- [ ] T077 [P] [US3] Write `server/tests/integration/CheckoutRecoveryFaultTest.java`, using the contracts/checkout-saga.md crash matrix and covering US3 scenarios 1–4 and 8.
+- [X] T077 [P] [US3] Write `server/tests/integration/CheckoutRecoveryFaultTest.java`, using the contracts/checkout-saga.md crash matrix and covering US3 scenarios 1–4 and 8.
   - **Faults**:
     - each Transaction hook — `checkout.afterBegin`, `checkout.beforeApply`, `checkout.afterApplyReply`, and `checkout.afterRecordCompletion` — with action `halt`;
     - the Inventory hook `inventory.apply.afterCommit`, with `halt` and with `delay:3000`.
@@ -815,29 +815,29 @@ The receipt and every error match the established contract, with captured prices
     - a client that received 500 later sees COMPLETED through lookup and 409 on a repeated Complete;
     - no `checkout_operation` row is RESTORED or BLOCKED;
     - per-SKU reconciliation holds.
-- [ ] T078 [P] [US3] Write `server/tests/integration/BoundedWaitTest.java` (FR-035, US3 scenario 6). While an attempt is pending, with Inventory delayed by its hook, issue a Scan and a Complete on the same transaction and assert:
+- [X] T078 [P] [US3] Write `server/tests/integration/BoundedWaitTest.java` (FR-035, US3 scenario 6). While an attempt is pending, with Inventory delayed by its hook, issue a Scan and a Complete on the same transaction and assert:
   - settlement as COMPLETED answers them with 409 `TRANSACTION_NOT_OPEN`;
   - settlement as OPEN accepts the scan, or starts attempt n+1 for the Complete;
   - waiters wake on the settlement signal: they respond within 200 ms of the settlement commit, and `transaction.wait.dbChecks` does not increase for an attempt owned in the same process;
   - still pending at the bound gives 500 with no basket change and the pending attempt untouched, after exactly one database check at the bound;
   - Lookup returns OPEN immediately;
   - with two Transaction processes on one schema (Implementation Rule 3), a request waiting in the second process observes the first process's settlement through its backstop check within `CHECKOUT_WAIT_BACKSTOP_MS` plus 500 ms. It then gives the same serial outcome as in the single-process case.
-- [ ] T079 [P] [US3] Write `server/tests/integration/ScanCompletionConvergenceTest.java`, migrating `racingScanAndCompletionHaveOneSerialOutcome` with every assertion: a racing Scan and Complete have one serial outcome. Replace the database-lock blocker with an Inventory delay hook. The file's other method was migrated by T059.
-- [ ] T080 [P] [US3] Write `server/tests/integration/BackgroundCompletionAccountingTest.java` (FR-054, R9):
+- [X] T079 [P] [US3] Write `server/tests/integration/ScanCompletionConvergenceTest.java`, migrating `racingScanAndCompletionHaveOneSerialOutcome` with every assertion: a racing Scan and Complete have one serial outcome. Replace the database-lock blocker with an Inventory delay hook. The file's other method was migrated by T059.
+- [X] T080 [P] [US3] Write `server/tests/integration/BackgroundCompletionAccountingTest.java` (FR-054, R9):
   - With Inventory delayed past the budget, the client gets 500, `client_outcome=PENDING_ERROR` is committed before the response, and the later COMPLETED attempt counts as one background completion.
   - A Transaction halt before responding gives a COMPLETED attempt with `client_outcome=NONE`.
   - `db/validate-invariants.ps1` prints both counts.
-- [ ] T081 [P] [US3] Write `server/tests/performance/HeldConnectionDuringWaitTest.java` (FR-033, FR-035, R7). During an FR-035 wait, assert that:
+- [X] T081 [P] [US3] Write `server/tests/performance/HeldConnectionDuringWaitTest.java` (FR-033, FR-035, R7). During an FR-035 wait, assert that:
   - the waiting request holds no pooled connection between its database checks, and `SELECT … FOR UPDATE NOWAIT` on the transaction row succeeds from another connection;
   - the number of database checks is at most one per `CHECKOUT_WAIT_BACKSTOP_MS` plus one at the bound, and zero before settlement for an attempt owned in the same process;
   - each check holds its connection only for one read, as `transaction.pool.holdTime` shows.
-- [ ] T082 [P] [US3] Write `server/tests/rpc/RestoreCheckoutDirectTest.java` (SC-012). It is a direct Inventory test; its class Javadoc states that it is not an end-to-end Saga compensation test, and its results are reported separately. Assert that:
+- [X] T082 [P] [US3] Write `server/tests/rpc/RestoreCheckoutDirectTest.java` (SC-012). It is a direct Inventory test; its class Javadoc states that it is not an end-to-end Saga compensation test, and its results are reported separately. Assert that:
   - restoring an APPLIED attempt restores exactly the recorded lines, once;
   - repeated, 10-way concurrent, and post-restart restores return ALREADY_RESTORED with no further change;
   - a REJECTED attempt gives NOTHING_TO_RESTORE;
   - an absent attempt becomes BLOCKED, and a later `ApplyCheckout` returns STOCK_RESTORED with no deduction;
   - halting Inventory at `inventory.restore.afterCommit` and retrying restores exactly once.
-- [ ] T114 [P] [US3] Write `server/tests/integration/InventoryServiceIsolationTest.java`, migrating `inventoryRestartReadsCommittedSaleWhileTransactionRunsDuringOutage`:
+- [X] T114 [P] [US3] Write `server/tests/integration/InventoryServiceIsolationTest.java`, migrating `inventoryRestartReadsCommittedSaleWhileTransactionRunsDuringOutage`:
   - **Superseded assertion**: the legacy test expected Complete to return 200 while Inventory was down. The ledger records this as `SUPERSEDED` by FR-030, FR-037, and the spec's *Availability and Failure Behavior*. The replacement asserts that:
     - with Inventory stopped, Complete returns 500 `INTERNAL_ERROR` within the 8 s budget, lookup shows OPEN, and stock is unchanged;
     - after Inventory restarts, the attempt settles as COMPLETED without manual steps, and stock reaches 1, the value the legacy test expected.
@@ -847,7 +847,7 @@ The receipt and every error match the established contract, with captured prices
     - `threshold=-1` gives 400 `INVALID_THRESHOLD`;
     - POST gives 405;
     - an extra path segment gives 404.
-- [ ] T147 [P] [US3] Extend `server/tests/performance/AmbiguousCommitReconcileTest.java` and `server/tests/performance/MultiInstanceTransactionTest.java` for recovery (Implementation Rule 3):
+- [X] T147 [P] [US3] Extend `server/tests/performance/AmbiguousCommitReconcileTest.java` and `server/tests/performance/MultiInstanceTransactionTest.java` for recovery (Implementation Rule 3):
   - If an ambiguous T1 commit did happen, the worker's reconcile entry settles the attempt: COMPLETED if Inventory applies it. Waiting requests then resume.
   - If an ambiguous T1 commit did not happen, there is no attempt, and the reconcile entry is dropped with no write.
   - **Worker against live request**: the second instance's worker may resume an attempt that the first instance's live request owns, for example after the second instance's startup scan. Replay plus guarded writes settle it once, with one Inventory deduction. The live request answers from the settled state and records its own `client_outcome`, so the FR-054 counts stay exact.
@@ -856,10 +856,10 @@ The receipt and every error match the established contract, with captured prices
 
 ### Implementation for User Story 3
 
-- [ ] T083 [US3] Place the `FaultHooks.hit` calls in `server/transaction/src/transaction/CheckoutOrchestrator.java` and `server/inventory/src/inventory/CheckoutStockService.java`, at the exact points listed in contracts/checkout-saga.md *Test-only fault hooks*:
+- [X] T083 [US3] Place the `FaultHooks.hit` calls in `server/transaction/src/transaction/CheckoutOrchestrator.java` and `server/inventory/src/inventory/CheckoutStockService.java`, at the exact points listed in contracts/checkout-saga.md *Test-only fault hooks*:
   - `checkout.afterBegin`, `checkout.beforeApply`, `checkout.afterApplyReply`, and `checkout.afterRecordCompletion` in `server/transaction/src/transaction/CheckoutOrchestrator.java`;
   - `inventory.apply.afterCommit` and `inventory.restore.afterCommit` in `server/inventory/src/inventory/CheckoutStockService.java`.
-- [ ] T084 [P] [US3] Create `server/transaction/src/transaction/CheckoutRecoveryWorker.java` per contracts/checkout-saga.md *Recovery worker*:
+- [X] T084 [P] [US3] Create `server/transaction/src/transaction/CheckoutRecoveryWorker.java` per contracts/checkout-saga.md *Recovery worker*:
   - **Driver**: a single thread takes due keys from `RecoverySchedule`. It never polls the database on a short interval.
   - **Startup scan**: loads every PENDING attempt through paginated `findPending` calls of at most 100 rows, and enqueues them due now.
   - **Safety scan**: every `CHECKOUT_RECOVERY_SCAN_SECONDS` (30), one bounded, indexed `findPending(now, …, 100)` page, repeated only while pages are full. It enqueues attempts that are neither owned nor scheduled.
@@ -867,15 +867,15 @@ The receipt and every error match the established contract, with captured prices
   - **Process-local**: `RecoverySchedule` and the registry's ownership marks cover only this process. Another instance may replay the same attempt, and correctness rests on Inventory's idempotency and the guarded writes (Implementation Rule 3).
   - It never sets `client_outcome`.
   - Metrics: `transaction.recovery.pending|settled|alarms|scanQueries|scanRows|scheduled`.
-- [ ] T085 [US3] Implement event-driven bounded waiting (FR-035, R7) in `server/transaction/src/transaction/TransactionService.java` (Scan) and `server/transaction/src/transaction/CheckoutOrchestrator.java` (Complete), replacing the temporary `CheckoutPendingFailure` path:
+- [X] T085 [US3] Implement event-driven bounded waiting (FR-035, R7) in `server/transaction/src/transaction/TransactionService.java` (Scan) and `server/transaction/src/transaction/CheckoutOrchestrator.java` (Complete), replacing the temporary `CheckoutPendingFailure` path:
   - Detect a pending attempt from the cache entry, or from a `GUARD_MISS` reload, while holding the stripe lock. Get or create the attempt's `SettlementRegistry` future under that lock, then release the lock.
   - Await the future within the remaining 8 s budget. Without a signal, check the database once per `CHECKOUT_WAIT_BACKSTOP_MS` (1000), to catch settlements made elsewhere, and once more at the bound. Each check borrows a connection only for its read.
   - On settlement, restart the request from the beginning. A waiter that learns of the settlement from a database check completes and removes its local future, so settlements made by other instances leave nothing behind.
   - At the bound, if still pending, raise `CheckoutPendingFailure` with no write.
   - Lookup is unchanged.
   - Metrics: `transaction.wait` latency and `transaction.wait.signalled|dbChecks|timedOut`.
-- [ ] T086 [US3] Start `CheckoutRecoveryWorker` in `server/transaction/src/transaction/TransactionMain.java` after the HTTP server, reading `CHECKOUT_RECOVERY_SCAN_SECONDS` and `CHECKOUT_WAIT_BACKSTOP_MS`. Stop it in the shutdown hook before the channels and the pool are closed.
-- [ ] T148 [US3] Verify US3 and run its parity gate with `server/run-tests.sh`:
+- [X] T086 [US3] Start `CheckoutRecoveryWorker` in `server/transaction/src/transaction/TransactionMain.java` after the HTTP server, reading `CHECKOUT_RECOVERY_SCAN_SECONDS` and `CHECKOUT_WAIT_BACKSTOP_MS`. Stop it in the shutdown hook before the channels and the pool are closed.
+- [X] T148 [US3] Verify US3 and run its parity gate with `server/run-tests.sh`:
   - Run `PARITY_GATE=US3 server/run-tests.sh` with `SERVER_BASE_URL` set.
   - The whole suite must pass, including T076–T082, T114, and T147.
   - Record `T148` in `Verified at` for every row whose test passed.

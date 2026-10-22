@@ -337,9 +337,65 @@ class CheckoutOrchestratorTest {
         String pending = "tx-pending";
         db.open(pending, line("A", "Apple", "1.25", 1));
         db.beginBehindTheCache(pending);
+        long started = timing.nanos;
         assertThrows(CheckoutPendingFailure.class, () -> orchestrator.complete(pending),
-                "a pending attempt answers 500 until bounded waiting exists");
+                "another instance's attempt that never settles: a bounded wait, then 500 at the bound");
+        assertEquals(Duration.ofSeconds(8), Duration.ofNanos(timing.nanos - started), "the whole 8 s budget");
         assertEquals(0, inventory.calls().stream().filter(call -> call.key().transactionId().equals(pending)).count());
+        assertEquals(CheckoutAttemptStore.State.PENDING, db.attempt(pending, 1).state(), "the pending attempt is untouched");
+        assertEquals(CheckoutAttemptStore.ClientOutcome.NONE, db.attempt(pending, 1).clientOutcome());
+    }
+
+    @Test
+    void aCompleteWaitingForThisProcesssAttemptWakesOnItsSettlementWithNoDatabaseCheckAndAnswers409() throws Exception {
+        db.open(ID, line("A", "Apple", "1.25", 1));
+        java.util.concurrent.CountDownLatch inside = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        inventory.thenAnswer(call -> {
+            inside.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+            return new InventoryGateway.Applied(false);
+        });
+        CheckoutOrchestrator realTime = new CheckoutOrchestrator(db, db, inventory, cache, registry, schedule,
+                CheckoutOrchestrator.Settings.defaults());
+        CompletableFuture<TransactionOperations.ReceiptView> owner = CompletableFuture.supplyAsync(() -> realTime.complete(ID));
+        assertTrue(inside.await(10, TimeUnit.SECONDS));
+        int finds = db.finds;
+        CompletableFuture<TransactionFailure.Code> duplicate = CompletableFuture.supplyAsync(() ->
+                assertThrows(TransactionFailure.class, () -> realTime.complete(ID)).code());
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (registry.waiting() == 0) {
+            assertTrue(System.nanoTime() < deadline, "the duplicate never started waiting");
+            Thread.sleep(5);
+        }
+        Thread.sleep(1_500);
+        assertEquals(finds, db.finds, "no database check while this process's live request owns the attempt");
+        release.countDown();
+        assertEquals(1, owner.get(10, TimeUnit.SECONDS).itemCount());
+        assertEquals(TransactionFailure.Code.NOT_OPEN, duplicate.get(10, TimeUnit.SECONDS),
+                "the restarted duplicate finds the transaction COMPLETED");
+        assertEquals(finds, db.finds, "the settlement signal woke the waiter");
+        assertEquals(0, registry.waiting(), "no local future is left behind");
+        assertEquals(1, inventory.applyCalls(), "FR-036: the duplicate never reached Inventory");
+    }
+
+    @Test
+    void aWaiterSeesAnotherProcesssSettlementThroughItsBackstopAndBeginsTheNextAttempt() {
+        db.open(ID, line("A", "Apple", "1.25", 1));
+        db.beginBehindTheCache(ID);
+        var foreign = new CheckoutAttemptStore.AttemptKey(ID, 1);
+        timing.onAwait = () -> {
+            if (timing.nanos >= Duration.ofSeconds(2).toNanos() && db.row(ID).active() != null) {
+                db.reopen(foreign, CheckoutAttemptStore.RejectionReason.INSUFFICIENT_STOCK, "A", timing.now(), false);
+            }
+        };
+        var receipt = orchestrator.complete(ID);
+        assertEquals(1, receipt.itemCount());
+        assertEquals(2, inventory.calls().get(0).key().attemptNumber(), "the reopened basket begins attempt 2");
+        assertEquals(3, db.finds, "one backstop check per second until the other process settled");
+        assertEquals(0, registry.waiting(), "the waiter dropped its local future");
+        assertEquals(CheckoutAttemptStore.ClientOutcome.NONE, db.attempt(ID, 1).clientOutcome(),
+                "the waiter records nothing on another request's attempt");
     }
 
     @Test
@@ -388,6 +444,18 @@ class CheckoutOrchestratorTest {
             nanos += duration.toNanos();
         }
 
+        /** Runs before every fake wait slice, for example to settle an attempt "elsewhere". */
+        Runnable onAwait = () -> { };
+
+        /** A wait that is not already settled lets its whole slice pass at once. */
+        @Override
+        public <T> T await(CompletableFuture<T> future, Duration timeout) {
+            onAwait.run();
+            if (future.isDone()) return future.getNow(null);
+            nanos += timeout.toNanos();
+            return null;
+        }
+
         void advance(Duration duration) {
             nanos += duration.toNanos();
         }
@@ -409,6 +477,7 @@ class CheckoutOrchestratorTest {
         StoreFailure pendingErrorFailure;
         StoreFailure clientOutcomeFailure;
         int loads;
+        int finds;
         int guardMisses;
         int clientOutcomeWrites;
 
@@ -441,10 +510,14 @@ class CheckoutOrchestratorTest {
                     null, r.startedAt(), BASE));
         }
 
+        /** Another instance's T1: the row's active attempt and its PENDING attempt row. */
         synchronized void beginBehindTheCache(String id) {
             Row r = rows.get(id);
-            rows.put(id, new Row(r.stationId(), r.status(), r.itemCount(), r.total(), r.attemptCount() + 1,
-                    r.attemptCount() + 1, r.startedAt(), null));
+            int number = r.attemptCount() + 1;
+            rows.put(id, new Row(r.stationId(), r.status(), r.itemCount(), r.total(), number, number, r.startedAt(), null));
+            AttemptKey key = new AttemptKey(id, number);
+            attempts.put(key, new AttemptRecord(key, State.PENDING, null, null, "[]", r.itemCount(), r.total(),
+                    ClientOutcome.NONE, BASE, null, 0, BASE.plusSeconds(8), null));
         }
 
         synchronized void foreignScan(String id, TransactionLine line) {
@@ -586,6 +659,7 @@ class CheckoutOrchestratorTest {
 
         @Override
         public synchronized Optional<AttemptRecord> findAttempt(AttemptKey key) {
+            finds++;
             return Optional.ofNullable(attempts.get(key));
         }
 
