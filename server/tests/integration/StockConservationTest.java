@@ -3,16 +3,13 @@ package integration;
 import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import support.LiveSchemas;
 
 import java.net.ConnectException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -24,17 +21,15 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * Integration test: many concurrent completions across a mix of overlapping and distinct SKUs.
  * For every touched SKU: initial_stock − final_stock == total_quantity_sold (from successful
  * completions only), and stock is never observed negative at any point
- * through the layered server (FR-016, SC-003; US1; Constitution I).
+ * through the deployed services (FR-016, SC-003; US1; Constitution I).
  *
- * Requires a running server AND a reachable MySQL instance.
+ * Requires a running deployment; stock is read in Inventory's schema with Inventory's own credentials.
+ * The test changes no stock fixture, so the cross-service invariants (initial − final = COMPLETED
+ * quantities per SKU) still hold afterwards without any restore.
  */
 public class StockConservationTest {
 
     private static final String BASE_URL = System.getProperty("SERVER_BASE_URL", "http://localhost:8080");
-    private static final String DB_URL   = System.getProperty("DB_URL",
-        "jdbc:mysql://127.0.0.1:3307/cs6510_selfcheckout?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC");
-    private static final String DB_USER  = System.getProperty("DB_USER", "root");
-    private static final String DB_PASS  = System.getProperty("DB_PASS", "");
 
     // SKUs used in this test (a small, isolated subset)
     private static final String[] SKUS = {
@@ -59,7 +54,7 @@ public class StockConservationTest {
         // Record initial stock for all test SKUs
         Map<String, Integer> initialStock = new LinkedHashMap<>();
         for (String sku : SKUS) {
-            initialStock.put(sku, queryStock(sku));
+            initialStock.put(sku, LiveSchemas.stock(sku));
         }
 
         // Launch concurrent stations; each scans a mix of the test SKUs and completes
@@ -113,7 +108,7 @@ public class StockConservationTest {
 
         // Verify stock conservation: for each SKU, initial - final == sold
         for (String sku : SKUS) {
-            int finalStockValue = queryStock(sku);
+            int finalStockValue = LiveSchemas.stock(sku);
             int sold = soldQty.get(sku).get();
             int expected = initialStock.get(sku) - sold;
 
@@ -126,18 +121,6 @@ public class StockConservationTest {
     }
 
     // ------------------------------------------------------------------ helpers
-
-    private int queryStock(String sku) throws Exception {
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-             PreparedStatement ps = conn.prepareStatement(
-                "SELECT stock_quantity FROM inventory WHERE sku = ?")) {
-            ps.setString(1, sku);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertTrue(rs.next(), "SKU must exist in inventory: " + sku);
-                return rs.getInt(1);
-            }
-        }
-    }
 
     private String startAndGetId(String stationId) throws Exception {
         HttpResponse<String> resp = post("/transactions",

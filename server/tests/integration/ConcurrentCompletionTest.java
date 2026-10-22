@@ -3,6 +3,7 @@ package integration;
 import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import support.LiveSchemas;
 
 import java.net.ConnectException;
 import java.net.URI;
@@ -10,7 +11,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.List;
@@ -23,18 +23,14 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * Integration test: two stations each scan the last remaining unit of the same SKU,
  * then complete concurrently — exactly one must succeed, the other must be rejected,
- * and the SKU's stock must never go negative through the layered server (FR-016; US1).
+ * and the SKU's stock must never go negative through the deployed services (FR-016; US1).
  *
- * Requires a running server AND a reachable MySQL instance.
- * Override via SERVER_BASE_URL and DB_* system properties.
+ * Requires a running deployment. Stock is read and set in Inventory's schema with Inventory's own
+ * credentials, and transaction rows are read in Transaction's schema with Transaction's (R3).
  */
 public class ConcurrentCompletionTest {
 
     private static final String BASE_URL = System.getProperty("SERVER_BASE_URL", "http://localhost:8080");
-    private static final String DB_URL   = System.getProperty("DB_URL",
-        "jdbc:mysql://127.0.0.1:3307/cs6510_selfcheckout?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC");
-    private static final String DB_USER  = System.getProperty("DB_USER", "root");
-    private static final String DB_PASS  = System.getProperty("DB_PASS", "");
 
     private static final String TEST_SKU = "SKU-000042";
 
@@ -52,24 +48,10 @@ public class ConcurrentCompletionTest {
 
     @Test
     void concurrentCompletion_exactlyOneSucceeds_stockNeverNegative() throws Exception {
-        int originalStock;
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-             PreparedStatement ps = conn.prepareStatement(
-                 "SELECT stock_quantity FROM inventory WHERE sku = ?")) {
-            ps.setString(1, TEST_SKU);
-            try (ResultSet rows = ps.executeQuery()) {
-                assertTrue(rows.next());
-                originalStock = rows.getInt(1);
-            }
-        }
+        int originalStock = LiveSchemas.stock(TEST_SKU);
         AtomicInteger successes = new AtomicInteger(0);
-        // Set SKU stock to exactly 1 unit via direct DB access
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-             PreparedStatement ps = conn.prepareStatement(
-                "UPDATE inventory SET stock_quantity = 1 WHERE sku = ?")) {
-            ps.setString(1, TEST_SKU);
-            assertEquals(1, ps.executeUpdate(), "SKU must exist in inventory");
-        }
+        // Set SKU stock to exactly 1 unit in Inventory's own schema
+        LiveSchemas.setStock(TEST_SKU, 1);
 
         try {
         // Start two transactions, each scanning the last unit
@@ -108,7 +90,7 @@ public class ConcurrentCompletionTest {
             "Exactly one completion should be rejected");
 
         // The losing checkout remains OPEN with its committed basket for a later retry.
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
+        try (Connection conn = LiveSchemas.transaction();
              PreparedStatement ps = conn.prepareStatement(
                  "SELECT status FROM `transaction` WHERE transaction_id IN (?,?)")) {
             ps.setString(1, tx1);
@@ -125,29 +107,12 @@ public class ConcurrentCompletionTest {
         }
 
         // Verify final stock is exactly 0, never negative
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-             PreparedStatement ps = conn.prepareStatement(
-                "SELECT stock_quantity FROM inventory WHERE sku = ?")) {
-            ps.setString(1, TEST_SKU);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertTrue(rs.next(), "Inventory row must exist");
-                int finalStock = rs.getInt(1);
-                assertEquals(0, finalStock,
-                    "Final stock must be exactly 0 (one unit sold, none negative)");
-            }
-        }
+        int finalStock = LiveSchemas.stock(TEST_SKU);
+        assertEquals(0, finalStock,
+            "Final stock must be exactly 0 (one unit sold, none negative)");
         } finally {
-            restoreStock(originalStock - successes.get());
-        }
-    }
-
-    private static void restoreStock(int quantity) throws Exception {
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-             PreparedStatement ps = conn.prepareStatement(
-                 "UPDATE inventory SET stock_quantity=? WHERE sku=?")) {
-            ps.setInt(1, quantity);
-            ps.setString(2, TEST_SKU);
-            assertEquals(1, ps.executeUpdate());
+            // Restore what the fixture took away, keeping the sale: initial − final = sold.
+            LiveSchemas.setStock(TEST_SKU, originalStock - successes.get());
         }
     }
 

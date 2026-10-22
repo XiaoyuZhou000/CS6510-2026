@@ -4,50 +4,61 @@ import api.CatalogHttpHandler;
 import api.InventoryHttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import database.ConnectionPool;
+import database.DatabaseConfig;
+import database.JdbcCatalogMetaStore;
 import database.JdbcCatalogStore;
+import database.JdbcCheckoutOperationStore;
 import database.JdbcInventoryStore;
+import metrics.MetricsReporter;
+import rpc.GrpcServers;
+import rpc.InventoryGrpcService;
 
 import java.net.InetSocketAddress;
+import java.time.Duration;
 import java.util.concurrent.Executors;
 
-/** Independent Inventory Service entry point for catalog and low-stock queries. */
+/** Independent Inventory Service entry point: catalog and low-stock HTTP, plus InventoryService over gRPC. */
 public final class InventoryMain {
     private InventoryMain() { }
 
     public static void main(String[] args) throws Exception {
         int port = args.length > 0 ? Integer.parseInt(args[0]) : intEnv("INVENTORY_PORT", 8082);
+        int grpcPort = intEnv("INVENTORY_GRPC_PORT", 9092);
+        DatabaseConfig config = DatabaseConfig.fromEnvironment("INVENTORY", "cs6510_inventory",
+                "cs6510_inventory_svc", 16, 48);
         ConnectionPool pool;
         try {
-            pool = new ConnectionPool(env("DB_HOST", "127.0.0.1"), intEnv("DB_PORT", 3307),
-                    env("DB_NAME", "cs6510_selfcheckout"), env("DB_USER", "root"),
-                    env("DB_PASSWORD", ""), intEnv("DB_POOL_SIZE", 10));
+            pool = new ConnectionPool(config, "inventory");
         } catch (Exception failure) {
-            System.err.println("Inventory Service cannot connect to MySQL: " + failure.getMessage());
+            System.err.println("Inventory Service cannot connect to MySQL as " + config + ": " + failure.getMessage());
             throw failure;
         }
 
+        GrpcServers.Running grpc = null;
         try {
+            CatalogCache catalog = new CatalogCache(new JdbcCatalogStore(pool), new JdbcCatalogMetaStore(pool));
+            StoreQueryService queries = new StoreQueryService(catalog, new JdbcInventoryStore(pool));
             HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
             server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-            StoreQueryService queries = new StoreQueryService(
-                    new JdbcCatalogStore(pool), new JdbcInventoryStore(pool));
             server.createContext("/items", new CatalogHttpHandler(queries));
             server.createContext("/inventory/low-stock", new InventoryHttpHandler(queries));
+            CheckoutStockService checkouts = new CheckoutStockService(new JdbcCheckoutOperationStore(pool));
+            grpc = GrpcServers.start(grpcPort, new InventoryGrpcService(catalog, checkouts));
+            MetricsReporter reporter = MetricsReporter.start("inventory");
+            GrpcServers.Running grpcServer = grpc;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 server.stop(5);
+                grpcServer.stop(Duration.ofSeconds(5));
+                reporter.stop();
                 pool.close();
             }));
             server.start();
-            System.out.println("Inventory Service listening on port " + port);
+            System.out.println("Inventory Service listening on port " + port + " (gRPC " + grpcPort + ")");
         } catch (Exception failure) {
+            if (grpc != null) grpc.stop(Duration.ofSeconds(1));
             pool.close();
             throw failure;
         }
-    }
-
-    private static String env(String key, String fallback) {
-        String value = System.getenv(key);
-        return value == null || value.isEmpty() ? fallback : value;
     }
 
     private static int intEnv(String key, int fallback) {

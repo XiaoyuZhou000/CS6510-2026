@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
+# Start from an empty output directory, so classes of tests parked in tests-legacy/ never run.
+rm -rf out/test
 mkdir -p out/test
 
 # Compile tests against the independent service artifacts only.

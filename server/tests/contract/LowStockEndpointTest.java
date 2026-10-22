@@ -1,6 +1,6 @@
 package contract;
 
-// Inventory Service contract through the stable public port 8080.
+// Inventory Service contract through the stable public port 8080, with fixtures in Inventory's own schema.
 
 import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
@@ -20,11 +20,17 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-/** Requires a running server and its MySQL database; restores all fixture inventory. */
+/**
+ * Requires a running deployment and Inventory's schema; restores all fixture inventory so the
+ * per-service invariants still hold afterwards.
+ */
 public class LowStockEndpointTest {
     private static final String BASE = System.getProperty("SERVER_BASE_URL", "http://localhost:8080");
-    private static final String DB_URL = System.getProperty("DB_URL",
-        "jdbc:mysql://127.0.0.1:3307/cs6510_selfcheckout?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC");
+    /** Inventory's own schema, reached only with Inventory's own credentials (R3). */
+    private static final String DB_URL = System.getProperty("INVENTORY_DB_URL",
+        "jdbc:mysql://" + setting("DB_HOST", "127.0.0.1") + ":" + setting("DB_PORT", "3307") + "/"
+            + setting("INVENTORY_DB_NAME", "cs6510_inventory")
+            + "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC");
     private static final String SKU = "SKU-001998";
     private final HttpClient client = HttpClient.newHttpClient();
 
@@ -136,8 +142,17 @@ public class LowStockEndpointTest {
     }
 
     private Connection connect() throws SQLException {
-        return DriverManager.getConnection(DB_URL,
-            System.getProperty("DB_USER", System.getenv().getOrDefault("DB_USER", "root")), System.getProperty("DB_PASS", System.getenv().getOrDefault("DB_PASSWORD", "")));
+        String password = setting("INVENTORY_DB_PASSWORD", null);
+        assumeTrue(password != null, "INVENTORY_DB_PASSWORD is needed to change Inventory's fixtures");
+        return DriverManager.getConnection(DB_URL, setting("INVENTORY_DB_USER", "cs6510_inventory_svc"), password);
+    }
+
+    /** A JVM property, then the environment, then the fallback. */
+    private static String setting(String key, String fallback) {
+        String property = System.getProperty(key);
+        if (property != null && !property.isBlank()) return property;
+        String environment = System.getenv(key);
+        return environment == null || environment.isBlank() ? fallback : environment;
     }
 
     private void setInventory(Connection conn, int stock, int threshold) throws SQLException {

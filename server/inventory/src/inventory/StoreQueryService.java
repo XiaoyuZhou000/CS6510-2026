@@ -1,6 +1,5 @@
 package inventory;
 
-import database.CatalogStore;
 import database.InventoryStore;
 
 import java.time.Instant;
@@ -9,21 +8,21 @@ import java.util.Objects;
 
 /** Business-layer catalog and committed-inventory read behavior. */
 public final class StoreQueryService implements CatalogOperations, InventoryOperations {
-    private final CatalogStore catalog;
+    private final CatalogCache catalog;
     private final InventoryStore inventory;
 
-    public StoreQueryService(CatalogStore catalog, InventoryStore inventory) {
+    public StoreQueryService(CatalogCache catalog, InventoryStore inventory) {
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.inventory = Objects.requireNonNull(inventory, "inventory");
     }
 
+    /** Served from the catalog cache (R8). */
     @Override
     public List<CatalogItemView> listItems() {
-        return catalog.loadAll().stream()
-                .map(item -> new CatalogItemView(item.sku(), item.name(), item.price()))
-                .toList();
+        return catalog.snapshot().products();
     }
 
+    /** Stock is never cached: every call reads the committed rows. */
     @Override
     public LowStockView listLowStock(Integer thresholdOverride) {
         if (thresholdOverride != null && thresholdOverride < 0) {

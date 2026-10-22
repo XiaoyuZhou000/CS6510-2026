@@ -1,0 +1,48 @@
+# Generated once by rpc.ProtoCompatibilityTest from the first contracts.jar (T064, FR-013).
+# Never edit or remove a line: changes inside v1 are additive only.
+message selfcheckout.inventory.v1.CheckoutAttemptKey field 1 transaction_id STRING
+message selfcheckout.inventory.v1.CheckoutAttemptKey field 2 attempt_number UINT32
+message selfcheckout.inventory.v1.CheckoutLine field 1 sku STRING
+message selfcheckout.inventory.v1.CheckoutLine field 2 quantity UINT32
+message selfcheckout.inventory.v1.ApplyCheckoutRequest field 1 attempt MESSAGE selfcheckout.inventory.v1.CheckoutAttemptKey
+message selfcheckout.inventory.v1.ApplyCheckoutRequest field 2 repeated lines MESSAGE selfcheckout.inventory.v1.CheckoutLine
+message selfcheckout.inventory.v1.ApplyCheckoutResponse field 1 outcome ENUM selfcheckout.inventory.v1.CheckoutOutcome
+message selfcheckout.inventory.v1.ApplyCheckoutResponse field 2 rejected_sku STRING
+message selfcheckout.inventory.v1.ApplyCheckoutResponse field 3 replayed BOOL
+message selfcheckout.inventory.v1.GetCheckoutOutcomeRequest field 1 attempt MESSAGE selfcheckout.inventory.v1.CheckoutAttemptKey
+message selfcheckout.inventory.v1.GetCheckoutOutcomeResponse field 1 outcome ENUM selfcheckout.inventory.v1.CheckoutOutcome
+message selfcheckout.inventory.v1.GetCheckoutOutcomeResponse field 2 rejected_sku STRING
+message selfcheckout.inventory.v1.RestoreCheckoutRequest field 1 attempt MESSAGE selfcheckout.inventory.v1.CheckoutAttemptKey
+message selfcheckout.inventory.v1.RestoreCheckoutResponse field 1 result ENUM selfcheckout.inventory.v1.RestoreResult
+message selfcheckout.inventory.v1.RestoreCheckoutResponse field 2 repeated restored_lines MESSAGE selfcheckout.inventory.v1.CheckoutLine
+message selfcheckout.inventory.v1.GetCatalogVersionResponse field 1 catalog_version STRING
+message selfcheckout.inventory.v1.GetCatalogVersionResponse field 2 product_count UINT32
+message selfcheckout.inventory.v1.CatalogProduct field 1 sku STRING
+message selfcheckout.inventory.v1.CatalogProduct field 2 name STRING
+message selfcheckout.inventory.v1.CatalogProduct field 3 price_cents INT64
+message selfcheckout.inventory.v1.GetCatalogResponse field 1 catalog_version STRING
+message selfcheckout.inventory.v1.GetCatalogResponse field 2 repeated products MESSAGE selfcheckout.inventory.v1.CatalogProduct
+enum selfcheckout.inventory.v1.CheckoutOutcome value 0 CHECKOUT_OUTCOME_UNSPECIFIED
+enum selfcheckout.inventory.v1.CheckoutOutcome value 1 CHECKOUT_OUTCOME_APPLIED
+enum selfcheckout.inventory.v1.CheckoutOutcome value 2 CHECKOUT_OUTCOME_INSUFFICIENT_STOCK
+enum selfcheckout.inventory.v1.CheckoutOutcome value 3 CHECKOUT_OUTCOME_INVALID_REQUEST
+enum selfcheckout.inventory.v1.CheckoutOutcome value 4 CHECKOUT_OUTCOME_STOCK_RESTORED
+enum selfcheckout.inventory.v1.CheckoutOutcome value 5 CHECKOUT_OUTCOME_NOT_PROCESSED
+enum selfcheckout.inventory.v1.RestoreResult value 0 RESTORE_RESULT_UNSPECIFIED
+enum selfcheckout.inventory.v1.RestoreResult value 1 RESTORE_RESULT_RESTORED
+enum selfcheckout.inventory.v1.RestoreResult value 2 RESTORE_RESULT_NOTHING_TO_RESTORE
+enum selfcheckout.inventory.v1.RestoreResult value 3 RESTORE_RESULT_ALREADY_RESTORED
+rpc selfcheckout.inventory.v1.InventoryService/GetCatalogVersion selfcheckout.inventory.v1.GetCatalogVersionRequest -> selfcheckout.inventory.v1.GetCatalogVersionResponse
+rpc selfcheckout.inventory.v1.InventoryService/GetCatalog selfcheckout.inventory.v1.GetCatalogRequest -> selfcheckout.inventory.v1.GetCatalogResponse
+rpc selfcheckout.inventory.v1.InventoryService/ApplyCheckout selfcheckout.inventory.v1.ApplyCheckoutRequest -> selfcheckout.inventory.v1.ApplyCheckoutResponse
+rpc selfcheckout.inventory.v1.InventoryService/GetCheckoutOutcome selfcheckout.inventory.v1.GetCheckoutOutcomeRequest -> selfcheckout.inventory.v1.GetCheckoutOutcomeResponse
+rpc selfcheckout.inventory.v1.InventoryService/RestoreCheckout selfcheckout.inventory.v1.RestoreCheckoutRequest -> selfcheckout.inventory.v1.RestoreCheckoutResponse
+message selfcheckout.analytics.v1.ScanEvent field 1 transaction_id STRING
+message selfcheckout.analytics.v1.ScanEvent field 2 scan_sequence UINT32
+message selfcheckout.analytics.v1.ScanEvent field 3 sku STRING
+message selfcheckout.analytics.v1.ScanEvent field 4 product_name STRING
+message selfcheckout.analytics.v1.ScanEvent field 5 accepted_at_epoch_millis INT64
+message selfcheckout.analytics.v1.DeliverScanEventsRequest field 1 repeated events MESSAGE selfcheckout.analytics.v1.ScanEvent
+message selfcheckout.analytics.v1.DeliverScanEventsResponse field 1 stored UINT32
+message selfcheckout.analytics.v1.DeliverScanEventsResponse field 2 duplicates UINT32
+rpc selfcheckout.analytics.v1.AnalyticsIngestService/DeliverScanEvents selfcheckout.analytics.v1.DeliverScanEventsRequest -> selfcheckout.analytics.v1.DeliverScanEventsResponse

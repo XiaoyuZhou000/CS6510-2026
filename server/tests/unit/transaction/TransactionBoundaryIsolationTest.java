@@ -1,11 +1,14 @@
 package unit.transaction;
 
-import database.AcceptedScanStore;
-import database.CheckoutCompletionStore;
+import database.ScanStore;
 import database.TransactionStore;
 import org.junit.jupiter.api.Test;
+import transaction.CheckoutOrchestrator;
+import transaction.ProductCatalogReplica;
+import transaction.TransactionLocks;
 import transaction.TransactionOperations;
 import transaction.TransactionService;
+import transaction.TransactionStateCache;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Map;
@@ -13,6 +16,11 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * The business contract stays transport-neutral, and the service keeps no basket authority of its own:
+ * its only in-memory state is the rebuildable cache behind guarded writes (R19; FR-057 equivalence).
+ * Complete is delegated to the checkout Saga's orchestrator, which shares the service's locks and cache.
+ */
 class TransactionBoundaryIsolationTest {
     @Test
     void publicBusinessContractExposesNoHttpOrJdbcTypes() {
@@ -29,8 +37,9 @@ class TransactionBoundaryIsolationTest {
     void serviceUsesOnlyDurableStoreBoundariesWithoutProcessBasketAuthority() {
         var constructors=TransactionService.class.getConstructors();
         assertEquals(1,constructors.length);
-        assertArrayEquals(new Class<?>[]{TransactionStore.class,AcceptedScanStore.class,
-            CheckoutCompletionStore.class},constructors[0].getParameterTypes());
+        assertArrayEquals(new Class<?>[]{TransactionStore.class,ScanStore.class,CheckoutOrchestrator.class,
+            ProductCatalogReplica.class,TransactionLocks.class,TransactionStateCache.class},
+            constructors[0].getParameterTypes());
         for (var field:TransactionService.class.getDeclaredFields()) {
             assertTrue(Modifier.isFinal(field.getModifiers()));
             assertFalse(Map.class.isAssignableFrom(field.getType()));

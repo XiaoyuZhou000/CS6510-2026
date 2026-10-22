@@ -3,9 +3,8 @@ package api;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import api.json.Json;
+import metrics.PerfMetrics;
 import transaction.TransactionOperations;
-import database.ScanProfiler;
-import database.ScanProfiler.Phase;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -61,45 +60,53 @@ public final class TransactionHttpHandler implements HttpHandler {
 
     private void start(HttpExchange exchange) throws IOException {
         long requestStart = System.nanoTime();
-        Map<String, Object> body = HttpSupport.readJsonBody(exchange);
-        String stationId = Json.getString(body, "stationId");
-        if (stationId == null || stationId.isBlank()) {
-            HttpSupport.respondError(exchange, 400, ApiErrors.MISSING_STATION_ID,
-                    "stationId is required and must not be blank");
-            return;
+        try {
+            Map<String, Object> body = HttpSupport.readJsonBody(exchange);
+            String stationId = Json.getString(body, "stationId");
+            if (stationId == null || stationId.isBlank()) {
+                HttpSupport.respondError(exchange, 400, ApiErrors.MISSING_STATION_ID,
+                        "stationId is required and must not be blank");
+                return;
+            }
+            HttpSupport.respond(exchange, 201, serialize(transactions.start(
+                    new TransactionOperations.StartCommand(stationId))));
+        } finally {
+            PerfMetrics.record("transaction.http.start", System.nanoTime() - requestStart);
         }
-        HttpSupport.respond(exchange, 201, serialize(transactions.start(
-                new TransactionOperations.StartCommand(stationId))));
-        ScanProfiler.record(Phase.START_REQUEST, requestStart);
     }
 
     private void scan(HttpExchange exchange, String transactionId) throws IOException {
-        long httpStart = System.nanoTime();
-        String sku = Json.getString(HttpSupport.readJsonBody(exchange), "sku");
-        if (sku == null || sku.isBlank()) {
-            HttpSupport.respondError(exchange, 400, "MISSING_SKU", "sku is required and must not be blank");
-            return;
-        }
-        String response = serialize(transactions.scan(
-                new TransactionOperations.ScanCommand(transactionId, sku)));
-        long responseStart = System.nanoTime();
+        long requestStart = System.nanoTime();
         try {
-            HttpSupport.respond(exchange, 200, response);
+            String sku = Json.getString(HttpSupport.readJsonBody(exchange), "sku");
+            if (sku == null || sku.isBlank()) {
+                HttpSupport.respondError(exchange, 400, "MISSING_SKU", "sku is required and must not be blank");
+                return;
+            }
+            HttpSupport.respond(exchange, 200, serialize(transactions.scan(
+                    new TransactionOperations.ScanCommand(transactionId, sku))));
         } finally {
-            ScanProfiler.record(Phase.RESPONSE_WRITE, responseStart);
-            ScanProfiler.record(Phase.REQUEST_TOTAL, httpStart);
+            PerfMetrics.record("transaction.http.scan", System.nanoTime() - requestStart);
         }
     }
 
     private void complete(HttpExchange exchange, String transactionId) throws IOException {
         long requestStart = System.nanoTime();
-        // The fixed client sends either an empty body or {}; neither carries domain input.
-        HttpSupport.respond(exchange, 200, serialize(transactions.complete(transactionId)));
-        ScanProfiler.record(Phase.COMPLETE_REQUEST, requestStart);
+        try {
+            // The fixed client sends either an empty body or {}; neither carries domain input.
+            HttpSupport.respond(exchange, 200, serialize(transactions.complete(transactionId)));
+        } finally {
+            PerfMetrics.record("transaction.http.complete", System.nanoTime() - requestStart);
+        }
     }
 
     private void get(HttpExchange exchange, String transactionId) throws IOException {
-        HttpSupport.respond(exchange, 200, serialize(transactions.get(transactionId)));
+        long requestStart = System.nanoTime();
+        try {
+            HttpSupport.respond(exchange, 200, serialize(transactions.get(transactionId)));
+        } finally {
+            PerfMetrics.record("transaction.http.get", System.nanoTime() - requestStart);
+        }
     }
 
     private static String serialize(TransactionOperations.TransactionView view) {

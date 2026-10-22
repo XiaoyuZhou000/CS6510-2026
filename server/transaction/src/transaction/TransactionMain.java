@@ -3,50 +3,57 @@ package transaction;
 import api.TransactionHttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import database.ConnectionPool;
-import database.JdbcAcceptedScanStore;
-import database.JdbcCheckoutCompletionStore;
+import database.DatabaseConfig;
+import database.JdbcCheckoutAttemptStore;
+import database.JdbcProductReplicaStore;
+import database.JdbcScanStore;
 import database.JdbcTransactionStore;
+import metrics.MetricsReporter;
+import rpc.GrpcChannels;
+import rpc.GrpcInventoryGateway;
+
 import java.net.InetSocketAddress;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import database.ScanProfiler;
 
-/** Independent Transaction Service entry point. */
+/** Independent Transaction Service entry point. Transaction runs no gRPC server; it is a client only. */
 public final class TransactionMain {
     private TransactionMain() { }
 
     public static void main(String[] args) throws Exception {
         int port = args.length > 0 ? Integer.parseInt(args[0]) : intEnv("TRANSACTION_PORT", 8081);
+        DatabaseConfig config = DatabaseConfig.fromEnvironment("TRANSACTION", "cs6510_transaction",
+            "cs6510_transaction_svc", 32, 64);
         ConnectionPool pool;
         try {
-            int initialPoolSize = intEnv("DB_POOL_SIZE", 32);
-            int maxPoolSize = intEnv("DB_POOL_MAX_SIZE",
-                System.getenv("DB_POOL_SIZE") == null ? 64 : initialPoolSize);
-            pool = new ConnectionPool(env("DB_HOST","127.0.0.1"),intEnv("DB_PORT",3307),
-                env("DB_NAME","cs6510_selfcheckout"),env("DB_USER","root"),
-                env("DB_PASSWORD",""),initialPoolSize,maxPoolSize);
+            pool = new ConnectionPool(config, "transaction");
         } catch (Exception failure) {
-            System.err.println("Transaction Service cannot connect to MySQL: " + failure.getMessage());
+            System.err.println("Transaction Service cannot connect to MySQL as " + config + ": " + failure.getMessage());
             throw failure;
         }
+        ProductCatalogReplica replica = new ProductCatalogReplica();
+        GrpcInventoryGateway inventory = GrpcInventoryGateway.forTarget(env("INVENTORY_GRPC_TARGET", "127.0.0.1:9092"));
+        CatalogReplicaRefresher refresher = new CatalogReplicaRefresher(inventory,
+            new JdbcProductReplicaStore(pool), replica, CatalogReplicaRefresher.refreshInterval(System.getenv()));
+        TransactionLocks locks = new TransactionLocks();
+        TransactionStateCache cache = new TransactionStateCache(locks, TransactionStateCache.maxEntries(System.getenv()));
+        JdbcTransactionStore transactions = new JdbcTransactionStore(pool);
+        CheckoutOrchestrator checkout = new CheckoutOrchestrator(transactions, new JdbcCheckoutAttemptStore(pool),
+            inventory, cache, new SettlementRegistry(locks), new RecoverySchedule(),
+            CheckoutOrchestrator.Settings.fromEnvironment(System.getenv()));
+        var service = new TransactionService(transactions, new JdbcScanStore(pool), checkout, replica, locks, cache);
         HttpServer server = HttpServer.create(new InetSocketAddress(port),0);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-        var service = new TransactionService(new JdbcTransactionStore(pool),
-            new JdbcAcceptedScanStore(pool),new JdbcCheckoutCompletionStore(pool));
         server.createContext("/transactions",new TransactionHttpHandler(service));
+        refresher.start();
+        MetricsReporter reporter = MetricsReporter.start("transaction");
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.stop(5);
+            refresher.stop();
+            GrpcChannels.shutdownAll();
+            reporter.stop();
             pool.close();
         }));
         server.start();
-        if (ScanProfiler.enabled()) {
-            var reporter = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread thread = new Thread(r, "scan-profile-reporter");
-                thread.setDaemon(true);
-                return thread;
-            });
-            reporter.scheduleAtFixedRate(() -> ScanProfiler.log(pool), 10, 10, TimeUnit.SECONDS);
-        }
         System.out.println("Transaction Service listening on port " + port);
     }
 

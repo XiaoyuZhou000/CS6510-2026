@@ -118,6 +118,89 @@ class LayerDependencyTest {
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
     }
 
+    /** gRPC and generated {@code contracts.*} types stay in rpc adapters and composition roots (R2). */
+    @Test
+    void grpcAndGeneratedContractsStayInRpcPackagesAndCompositionRoots() throws Exception {
+        Path server = serverRoot();
+        List<String> violations = new ArrayList<>();
+        int rpcSources = 0;
+        for (String owner : List.of("common", "transaction", "inventory", "analytics")) {
+            try (Stream<Path> paths = Files.walk(server.resolve(owner + "/src"))) {
+                for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
+                    String body = Files.readString(source);
+                    Matcher declared = PACKAGE.matcher(body);
+                    if (!declared.find()) continue;
+                    String packageName = declared.group(1);
+                    boolean rpc = packageName.equals("rpc") || packageName.startsWith("rpc.");
+                    if (rpc) rpcSources++;
+                    boolean compositionRoot = !owner.equals("common") && source.getFileName().toString().equals(
+                            Character.toUpperCase(owner.charAt(0)) + owner.substring(1) + "Main.java");
+                    if (!rpc && !compositionRoot && GRPC_OR_CONTRACTS.matcher(body).find()) {
+                        violations.add(source + ": gRPC or generated contract type outside an rpc package");
+                    }
+                }
+            }
+        }
+        assertTrue(rpcSources > 0, "No rpc package sources found");
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    /** The shared metrics and rpc packages carry no business logic, and metrics needs no library (R21). */
+    @Test
+    void commonMetricsAndRpcPackagesAreBusinessFreeAndMetricsIsDependencyFree() throws Exception {
+        Path common = serverRoot().resolve("common/src");
+        List<String> violations = new ArrayList<>();
+        for (String shared : List.of("metrics", "rpc")) {
+            Path root = common.resolve(shared);
+            assertTrue(Files.isDirectory(root), "Missing common package: " + root);
+            try (Stream<Path> paths = Files.walk(root)) {
+                for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
+                    String body = Files.readString(source);
+                    Matcher declared = PACKAGE.matcher(body);
+                    if (!declared.find() || !declared.group(1).equals(shared)) {
+                        violations.add(source + ": expected package " + shared);
+                    }
+                    Matcher imports = IMPORT.matcher(body);
+                    while (imports.find()) {
+                        String imported = imports.group(1);
+                        if (imported.matches("(transaction|inventory|analytics|api|database)(\\..*)?")) {
+                            violations.add(source + " imports " + imported);
+                        }
+                        if (shared.equals("metrics") && !imported.startsWith("java.") && !imported.startsWith("metrics.")) {
+                            violations.add(source + ": metrics must stay dependency-free but imports " + imported);
+                        }
+                    }
+                }
+            }
+        }
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    /** {@code contracts.jar} holds only generated stubs: no business, api, or database class (R1). */
+    @Test
+    void contractsJarHoldsOnlyGeneratedContracts() throws Exception {
+        Path jar = serverRoot().resolve("out/contracts.jar");
+        assertTrue(Files.isRegularFile(jar), "Missing contracts artifact: " + jar);
+        List<String> violations = new ArrayList<>();
+        int generated = 0;
+        try (java.util.jar.JarFile archive = new java.util.jar.JarFile(jar.toFile())) {
+            for (String name : archive.stream().map(java.util.zip.ZipEntry::getName).toList()) {
+                if (!name.endsWith(".class")) continue;
+                if (name.startsWith("contracts/")) generated++;
+                else violations.add("contracts.jar contains a non-contract class " + name);
+                if (name.matches("^(transaction|inventory|analytics|api|database|rpc|metrics)/.*")) {
+                    violations.add("contracts.jar contains business or shared class " + name);
+                }
+            }
+        }
+        assertTrue(generated > 0, "contracts.jar has no generated classes");
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    private static final Pattern IMPORT = Pattern.compile("(?m)^import\\s+(?:static\\s+)?([a-zA-Z0-9_.]+)\\s*;");
+    private static final Pattern GRPC_OR_CONTRACTS = Pattern.compile(
+            "(?m)(^import\\s+(?:static\\s+)?(?:io\\.grpc|contracts)\\.)|\\bio\\.grpc\\.[a-zA-Z]|\\bcontracts\\.(?:inventory|analytics)\\.v\\d");
+
     private static Path serverRoot() {
         Path cwd = Path.of("").toAbsolutePath().normalize();
         return Files.isDirectory(cwd.resolve("server/common")) ? cwd.resolve("server") : cwd;

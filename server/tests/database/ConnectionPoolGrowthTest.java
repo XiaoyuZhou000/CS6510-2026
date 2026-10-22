@@ -1,6 +1,7 @@
 package database;
 
 import org.junit.jupiter.api.Test;
+import support.TransactionTestSchema;
 
 import java.sql.Connection;
 import java.util.ArrayList;
@@ -13,12 +14,9 @@ import static org.junit.jupiter.api.Assertions.*;
 class ConnectionPoolGrowthTest {
     @Test
     void growsOnlyWhenBorrowedConnectionsExceedInitialSizeAndWakesWaiter() throws Exception {
-        String host = System.getenv().getOrDefault("DB_HOST", "127.0.0.1");
-        int port = Integer.parseInt(System.getenv().getOrDefault("DB_PORT", "3307"));
-        String name = System.getenv().getOrDefault("DB_NAME", "cs6510_selfcheckout");
-        String user = System.getenv().getOrDefault("DB_USER", "root");
-        String password = System.getenv().getOrDefault("DB_PASSWORD", "");
-        try (ConnectionPool pool = new ConnectionPool(host, port, name, user, password, 2, 4);
+        try (TransactionTestSchema schema = TransactionTestSchema.create();
+             ConnectionPool pool = new ConnectionPool(schema.host(), schema.port(), schema.name(),
+                     schema.user(), schema.password(), 2, 4);
              var worker = Executors.newSingleThreadExecutor()) {
             assertEquals(2, pool.occupancy().size());
             List<Connection> borrowed = new ArrayList<>();

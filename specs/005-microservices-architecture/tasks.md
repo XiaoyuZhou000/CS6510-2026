@@ -112,23 +112,23 @@ These rules bind every task below.
 
 **⚠️ CRITICAL**: No user-story task starts until this phase is complete.
 
-- [ ] T008 [P] Create the dependency-free metrics package in `server/common/src/metrics/` (R21):
+- [X] T008 [P] Create the dependency-free metrics package in `server/common/src/metrics/` (R21):
   - `PerfMetrics`: a static registry of named counters, gauges, and timers.
   - `LatencyHistogram`: `LongAdder` buckets on a log scale from 50 µs to 30 s. `record(nanos)` records a value; a snapshot returns count, p50, p95, p99, and max.
   - `MetricsReporter`: `start(serviceName)` reads `PERF_METRICS` (default `false`) and `PERF_METRICS_INTERVAL_SECONDS` (default 10). When enabled, it prints one JSON line `{"service":…,"ts":…,"timers":{…},"counters":{…},"gauges":{…}}` each interval and once on `stop()`.
   - Recording is always on and lock-free, so tests can read snapshots.
-- [ ] T009 [P] Create `server/common/src/rpc/` (R2, R6, R15):
+- [X] T009 [P] Create `server/common/src/rpc/` (R2, R6, R15):
   - `GrpcChannels`: one plaintext Netty channel per target, created lazily once and reused; `shutdownAll()`.
   - `GrpcServers`: starts a Netty gRPC server on a port with a virtual-thread-per-task executor; ordered `stop(timeout)`.
   - `RpcStatusClassifier`: OK is DEFINITIVE. INVALID_ARGUMENT and FAILED_PRECONDITION map to themselves. UNAVAILABLE, DEADLINE_EXCEEDED, ABORTED, RESOURCE_EXHAUSTED, CANCELLED, UNKNOWN, and INTERNAL are UNCERTAIN, per `contracts/grpc-internal-contracts.md`.
   - `ResponseBudget`: start instant and total; `remaining()`, `expired()`, and `nextDeadline(perCall)`, which returns the smaller of `perCall` and `remaining()`.
   - `FaultHooks`: `hit(name)` parses the JVM property `selfcheckout.faults` as comma-separated `name:action` entries. Actions are `halt` (`Runtime.halt(137)`), `delay:<ms>`, and `throw`. It re-parses only when the property value changes and is inert when the property is absent.
-- [ ] T010 [P] Add the commit-ambiguity flag to `server/common/src/database/StoreFailure.java` and create `server/common/src/database/DatabaseConfig.java` (R3, R20):
+- [X] T010 [P] Add the commit-ambiguity flag to `server/common/src/database/StoreFailure.java` and create `server/common/src/database/DatabaseConfig.java` (R3, R20):
   - Add a `commitOutcomeUnknown` flag (constructor overload and accessor) to `server/common/src/database/StoreFailure.java`.
   - Create `server/common/src/database/DatabaseConfig.java` with `fromEnvironment(prefix, defaultSchema, defaultUser, defaultInitialPool, defaultMaxPool)`.
   - It reads `DB_HOST` (default 127.0.0.1), `DB_PORT` (3307), `<PREFIX>_DB_NAME`, `<PREFIX>_DB_USER`, `<PREFIX>_DB_PASSWORD`, `<PREFIX>_DB_POOL_SIZE`, `<PREFIX>_DB_POOL_MAX_SIZE`, and `DB_SERVER_PREPARED_STATEMENTS` (default `false`). It never reads the former shared `DB_NAME`, `DB_USER`, or `DB_PASSWORD`.
   - `jdbcUrl()` returns `jdbc:mysql://host:port/name?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&useLocalSessionState=true&useLocalTransactionState=true&cachePrepStmts=true&prepStmtCacheSize=256&prepStmtCacheSqlLimit=2048&rewriteBatchedStatements=true`, plus `&useServerPrepStmts=true` only when the switch is true.
-- [ ] T011 Extend `server/common/src/database/ConnectionPool.java` (R16, R20, R21):
+- [X] T011 Extend `server/common/src/database/ConnectionPool.java` (R16, R20, R21):
   - Add a constructor taking `DatabaseConfig`, a metrics name, and an optional `UnaryOperator<Connection>` decorator. The decorator is a test-only hook; production passes identity.
   - Pools built by this constructor open every physical connection once with `setAutoCommit(false)` and `setTransactionIsolation(TRANSACTION_READ_COMMITTED)`. In `release()`, they roll back any open transaction and restore manual-commit mode before returning the connection.
   - The existing constructors keep their current behavior, including pool growth, until their last caller is migrated. Retained tests and not-yet-migrated services are therefore unaffected.
@@ -136,17 +136,17 @@ These rules bind every task below.
     - time `borrow()` into `<name>.pool.borrowWait`;
     - time borrow-to-release into `<name>.pool.holdTime`;
     - expose occupancy and its high-water mark as gauges.
-- [ ] T012 Create `server/common/src/database/JdbcUnitOfWork.java` (R20):
+- [X] T012 Create `server/common/src/database/JdbcUnitOfWork.java` (R20):
   - `inTransaction(pool, metricName, work)` borrows a connection, runs the work, and commits; it rolls back on any exception before commit.
   - It retries the whole unit only on deadlock (MySQL error 1213 or SQLState 40001) when no commit was attempted: at most 3 attempts with 10 ms × attempt backoff.
   - It throws `StoreFailure` with `commitOutcomeUnknown=true` when `commit()` itself fails, times the unit into `metricName`, and always releases the connection.
   - `read(pool, metricName, work)` ends the unit with rollback.
-- [ ] T013 [P] Create `db/bootstrap.sql` (statement template) and `db/bootstrap.ps1` (R3):
+- [X] T013 [P] Create `db/bootstrap.sql` (statement template) and `db/bootstrap.ps1` (R3):
   - Prompt securely for the MySQL admin password. Read `TRANSACTION_DB_PASSWORD`, `INVENTORY_DB_PASSWORD`, and `ANALYTICS_DB_PASSWORD` from the environment, or prompt securely.
   - Idempotently create schemas `cs6510_transaction`, `cs6510_inventory`, and `cs6510_analytics` (utf8mb4, utf8mb4_0900_ai_ci).
   - Create users `cs6510_transaction_svc`, `cs6510_inventory_svc`, and `cs6510_analytics_svc` for both `localhost` and `127.0.0.1`, or reset their passwords if they exist. Grant each user ALL PRIVILEGES on its own schema only.
   - Pass every password through stdin or `MYSQL_PWD`, never on a command line. Reuse the `mysql.exe` discovery logic of `db/init-db.ps1`, and print the schemas and users.
-- [ ] T014 [P] Create `db/transaction/schema.sql` per data-model.md. It drops and recreates only these tables and references no other schema.
+- [X] T014 [P] Create `db/transaction/schema.sql` per data-model.md. It drops and recreates only these tables and references no other schema.
   - **`transaction`**:
     - "`transaction_id` | VARCHAR(40), PK", "`station_id` | VARCHAR(40), not null", "`status` | ENUM(`OPEN`,`COMPLETED`,`CANCELLED`), default `OPEN`";
     - "`item_count` | INT, not null, default 0, ≥ 0", "`total_amount` | DECIMAL(12,2), not null, default 0", "`attempt_count` | INT, not null, default 0";
@@ -169,7 +169,7 @@ These rules bind every task below.
     - `retry_count` INT default 0, `next_retry_at` TIMESTAMP(3) null, `last_error` VARCHAR(255) null;
     - "Primary key `(transaction_id, attempt_number)`", "Index `(state, next_retry_at)`";
     - unique stored generated columns "`pending_transaction_id = IF(state='PENDING', transaction_id, NULL)` and `completed_transaction_id = IF(state='COMPLETED', transaction_id, NULL)`".
-- [ ] T015 [P] Create `db/inventory/schema.sql` and `db/inventory/seed.sql` per data-model.md.
+- [X] T015 [P] Create `db/inventory/schema.sql` and `db/inventory/seed.sql` per data-model.md.
   - **`catalog_item`**: "`sku` (PK), `name`, `price` DECIMAL(10,2) ≥ 0", with `sku` VARCHAR(20) and `name` VARCHAR(100).
   - **`inventory`**: "`sku` (PK, FK → `catalog_item`), `stock_quantity` INT CHECK ≥ 0, `low_stock_threshold` INT ≥ 0".
   - **`catalog_meta`**: "`meta_key` (PK = 1), `catalog_version` CHAR(36), `product_count`, `seeded_at`".
@@ -183,19 +183,19 @@ These rules bind every task below.
     - Use a recursive CTE for n = 1..2000: `sku = CONCAT('SKU-', LPAD(n, 6, '0'))`, `name = CONCAT('Item ', n)`, `price = ROUND(0.5 + MOD(n, 47) * 0.35, 2)`.
     - Stock is 10,000 per product with threshold 50. `catalog_meta` is `(1, UUID(), 2000, NOW(3))`.
     - End with a sanity SELECT of counts and total units.
-- [ ] T016 [P] Create `db/analytics/schema.sql` per data-model.md:
+- [X] T016 [P] Create `db/analytics/schema.sql` per data-model.md:
   - **`accepted_scan`**: "`position` BIGINT PK, > 0; `source_transaction_id` VARCHAR(40); `source_scan_sequence` INT ≥ 1; `sku`; `received_at`", with "Unique key `(source_transaction_id, source_scan_sequence)`". `sku` is VARCHAR(20) with no foreign key.
   - **`product_name`**: "`sku` (PK), `name`, `updated_at`".
   - **`scan_sequence`**: "`sequence_key` (PK = 1), `last_position` ≥ 0", seeded `(1, 0)`.
   - **`popular_window`**: "`window_id` PK, `window_start`, `window_end` UNIQUE, `computed_at`", with checks "CHECK `window_end ≥ 1000`, `(window_end − 1000) mod 500 = 0`, and `window_start = window_end − 999`".
   - **`popular_item`**: "`window_id` FK, `rank_pos` 1–10, `sku` FK → `product_name`, `scan_count` > 0", with "Primary key `(window_id, rank_pos)`" and ON DELETE CASCADE from `popular_window`.
   - **`analytics_checkpoint`**: "`checkpoint_key` (PK = 1), `last_window_end`", which is "0 or a valid boundary", seeded `(1, 0)`.
-- [ ] T017 Create `db/reset-service.ps1` and `db/reset-all.ps1` (R13):
+- [X] T017 Create `db/reset-service.ps1` and `db/reset-all.ps1` (R13):
   - `reset-service.ps1 -Service transaction|inventory|analytics [-MySqlHost 127.0.0.1] [-Port 3307] [-MySqlExe]` runs `db/<service>/schema.sql`, plus `seed.sql` for Inventory, against `cs6510_<service>`.
   - It connects only as `<SERVICE>_DB_USER` (default `cs6510_<service>_svc`), with the password from `<SERVICE>_DB_PASSWORD` or a secure prompt passed through `MYSQL_PWD`, and prints the resulting counts.
   - `reset-all.ps1` resets Inventory, then Transaction, then Analytics, and stops at the first failure.
   - It prints the baseline: 2,000 catalog rows, 2,000 inventory rows, 20,000,000 units, zero transactions, zero `accepted_scan` rows, and `last_position` 0.
-- [ ] T018 [P] Create `db/transaction/validate.sql`, `db/inventory/validate.sql`, and `db/analytics/validate.sql`. Each uses an `assert_zero` procedure that raises SQLSTATE 45000 and drops it at the end.
+- [X] T018 [P] Create `db/transaction/validate.sql`, `db/inventory/validate.sql`, and `db/analytics/validate.sql`. Each uses an `assert_zero` procedure that raises SQLSTATE 45000 and drops it at the end.
   - **Transaction**:
     - totals and `item_count` match `accepted_scan` sums and counts;
     - `scan_sequence` is contiguous from 1 per transaction;
@@ -216,7 +216,7 @@ These rules bind every task below.
     - ranks are recomputed from `accepted_scan`, reusing the window-rank SQL of the retired `db/validate-invariants.sql`;
     - every `popular_item` SKU has a name;
     - a PASS row.
-- [ ] T019 Create `db/validate-invariants.ps1` (R13):
+- [X] T019 Create `db/validate-invariants.ps1` (R13):
   - Runs the three validate scripts, each with its own service credentials. `-SkipAnalytics` omits the Analytics checks and the delivery checks.
   - Exports aggregates with `mysql --batch` and reconciles them in PowerShell:
     - per SKU, Inventory sold units equal Transaction quantities from the `accepted_scan` rows of COMPLETED transactions;
@@ -224,7 +224,7 @@ These rules bind every task below.
     - Analytics' row count and per-source-transaction counts equal Transaction's delivered rows, and undelivered rows are 0.
   - Prints PASS and the FR-054 counts: COMPLETED transactions, background completions (`PENDING_ERROR`), and completions without a recorded response (`NONE`). With `-TotalTransactions <n>`, it also prints the remaining difference.
   - Exits non-zero on any violation.
-- [ ] T020 Create `server/benchmark-microservices.ps1` (R21; contracts/service-deployment.md *Benchmark harness and checkpoints*).
+- [X] T020 Create `server/benchmark-microservices.ps1` (R21; contracts/service-deployment.md *Benchmark harness and checkpoints*).
   - **Parameters**: `-Workload default|stress|smoke`, `-OutputLabel`, `-MySqlExe`, `-NginxBin`, `-JavaExe`, `-SkipAnalytics`, and `-ExtraEnv` (a hashtable for CP3 variants).
   - **Steps**:
     1. Check that ports 8080–8083, 9092, and 9093 are free. Build `load-client/` if needed.
@@ -250,7 +250,7 @@ These rules bind every task below.
     - the validator passed.
     
     Only comparable runs can decide a CP3 variant or enter the final comparison.
-- [ ] T021 [P] Create the coverage-parity ledger `server/tests/COVERAGE-LEDGER.md` (FR-057). This task moves no files.
+- [X] T021 [P] Create the coverage-parity ledger `server/tests/COVERAGE-LEDGER.md` (FR-057). This task moves no files.
   - **Rows**: one row per `@Test` method of every test file under `server/tests/` at commit 26c89af (56 files), plus one file-level row for each support class. Columns:
     - the legacy file and method;
     - the status;
@@ -276,36 +276,36 @@ These rules bind every task below.
     - `PENDING`: the other 27 files, with the owner tasks named in the tasks below.
     - `SUPERSEDED`: in `integration/InventoryServiceIsolationTest#inventoryRestartReadsCommittedSaleWhileTransactionRunsDuringOutage`, the assertion that Complete returns 200 while Inventory is down. FR-030, FR-037, and the spec's *Availability and Failure Behavior* table replace it: Complete returns 500 `INTERNAL_ERROR`, the attempt stays pending, and it settles after Inventory returns (T114). The method's other assertions migrate normally.
   - **Updates**: every task that writes a replacement updates its rows. Every task that breaks a legacy file moves it to `server/tests-legacy/`.
-- [ ] T022 [P] Create the per-schema test support in `server/tests/support/`. The new names avoid clashing with the legacy `AnalyticsDatabase` and `CheckoutDatabase`, which stay untouched until their users are migrated:
+- [X] T022 [P] Create the per-schema test support in `server/tests/support/`. The new names avoid clashing with the legacy `AnalyticsDatabase` and `CheckoutDatabase`, which stay untouched until their users are migrated:
   - `SqlScripts`: runs a `db/<service>/schema.sql` file statement by statement.
   - `TransactionTestSchema`, `InventoryTestSchema`, and `AnalyticsTestSchema`:
     - Each creates a disposable schema named `txn_test_<uuid>`, `inv_test_<uuid>`, or `ana_test_<uuid>` from its service's schema file, using the admin credentials from `-DDB_USER` and `-DDB_PASS`.
     - Each can optionally create a disposable user granted only that schema, and exposes a `ConnectionPool` built through `DatabaseConfig`-equivalent parameters with an optional decorator.
     - Helpers: Inventory provides `seed(products, stock)`, `stock(sku)`, and `setStock(sku, n)`. Transaction provides scan, attempt, and outbox queries and `setTableUnavailable(table, boolean)`. Analytics provides position and window queries.
     - Each drops its schema and user on `close()`.
-- [ ] T023 [P] Create more test support in `server/tests/support/`:
+- [X] T023 [P] Create more test support in `server/tests/support/`:
   - `CountingConnections`: a `java.lang.reflect.Proxy` decorator over `Connection`, `Statement`, and `PreparedStatement`. It counts executions by SQL verb (SELECT, INSERT, UPDATE, DELETE, other) and counts `commit`, `rollback`, `setAutoCommit`, and `setTransactionIsolation` calls, with per-thread scopes.
   - `FaultingConnections`: a decorator that scripts commit faults for one thread or one connection. It can throw before delegating `commit()`, so the commit does not happen. It can delegate and then throw, so the commit happens but the caller sees a failure. It can also delay `commit()` by a given time.
   - `ServiceProcesses`: starts a service JVM from `server/out` jars, `lib/grpc/*`, and Connector/J, with per-service environment variables (ports, schema, user, password, gRPC targets, `PERF_METRICS`) and an optional `-Dselfcheckout.faults=…`. It provides readiness probes, stop, and wait-for-exit (including halt).
   - `GrpcTestSupport`: an in-process server and channel for a `BindableService`, plus free ports.
   - `FaultInjection`: builders for fault specifications.
-- [ ] T024 [P] Write unit tests in `server/tests/unit/common/`:
+- [X] T024 [P] Write unit tests in `server/tests/unit/common/`:
   - `PerfMetricsTest`: bucket boundaries, percentile estimates, and the JSON line format.
   - `RpcStatusClassifierTest`: every status in the contract table.
   - `ResponseBudgetTest`: `remaining`, `expired`, and `nextDeadline`.
   - `FaultHooksTest`: inert without the property; `halt`, `delay`, and `throw` parsing; re-parse when the property changes.
-- [ ] T025 Write `server/tests/database/ConnectionPoolSessionTest.java`. Then adapt `server/tests/database/ConnectionPoolGrowthTest.java` in place to use a `TransactionTestSchema` instead of `cs6510_selfcheckout`, keeping its method and assertions (ledger: `ADAPTED`). Assert that:
+- [X] T025 Write `server/tests/database/ConnectionPoolSessionTest.java`. Then adapt `server/tests/database/ConnectionPoolGrowthTest.java` in place to use a `TransactionTestSchema` instead of `cs6510_selfcheckout`, keeping its method and assertions (ledger: `ADAPTED`). Assert that:
   - pooled connections from the `DatabaseConfig` constructor are in manual-commit mode at READ COMMITTED, and the existing constructors behave as before;
   - a `JdbcUnitOfWork` issues no `setAutoCommit` or `setTransactionIsolation` per unit, using `CountingConnections`;
   - a commit failure surfaces `commitOutcomeUnknown`, for both `FaultingConnections` commit faults;
   - deadlocks retry only before commit;
   - borrow wait, hold time, and peak occupancy are recorded.
-- [ ] T026 [P] Update `server/tests/architecture/LayerDependencyTest.java`:
+- [X] T026 [P] Update `server/tests/architecture/LayerDependencyTest.java`:
   - `rpc` packages may import `io.grpc` and `contracts.*`, and business packages (`transaction`, `inventory`, `analytics`) must not.
   - The `metrics` and `rpc` packages in `common` contain no business package or import.
   - SQL stays in database packages, and HTTP stays in `api` packages and `*Main` classes.
   - `out/contracts.jar` contains no `transaction/`, `inventory/`, or `analytics/` classes.
-- [ ] T027 [P] Create `server/tests/architecture/MicroserviceBoundaryTest.java`. It asserts that:
+- [X] T027 [P] Create `server/tests/architecture/MicroserviceBoundaryTest.java`. It asserts that:
   - no jar in `server/lib/**` matches `redis|jedis|lettuce|kafka|rabbit|activemq`;
   - no production source contains `SET GLOBAL`, `innodb_flush_log_at_trx_commit`, `sync_binlog`, or `skip-log-bin`;
   - `DatabaseConfig.java` contains every R20 URL flag;
@@ -315,7 +315,7 @@ These rules bind every task below.
     - checked by reflection over the classes in `out/transaction.jar`, `out/inventory.jar`, and `out/analytics.jar`;
     - in the business packages `transaction`, `inventory`, and `analytics`, no class declares a static or instance field assignable to `java.util.Map`, except the designated components and their nested classes: `TransactionStateCache`, `TransactionLocks`, `ProductCatalogReplica`, `SettlementRegistry`, `RecoverySchedule`, `CatalogCache`, and `ProductNameMap`;
     - the list grants permission only, so a component that does not exist yet does not fail the test, and every class added later is checked automatically.
-- [ ] T134 [P] Write `server/tests/architecture/CoverageParityLedgerTest.java` (FR-057). It parses `server/tests/COVERAGE-LEDGER.md` and fails when:
+- [X] T134 [P] Write `server/tests/architecture/CoverageParityLedgerTest.java` (FR-057). It parses `server/tests/COVERAGE-LEDGER.md` and fails when:
   - a `@Test` method in `server/tests-legacy/**` has no ledger row, or a ledger row names a method that its legacy file no longer contains;
   - a `RETAINED` or `ADAPTED` row names a method missing from its file at the original path;
   - a `MIGRATED` or `SUPERSEDED` row names a replacement `File#method` that does not exist under `server/tests/`, or a `SUPERSEDED` row cites no requirement;
@@ -325,7 +325,7 @@ These rules bind every task below.
     - a row owned by an earlier phase lacks `Verified at`.
     
     The phase order is Foundational, US2, US1, US3, US5, US4, US6, US7. The value `final` requires every row to be non-`PENDING` with a `Verified at` value.
-- [ ] T135 [P] Create the statement-budget guard (R22) in `server/tests/performance/statement-budgets.properties`, `server/tests/support/StatementBudgets.java`, and `server/tests/performance/StatementBudgetFileTest.java`:
+- [X] T135 [P] Create the statement-budget guard (R22) in `server/tests/performance/statement-budgets.properties`, `server/tests/support/StatementBudgets.java`, and `server/tests/performance/StatementBudgetFileTest.java`:
   - **File**: one ceiling per operation and counter, such as `scan.warm.statements=2`, plus its design value, such as `scan.warm.statements.design=2`. Initial values are the design budgets in research R22 and plan.md *Key flows and statement budgets*.
   - **Loader**: `StatementBudgets.assertWithin(key, actual)` fails when `actual` exceeds the ceiling, and prints the actual value and the ceiling of every check. The file is read relative to the working directory of `run-tests.sh`.
   - **Revision rule**: a ceiling may exceed its design value only with `<key>.evidence=<label>`. The label names an A/B record in `load-client/reports/microservices-architecture/checkpoints.md`, produced by `server/benchmark-compare.ps1` (T136). That record must show higher `totalTransactions` beyond noise, with no measurable regression in p99 latency or lock contention (R22).
@@ -334,7 +334,7 @@ These rules bind every task below.
     - a ceiling above its design value lacks evidence, or names a label that is not in `checkpoints.md`.
     
     Lowering a ceiling needs no evidence.
-- [ ] T136 [P] Create `server/benchmark-compare.ps1` for interleaved A/B measurement (R22):
+- [X] T136 [P] Create `server/benchmark-compare.ps1` for interleaved A/B measurement (R22):
   - **Parameters**:
     - `-Workload default|stress` and `-Label`;
     - `-VariantA` and `-VariantB`, each an `-ExtraEnv` hashtable for `benchmark-microservices.ps1`;
@@ -354,7 +354,7 @@ These rules bind every task below.
     2. **Close**: otherwise, run up to `-MaxPairs`. Decide on `totalTransactions` only if U is at or below the one-sided 5% critical value for that number of pairs (U ≤ 4 for 5 against 5).
     3. **Tie**: otherwise, compare Scan and Complete p99, then resource use, and decide on a metric only when its ranges do not overlap. If none decides, keep the simpler or incumbent variant.
   - **Output**: `load-client/reports/microservices-architecture/compare/<label>/compare.json`, plus a Markdown row to paste into `checkpoints.md`: variants, pairs, medians, ranges, U, decision, and the deciding metric.
-- [ ] T137 Verify the foundation and run its parity gate with `server/run-tests.sh`:
+- [X] T137 Verify the foundation and run its parity gate with `server/run-tests.sh`:
   - Run `server/build.sh` and `server/build-tests.sh`, then `PARITY_GATE=Foundational server/run-tests.sh`. Set `SERVER_BASE_URL` against the pre-migration deployment, so the live retained tests run too.
   - The whole suite must pass: every `RETAINED` and `ADAPTED` test, every legacy test that still compiles, and T024–T027, T134, and T135.
   - Record `T137` in `Verified at` for every row whose test passed.
@@ -371,29 +371,29 @@ These rules bind every task below.
 
 ### Tests for User Story 2 ⚠️ write first; they must fail before implementation
 
-- [ ] T028 [P] [US2] Write `server/tests/rpc/InventoryCatalogContractTest.java`. Run an in-process `InventoryGrpcService` over an `InventoryTestSchema` seeded with the deterministic catalog, and assert that:
+- [X] T028 [P] [US2] Write `server/tests/rpc/InventoryCatalogContractTest.java`. Run an in-process `InventoryGrpcService` over an `InventoryTestSchema` seeded with the deterministic catalog, and assert that:
   - `GetCatalogVersion` returns the seeded version and `product_count` 2000;
   - `GetCatalog` returns 2,000 products in ascending SKU order with exact `price_cents` (SKU-000001 → 85);
   - after `catalog_meta.catalog_version` and one name change in the database, the next `GetCatalogVersion` returns the new version and `GetCatalog` shows the new name (cache reload, R8);
   - `StoreQueryService.listItems` serves the same cached catalog.
-- [ ] T029 [P] [US2] Write `server/tests/database/JdbcProductReplicaStoreTest.java`. Assert that:
+- [X] T029 [P] [US2] Write `server/tests/database/JdbcProductReplicaStoreTest.java`. Assert that:
   - `replace` writes every product row plus the meta row in one commit;
   - `load` returns that snapshot, and a null meta version means unusable;
   - a failed `replace` leaves the previous replica intact.
-- [ ] T030 [P] [US2] Write `server/tests/unit/transaction/ProductCatalogReplicaTest.java` with fake `InventoryGateway` and `ProductReplicaStore`. Assert that:
+- [X] T030 [P] [US2] Write `server/tests/unit/transaction/ProductCatalogReplicaTest.java` with fake `InventoryGateway` and `ProductReplicaStore`. Assert that:
   - startup serves the durable replica while Inventory is down;
   - a refresh fetches only when the version differs;
   - the in-memory snapshot swaps only after the store commit;
   - a never-populated replica is unusable and retries every 1 s;
   - failures back off from 1 s to 30 s;
   - `CATALOG_REFRESH_SECONDS` is honored.
-- [ ] T031 [P] [US2] Write `server/tests/unit/transaction/TransactionStateCacheTest.java`. Assert that:
+- [X] T031 [P] [US2] Write `server/tests/unit/transaction/TransactionStateCacheTest.java`. Assert that:
   - `getOrLoad` calls the loader once, and entries change only through post-commit update methods;
   - `invalidate` removes the entry, so the next access reloads; this is the required step after a `commitOutcomeUnknown` failure;
   - every read or update of an entry requires the caller to hold that transaction's lock from `TransactionLocks`, and fails otherwise;
   - COMPLETED entries are evicted, and the LRU cap is enforced;
   - `TRANSACTION_CACHE_MAX_ENTRIES=0` loads fresh on every access.
-- [ ] T138 [P] [US2] Write `server/tests/unit/transaction/TransactionLocksTest.java` (R19). Assert that:
+- [X] T138 [P] [US2] Write `server/tests/unit/transaction/TransactionLocksTest.java` (R19). Assert that:
   - `lockFor(id)` returns the same lock object for an ID before and after its cache entry is evicted, invalidated, or reloaded, and before and after evictions of other IDs;
   - 64 threads working on 8 transaction IDs, with a cache cap of 1 forcing evictions on almost every access, never put two threads inside the same transaction's critical section at once, measured with a per-ID counter;
   - locks for different IDs are independent apart from stripe collisions, and the production stripe count is the fixed power of two 4,096;
@@ -401,27 +401,27 @@ These rules bind every task below.
     - every acquisition records `transaction.lock.wait` and every release records `transaction.lock.hold`;
     - an acquisition that cannot take the lock immediately increments `transaction.lock.contended`;
     - contention is attributed to the same transaction or, when the holder is a different transaction on the same stripe, to `transaction.lock.collisions`. The test uses the test-only stripe-count constructor to force both cases deterministically.
-- [ ] T032 [P] [US2] Write `server/tests/database/JdbcScanStoreTest.java`, migrating `server/tests/database/JdbcAcceptedScanStoreTest.java`, and update its ledger rows. Assert that:
+- [X] T032 [P] [US2] Write `server/tests/database/JdbcScanStoreTest.java`, migrating `server/tests/database/JdbcAcceptedScanStoreTest.java`, and update its ledger rows. Assert that:
   - `appendScan` runs the guarded UPDATE and the `accepted_scan` INSERT in one commit. This covers `eachSuccessfulScanCommitsLineTotalAndUnpositionedEventTogether`: the totals and the undelivered event commit together.
   - an SQL failure in either statement leaves neither. This covers the SQL half of `invalidSkuAndSqlFailureLeaveNoPartialScan`; T036 covers the invalid-SKU half.
   - a wrong expected `item_count`, a non-OPEN status, or a non-null `active_attempt_number` gives `GUARD_MISS` and writes nothing;
   - concurrent `appendScan` calls with the same expectation give exactly one OK, and every committed row has a distinct `scan_sequence`. This covers the store half of `concurrentScansCommitDistinctUnpositionedEvents`; T036 covers the service half.
   - `scan_sequence` equals the new `item_count`, and the row stores the supplied captured price and name. T033 and T036 cover `repeatedSkuKeepsFirstCapturedPriceAfterCatalogChange`.
   - a deadlock retries only before commit, and a failing commit raises `commitOutcomeUnknown` without a retry, for both `FaultingConnections` commit faults.
-- [ ] T033 [P] [US2] Write `server/tests/database/JdbcTransactionStoreTest.java`, migrating the transaction parts of `server/tests/database/JdbcStoreAdaptersTest.java`. Assert that:
+- [X] T033 [P] [US2] Write `server/tests/database/JdbcTransactionStoreTest.java`, migrating the transaction parts of `server/tests/database/JdbcStoreAdaptersTest.java`. Assert that:
   - `insertOpen` stores the service-supplied `started_at`;
   - `findById` returns status, `item_count`, total, and `started_at`;
   - `loadState` returns the row plus lines grouped from `accepted_scan`: quantity equals count, with the first captured price and name even after a later catalog change. This is the cold half of `JdbcAcceptedScanStoreTest#repeatedSkuKeepsFirstCapturedPriceAfterCatalogChange`.
   - an unknown ID returns empty;
   - SQL failures surface as `StoreFailure`, with no JDBC type in the store interface. This is the transaction half of `sqlFailuresAreWrappedAsTransportNeutralStoreFailures`.
-- [ ] T034 [P] [US2] Write `server/tests/database/InventoryReadAdaptersTest.java`, migrating the inventory parts of `server/tests/database/JdbcStoreAdaptersTest.java` with `JdbcCatalogStore` and `JdbcInventoryStore` over `InventoryTestSchema`. Assert:
+- [X] T034 [P] [US2] Write `server/tests/database/InventoryReadAdaptersTest.java`, migrating the inventory parts of `server/tests/database/JdbcStoreAdaptersTest.java` with `JdbcCatalogStore` and `JdbcInventoryStore` over `InventoryTestSchema`. Assert:
   - the catalog in SKU order;
   - low stock with an inclusive threshold, in SKU order, with default threshold 50 and override behavior;
   - SQL failures surface as `StoreFailure`, the inventory half of `sqlFailuresAreWrappedAsTransportNeutralStoreFailures`.
 
   Then, together with T033, set both `JdbcStoreAdaptersTest` rows to `MIGRATED`.
-- [ ] T035 [P] [US2] Adapt `server/tests/unit/transaction/StoreQueryServiceTest.java` in place, keeping its three methods (ledger: `ADAPTED`). `listItems` is served from `CatalogCache` through fake catalog and meta stores, while `listLowStock` still reads `InventoryStore` on every call.
-- [ ] T036 [P] [US2] Rewrite `server/tests/unit/transaction/TransactionServiceTest.java` for the new collaborators, using fakes. First copy the original to `server/tests-legacy/unit/transaction/TransactionServiceTest.java` as the parity reference. Assert that:
+- [X] T035 [P] [US2] Adapt `server/tests/unit/transaction/StoreQueryServiceTest.java` in place, keeping its three methods (ledger: `ADAPTED`). `listItems` is served from `CatalogCache` through fake catalog and meta stores, while `listLowStock` still reads `InventoryStore` on every call.
+- [X] T036 [P] [US2] Rewrite `server/tests/unit/transaction/TransactionServiceTest.java` for the new collaborators, using fakes. First copy the original to `server/tests-legacy/unit/transaction/TransactionServiceTest.java` as the parity reference. Assert that:
   - Start returns OPEN with zero items and a millisecond-precision `startedAt`;
   - Start, Scan, and Lookup survive service reconstruction. This is the non-Complete half of `startScanCompleteAndDurableLookupAcrossServiceReconstruction`; T058 covers the Complete half.
   - Scan precedence is 400, then 404 `TRANSACTION_NOT_FOUND`, then 409 `TRANSACTION_NOT_OPEN`, then 404 `SKU_NOT_FOUND` (FR-020). Each 404 or 409 is confirmed against the store before responding, and a rejected Scan writes nothing. This covers the missing and unknown cases of `reportsMissingUnknownEmptyInsufficientAndDuplicateCases`, and the invalid-SKU half of `JdbcAcceptedScanStoreTest#invalidSkuAndSqlFailureLeaveNoPartialScan`.
@@ -431,14 +431,14 @@ These rules bind every task below.
   - `GUARD_MISS` reloads and re-evaluates;
   - an unusable replica raises `ProductCatalogUnavailableFailure`, not `SKU_NOT_FOUND` (FR-023);
   - Lookup reads the store, not the cache.
-- [ ] T037 [P] [US2] Rewrite `server/tests/unit/transaction/TransactionBoundaryIsolationTest.java` for the new collaborators. First copy the original to `server/tests-legacy/unit/transaction/TransactionBoundaryIsolationTest.java`. Keep both methods:
+- [X] T037 [P] [US2] Rewrite `server/tests/unit/transaction/TransactionBoundaryIsolationTest.java` for the new collaborators. First copy the original to `server/tests-legacy/unit/transaction/TransactionBoundaryIsolationTest.java`. Keep both methods:
   - `publicBusinessContractExposesNoHttpOrJdbcTypes`, unchanged.
   - `serviceUsesOnlyDurableStoreBoundariesWithoutProcessBasketAuthority`:
     - there is still exactly one constructor, and the test asserts its exact parameter-type array, which T058 updates when Complete is delegated;
     - every field is final;
     - `TransactionService` has no `Map` or `ConcurrentHashMap` field.
   - The ledger records the equivalence note: the cache is a rebuildable projection behind guarded writes, and T039 and T139–T141 prove that it holds no basket authority (FR-057). T027 additionally keeps mutable maps out of every business service, so only the designated cache components hold in-memory state.
-- [ ] T038 [P] [US2] Write `server/tests/performance/ScanStatementBudgetTest.java` (R22). Use `CountingConnections` and `FaultingConnections` through the pool decorator, an in-process `TransactionService` over `TransactionTestSchema`, and a fake `InventoryGateway` that fails if called.
+- [X] T038 [P] [US2] Write `server/tests/performance/ScanStatementBudgetTest.java` (R22). Use `CountingConnections` and `FaultingConnections` through the pool decorator, an in-process `TransactionService` over `TransactionTestSchema`, and a fake `InventoryGateway` that fails if called.
   - **Strict, exact, gating**:
     - a Scan's response is produced only after its commit returns: with the commit delayed 300 ms, no result is available before the commit completes;
     - a commit failure of either kind yields a failure and no acknowledgement;
@@ -448,49 +448,49 @@ These rules bind every task below.
     - a warm Scan's statements (design 2: 1 UPDATE, 1 INSERT), SELECTs (design 0), commits (design 1), and `setAutoCommit` or `setTransactionIsolation` calls (design 0);
     - Start's statements (design 1) and SELECTs (design 0);
     - a cold Scan's extra reads (design 2), once per load.
-- [ ] T039 [P] [US2] Write `server/tests/performance/TransactionCacheCorrectnessTest.java` (R19). The database's guarded writes must decide every outcome.
+- [X] T039 [P] [US2] Write `server/tests/performance/TransactionCacheCorrectnessTest.java` (R19). The database's guarded writes must decide every outcome.
   - Change the row behind a warm cache: set status COMPLETED, set `active_attempt_number`, or change `item_count`. The next Scan must give the same outcome as with `TRANSACTION_CACHE_MAX_ENTRIES=0`, the guarded-write miss counter must increase, and the entry must reload.
   - A stale-OPEN cache plus an unknown SKU must still answer 409 when the database says COMPLETED (error confirmation, R19).
   - A scripted sequence must produce identical responses and identical rows with the cache on and off.
   - With the cache on, no write the database rejected is acknowledged: every 200 has its `accepted_scan` row.
-- [ ] T139 [P] [US2] Write `server/tests/performance/CacheEvictionRaceTest.java` (R19). Run an in-process `TransactionService` over `TransactionTestSchema` with `TRANSACTION_CACHE_MAX_ENTRIES=2`. 32 threads issue Scans and Lookups across 8 OPEN transactions in random order for 10 s, so entries are evicted and reloaded while other requests for the same transaction are in flight. Assert that:
+- [X] T139 [P] [US2] Write `server/tests/performance/CacheEvictionRaceTest.java` (R19). Run an in-process `TransactionService` over `TransactionTestSchema` with `TRANSACTION_CACHE_MAX_ENTRIES=2`. 32 threads issue Scans and Lookups across 8 OPEN transactions in random order for 10 s, so entries are evicted and reloaded while other requests for the same transaction are in flight. Assert that:
   - per transaction, `item_count` equals the number of `accepted_scan` rows, sequences are contiguous from 1, and `total_amount` equals the sum of captured prices;
   - every 200 response has exactly one row, and every row has exactly one 200 response;
   - `TransactionLocks` never admits two holders for one transaction, measured with an instrumented counter;
   - the final cached state equals a fresh reload from the database;
   - **collisions affect performance only**: the same workload runs a second time with the test-only stripe count of 1, so every pair of transactions collides. It must finish within its time limit with no deadlock, satisfy every invariant above, and give the same per-transaction outcomes as the 4,096-stripe run. Only `transaction.lock.collisions` and lock wait time may differ.
-- [ ] T140 [P] [US2] Write `server/tests/performance/MultiInstanceTransactionTest.java` (R19, rule 7). Run two independent in-process `TransactionService` instances, each with its own cache and locks, over one `TransactionTestSchema`, and send concurrent Scans for the same transactions through both. Assert that:
+- [X] T140 [P] [US2] Write `server/tests/performance/MultiInstanceTransactionTest.java` (R19, rule 7). Run two independent in-process `TransactionService` instances, each with its own cache and locks, over one `TransactionTestSchema`, and send concurrent Scans for the same transactions through both. Assert that:
   - every response is one the spec allows, and every acknowledged Scan has its row;
   - the per-transaction invariants of T139 hold;
   - guarded-write misses are counted, and the instance that misses reloads and re-evaluates;
   - every 404 or 409 from either instance is confirmed against the database.
 
   This shows that the database, not either cache, decides outcomes. The deployment runs one instance, but no guarantee may depend on that (Implementation Rule 3).
-- [ ] T141 [P] [US2] Write `server/tests/performance/AmbiguousCommitReconcileTest.java` (R19). Use `FaultingConnections` to make one Scan commit fail in each of two ways: before the commit, and after a commit that succeeded. In both cases, assert that:
+- [X] T141 [P] [US2] Write `server/tests/performance/AmbiguousCommitReconcileTest.java` (R19). Use `FaultingConnections` to make one Scan commit fail in each of two ways: before the commit, and after a commit that succeeded. In both cases, assert that:
   - the Scan answers 500 `INTERNAL_ERROR` and is not acknowledged;
   - the cache entry is invalidated before the transaction's lock is released;
   - the next request for that transaction reloads it from the database before any mutation, observed as one cold load;
   - the next Scan gets `scan_sequence` equal to the durable `item_count` plus 1, so there is no duplicate sequence, no gap, and no lost row, whichever way the commit went;
   - other transactions' entries are unaffected.
-- [ ] T040 [P] [US2] Write `server/tests/performance/CacheRebuildAfterRestartTest.java`. With Inventory stopped, restart the Transaction process through `ServiceProcesses`. Assert that:
+- [X] T040 [P] [US2] Write `server/tests/performance/CacheRebuildAfterRestartTest.java`. With Inventory stopped, restart the Transaction process through `ServiceProcesses`. Assert that:
   - the product snapshot loads from `product_replica`, and scans succeed with the correct names and prices;
   - the lazily rebuilt transaction cache gives the same `itemCount`, `runningTotal`, and lines as before the restart.
-- [ ] T042 [P] [US2] Write `server/tests/integration/TransactionRestartDurabilityTest.java` for the per-schema topology. First move the original to `server/tests-legacy/integration/TransactionRestartDurabilityTest.java`. Migrate `failedDatabaseWriteReturnsInternalErrorWithoutAcknowledgingScan` with every assertion. T142 migrates the two methods that need Complete.
-- [ ] T043 [P] [US2] Write `server/tests/integration/ScanWithoutPeersTest.java` covering US2 scenarios 1, 2, 5, and 6 with service processes:
+- [X] T042 [P] [US2] Write `server/tests/integration/TransactionRestartDurabilityTest.java` for the per-schema topology. First move the original to `server/tests-legacy/integration/TransactionRestartDurabilityTest.java`. Migrate `failedDatabaseWriteReturnsInternalErrorWithoutAcknowledgingScan` with every assertion. T142 migrates the two methods that need Complete.
+- [X] T043 [P] [US2] Write `server/tests/integration/ScanWithoutPeersTest.java` covering US2 scenarios 1, 2, 5, and 6 with service processes:
   - Stop Inventory and Analytics after the replica loads. Start, Scan, and Lookup succeed, including after a Transaction restart.
   - Scanning leaves stock unchanged (`InventoryTestSchema.stock`).
   - Rejected scans (unknown SKU, completed transaction) write no `accepted_scan` row.
   - Accepted rows keep `delivered_at` NULL.
-- [ ] T105 [P] [US2] Rewrite `server/tests/contract/LowStockEndpointTest.java` for Inventory's own schema. First move the original to `server/tests-legacy/contract/LowStockEndpointTest.java`. Keep both methods with every assertion:
+- [X] T105 [P] [US2] Rewrite `server/tests/contract/LowStockEndpointTest.java` for Inventory's own schema. First move the original to `server/tests-legacy/contract/LowStockEndpointTest.java`. Keep both methods with every assertion:
   - `thresholdsAreInclusivePerSkuAndOverridesAreRequestLocal`: default threshold 50, the override, the inclusive boundary, and SKU order. Stock fixtures change in `cs6510_inventory` with Inventory's own credentials (`INVENTORY_DB_USER`, `INVENTORY_DB_PASSWORD`), and every fixture change is restored so the invariants hold.
   - `rejectsInvalidThresholdsAndUnmatchedRoutes`: `INVALID_THRESHOLD`, wrong methods, and unmatched paths.
 
 ### Implementation for User Story 2
 
-- [ ] T044 [P] [US2] Create the Inventory catalog cache in `server/inventory/src/inventory/CatalogCache.java` and `server/inventory/src/database/JdbcCatalogMetaStore.java` (R8):
+- [X] T044 [P] [US2] Create the Inventory catalog cache in `server/inventory/src/inventory/CatalogCache.java` and `server/inventory/src/database/JdbcCatalogMetaStore.java` (R8):
   - `server/inventory/src/database/JdbcCatalogMetaStore.java` reads the `catalog_meta` singleton.
   - `server/inventory/src/inventory/CatalogCache.java` holds an immutable snapshot (version plus products in SKU order) loaded at construction. `currentVersion()` re-reads `catalog_meta` and reloads the snapshot on a change. `snapshot()` returns the cached snapshot. Stock is never cached.
-- [ ] T045 [US2] Wire the catalog cache into Inventory through `server/inventory/src/inventory/StoreQueryService.java`, `server/inventory/src/rpc/InventoryGrpcService.java`, and `server/inventory/src/inventory/InventoryMain.java`:
+- [X] T045 [US2] Wire the catalog cache into Inventory through `server/inventory/src/inventory/StoreQueryService.java`, `server/inventory/src/rpc/InventoryGrpcService.java`, and `server/inventory/src/inventory/InventoryMain.java`:
   - `server/inventory/src/inventory/StoreQueryService.java`: serve `listItems` from `CatalogCache`; low stock still reads `JdbcInventoryStore`.
   - Create `server/inventory/src/rpc/InventoryGrpcService.java` with `GetCatalogVersion` and `GetCatalog`. `price_cents` is price × 100, exactly, in SKU order. The checkout RPCs return UNIMPLEMENTED until T069.
   - Rewire `server/inventory/src/inventory/InventoryMain.java`:
@@ -499,20 +499,20 @@ These rules bind every task below.
     - `MetricsReporter.start("inventory")`;
     - a shutdown hook that stops HTTP, then gRPC, then the reporter, then the pool;
     - keep `HttpServer.create`, `createContext(`, `newVirtualThreadPerTaskExecutor`, `new ConnectionPool(`, and `addShutdownHook` for `CompositionRootTest`.
-- [ ] T046 [P] [US2] Create `server/transaction/src/database/ProductReplicaStore.java` and `JdbcProductReplicaStore.java` (R4):
+- [X] T046 [P] [US2] Create `server/transaction/src/database/ProductReplicaStore.java` and `JdbcProductReplicaStore.java` (R4):
   - `load()` returns empty when the meta version is NULL.
   - `replace(version, products)` runs in one `JdbcUnitOfWork`: DELETE `product_replica`, a batched multi-row INSERT, then UPDATE `product_replica_meta` with version, count, and `refreshed_at`.
-- [ ] T047 [P] [US2] Create the Inventory gateway port `server/transaction/src/transaction/InventoryGateway.java` and its gRPC adapter `server/transaction/src/rpc/GrpcInventoryGateway.java`:
+- [X] T047 [P] [US2] Create the Inventory gateway port `server/transaction/src/transaction/InventoryGateway.java` and its gRPC adapter `server/transaction/src/rpc/GrpcInventoryGateway.java`:
   - Port `server/transaction/src/transaction/InventoryGateway.java` with `catalogVersion()` and `catalog()`.
   - `server/transaction/src/rpc/GrpcInventoryGateway.java` implements it over a reused channel, with deadlines of 2 s (version) and 5 s (catalog). `RpcStatusClassifier` maps uncertain statuses to a new `server/transaction/src/transaction/DependencyUnavailableFailure.java`.
-- [ ] T048 [US2] Create the in-memory catalog snapshot `server/transaction/src/transaction/ProductCatalogReplica.java` and its refresher `server/transaction/src/transaction/CatalogReplicaRefresher.java` (R4):
+- [X] T048 [US2] Create the in-memory catalog snapshot `server/transaction/src/transaction/ProductCatalogReplica.java` and its refresher `server/transaction/src/transaction/CatalogReplicaRefresher.java` (R4):
   - `server/transaction/src/transaction/ProductCatalogReplica.java`: a volatile immutable snapshot with `lookup(sku)` and `usable()`.
   - `server/transaction/src/transaction/CatalogReplicaRefresher.java`, a daemon:
     - loads the durable replica at startup;
     - every `CATALOG_REFRESH_SECONDS` (30), compares Inventory's version with the stored one, and on a change or an empty replica, fetches, calls `replace`, then swaps;
     - retries every 1 s while never populated, and backs off from 1 s to 30 s on failure;
     - records the `transaction.replica.refresh` metric.
-- [ ] T049 [P] [US2] Create `server/transaction/src/transaction/TransactionStateCache.java` and `server/transaction/src/transaction/TransactionLocks.java` (R19):
+- [X] T049 [P] [US2] Create `server/transaction/src/transaction/TransactionStateCache.java` and `server/transaction/src/transaction/TransactionLocks.java` (R19):
   - **`TransactionLocks`**:
     - a fixed array of 4,096 `ReentrantLock` stripes, indexed by the spread hash of the transaction ID, plus a test-only constructor that takes a smaller power-of-two stripe count;
     - stripes are never created, evicted, or replaced, so evicting or invalidating a cache entry can never produce a second lock for one transaction;
@@ -525,7 +525,7 @@ These rules bind every task below.
   - **Methods**: `getOrLoad(txId, loader)`, post-commit updates, `invalidate`, and `evict`. Each checks that the caller holds `TransactionLocks.lockFor(txId)`, and callers read an entry only after acquiring that lock.
   - The LRU cap comes from `TRANSACTION_CACHE_MAX_ENTRIES` (default 100000; 0 disables caching).
   - Counters for hits, misses, guard misses, and invalidations.
-- [ ] T050 [P] [US2] Replace the scan store with `server/transaction/src/database/JdbcScanStore.java` and extend `server/transaction/src/database/JdbcTransactionStore.java` (R10, R19; contracts/scan-event-delivery.md §1):
+- [X] T050 [P] [US2] Replace the scan store with `server/transaction/src/database/JdbcScanStore.java` and extend `server/transaction/src/database/JdbcTransactionStore.java` (R10, R19; contracts/scan-event-delivery.md §1):
   - Replace `server/transaction/src/database/AcceptedScanStore.java` and `JdbcAcceptedScanStore.java` with `ScanStore.java` and `JdbcScanStore.java`.
   - `appendScan(txId, expectedItemCount, newTotal, row)` runs, in one `JdbcUnitOfWork`:
     1. `UPDATE transaction SET item_count=?, total_amount=? WHERE transaction_id=? AND item_count=? AND status='OPEN' AND active_attempt_number IS NULL`;
@@ -548,7 +548,7 @@ These rules bind every task below.
     - `integration/IndependentServiceDeploymentTest` (T112);
     - `database/JdbcAcceptedScanStoreTest` (T032, T033, T036);
     - `database/JdbcStoreAdaptersTest` (T033, T034).
-- [ ] T051 [US2] Rewrite Start, Scan, and Lookup in `server/transaction/src/transaction/TransactionService.java` (R19, FR-019–FR-023):
+- [X] T051 [US2] Rewrite Start, Scan, and Lookup in `server/transaction/src/transaction/TransactionService.java` (R19, FR-019–FR-023):
   - Start uses a millisecond-truncated service timestamp and caches the entry.
   - Scan acquires `TransactionLocks.lockFor(txId)` first, and only then reads or loads the cache entry:
     - it enforces validation precedence, confirming 404 and 409 against the database first;
@@ -560,7 +560,7 @@ These rules bind every task below.
   - Lookup reads the store.
   - Delete `server/transaction/src/transaction/database/JdbcCatalogStore.java` and `server/transaction/src/database/ScanProfiler.java`.
   - Replace the profiler calls in `server/transaction/src/api/TransactionHttpHandler.java` with `PerfMetrics` timers `transaction.http.start|scan|complete|get`, leaving responses unchanged.
-- [ ] T052 [US2] Rewire `server/transaction/src/transaction/TransactionMain.java`:
+- [X] T052 [US2] Rewire `server/transaction/src/transaction/TransactionMain.java`:
   - `DatabaseConfig.fromEnvironment("TRANSACTION", "cs6510_transaction", "cs6510_transaction_svc", 32, 64)` with `new ConnectionPool(...)`.
   - `JdbcProductReplicaStore`, `ProductCatalogReplica`, and `CatalogReplicaRefresher`, using `GrpcInventoryGateway` on `INVENTORY_GRPC_TARGET` (127.0.0.1:9092).
   - `TransactionLocks`, `TransactionStateCache`, and `TransactionService`. Keep the existing completion store temporarily until T074.
@@ -572,10 +572,10 @@ These rules bind every task below.
     - `integration/StockConservationTest` (T062);
     - `integration/CompletionDurabilityTest` (T063);
     - `integration/ResetBaselineTest` (T113).
-- [ ] T053 [US2] Verify US2 and run its parity gate with `server/run-tests.sh`:
+- [X] T053 [US2] Verify US2 and run its parity gate with `server/run-tests.sh`:
   - Run `server/build.sh`, `server/build-tests.sh`, and `PARITY_GATE=US2 server/run-tests.sh` against MySQL with the new Inventory and Transaction services.
   - The whole suite must pass, including T028–T040, T042, T043, T105, and T138–T141, apart from the exception below.
-  - **Exception**: the live tests that call Complete cannot pass between T052 and T074, because Complete moves to the Saga in US1. These are `contract/TransactionLifecycleTest` and `contract/TransactionLookupTest#getCompletedTransaction_fallsBackToPersistedTotals`. The US1 gate (T146) verifies them.
+  - **Exception**: the live tests that call Complete cannot pass between T052 and T074, because Complete moves to the Saga in US1. These are `contract/TransactionLifecycleTest`, `contract/TransactionLookupTest#getCompletedTransaction_fallsBackToPersistedTotals`, and `contract/LowStockEndpointTest#thresholdsAreInclusivePerSkuAndOverridesAreRequestLocal`, whose Complete step checks that a sale lowers stock. The US1 gate (T146) verifies them.
   - Then perform the US2 Independent Test through `http://localhost:8081`, and confirm that the `accepted_scan` rows are undelivered.
   - Record `T053` in `Verified at` for every row whose test passed.
 
@@ -596,7 +596,7 @@ The receipt and every error match the established contract, with captured prices
 
 ### Tests for User Story 1 ⚠️ write first; they must fail before implementation
 
-- [ ] T054 [P] [US1] Write `server/tests/rpc/InventoryCheckoutContractTest.java` (contracts/grpc-internal-contracts.md §ApplyCheckout). Run an in-process `InventoryGrpcService` over `InventoryTestSchema`, and assert:
+- [X] T054 [P] [US1] Write `server/tests/rpc/InventoryCheckoutContractTest.java` (contracts/grpc-internal-contracts.md §ApplyCheckout). Run an in-process `InventoryGrpcService` over `InventoryTestSchema`, and assert:
   - **Outcomes**:
     - APPLIED deducts every line once;
     - INSUFFICIENT_STOCK names the first short SKU in SKU order and deducts nothing;
@@ -612,14 +612,14 @@ The receipt and every error match the established contract, with captured prices
   - **Integrity**: a second APPLIED attempt for the same transaction returns FAILED_PRECONDITION.
   - **Outcome query**: `GetCheckoutOutcome` returns NOT_PROCESSED for unknown keys.
   - **Multiple instances** (Constitution II): run two `InventoryGrpcService` instances, each with its own catalog cache and pool, over one schema. The duplicate and last-unit races give the same results when split across instances: one deduction, no overselling, final stock 0.
-- [ ] T055 [P] [US1] Write `server/tests/database/JdbcCheckoutOperationStoreTest.java`, migrating the inventory side of `server/tests-legacy/database/JdbcCheckoutCompletionStoreTest.java`. Assert:
+- [X] T055 [P] [US1] Write `server/tests/database/JdbcCheckoutOperationStoreTest.java`, migrating the inventory side of `server/tests-legacy/database/JdbcCheckoutCompletionStoreTest.java`. Assert:
   - APPLIED deducts every line exactly once and stores the canonical `lines` text, and a replay deducts nothing. This is the inventory half of `commitsPersistedDistinctLinesOnceAndRejectsDuplicate`.
   - INSUFFICIENT_STOCK leaves every stock row unchanged. This is the inventory half of `insufficientStockRollsBackStatusAndEveryDecrement`.
   - two attempts racing for the last unit give one APPLIED, one INSUFFICIENT_STOCK, and stock 0 (`contendingCompletionsCannotBothSellLastUnit`);
   - the CHECK constraint blocks negative stock, and deadlocks retry before commit;
   - restore follows the state table: APPLIED→RESTORED; RESTORED→already restored; REJECTED or BLOCKED→nothing to restore; absent→BLOCKED;
   - apply after RESTORED or BLOCKED returns STOCK_RESTORED.
-- [ ] T056 [P] [US1] Write `server/tests/database/JdbcCheckoutAttemptStoreTest.java`, migrating the transaction side of `server/tests-legacy/database/JdbcCheckoutCompletionStoreTest.java`. Together with T055, set its three ledger rows to `MIGRATED`. Assert that:
+- [X] T056 [P] [US1] Write `server/tests/database/JdbcCheckoutAttemptStoreTest.java`, migrating the transaction side of `server/tests-legacy/database/JdbcCheckoutCompletionStoreTest.java`. Together with T055, set its three ledger rows to `MIGRATED`. Assert that:
   - `begin` is guarded (OPEN, no active attempt, expected `item_count`, expected `attempt_count`). In one commit, it inserts the PENDING attempt with `lines`, totals, and `next_retry_at = created_at + CHECKOUT_RESPONSE_BUDGET_MS`. A stale expected `attempt_count` gives `GUARD_MISS` and writes nothing, never a duplicate-key failure.
   - `recordClientOutcome(key, outcome)` updates only an attempt whose `client_outcome` is `NONE`, and changes nothing otherwise;
   - `complete` is guarded by `active_attempt_number`, and settles the attempt and the transaction together with the supplied `completed_at`.
@@ -627,7 +627,7 @@ The receipt and every error match the established contract, with captured prices
   - `reopen` clears the active attempt, records the reason and `rejected_sku`, and leaves the transaction OPEN with its basket. This is the transaction half of `insufficientStockRollsBackStatusAndEveryDecrement`.
   - `markPendingError` changes only `NONE` to `PENDING_ERROR` on PENDING attempts, and sets `next_retry_at` to now in the same UPDATE;
   - `findPending(dueBefore, afterKey, limit)` returns at most `limit` rows in `(next_retry_at, transaction_id, attempt_number)` order with keyset pagination. Its `EXPLAIN` shows a range scan on the `(state, next_retry_at)` index, not a full scan.
-- [ ] T057 [P] [US1] Write `server/tests/unit/transaction/CheckoutOrchestratorTest.java` with a fake `InventoryGateway`, fake stores, and a fake `RecoverySchedule` (contracts/checkout-saga.md). Assert that:
+- [X] T057 [P] [US1] Write `server/tests/unit/transaction/CheckoutOrchestratorTest.java` with a fake `InventoryGateway`, fake stores, and a fake `RecoverySchedule` (contracts/checkout-saga.md). Assert that:
   - APPLIED runs T3 and returns a receipt built from the cached snapshot and the supplied `completedAt`;
   - INSUFFICIENT_STOCK reopens the basket and answers 409 `INSUFFICIENT_STOCK` with "Insufficient stock for SKU: <sku>";
   - INVALID_REQUEST or STOCK_RESTORED reopens and raises an unmapped failure (500);
@@ -642,12 +642,12 @@ The receipt and every error match the established contract, with captured prices
   - **answering from another actor's settlement**: when a T3 or reopen guard misses because another actor settled the request's own attempt, the request records `SUCCESS` or `REJECTED` with `recordClientOutcome` before it answers 200 or 409. The other actor may be the recovery worker of this or another instance. If that write fails, the request answers 500 instead.
   - FAILED_PRECONDITION never reopens the basket;
   - pre-checks run in the order 404, then 409 `TRANSACTION_NOT_OPEN`, then 409 `EMPTY_BASKET`, each confirmed against the store.
-- [ ] T058 [P] [US1] Extend `server/tests/unit/transaction/TransactionServiceTest.java` with the Complete halves of the legacy methods. Then update the constructor assertion in `server/tests/unit/transaction/TransactionBoundaryIsolationTest.java` for the delegated orchestrator.
+- [X] T058 [P] [US1] Extend `server/tests/unit/transaction/TransactionServiceTest.java` with the Complete halves of the legacy methods. Then update the constructor assertion in `server/tests/unit/transaction/TransactionBoundaryIsolationTest.java` for the delegated orchestrator.
   - Complete after service reconstruction returns the receipt with captured prices. This is the Complete half of `startScanCompleteAndDurableLookupAcrossServiceReconstruction`.
   - An empty basket gives 409 `EMPTY_BASKET`, insufficient stock gives 409 `INSUFFICIENT_STOCK`, and a duplicate Complete gives 409 `TRANSACTION_NOT_OPEN`. These are the Complete cases of `reportsMissingUnknownEmptyInsufficientAndDuplicateCases`.
   - A repeated Complete after COMPLETED makes no gateway call (FR-036).
   - Set the `TransactionServiceTest` and `TransactionBoundaryIsolationTest` ledger rows to `MIGRATED`.
-- [ ] T059 [P] [US1] Write `server/tests/integration/CheckoutSagaTest.java` covering US1 scenarios 1, 2, 5, and 6, with Transaction and Inventory processes over disposable schemas:
+- [X] T059 [P] [US1] Write `server/tests/integration/CheckoutSagaTest.java` covering US1 scenarios 1, 2, 5, and 6, with Transaction and Inventory processes over disposable schemas:
   - Two units of A and one of B give a receipt with captured prices, stock decreases of 2 and 1, and lookup COMPLETED.
   - Insufficient stock gives 409, no stock change, and the transaction stays OPEN. Raising stock, scanning again, and retrying Complete then succeeds. This migrates `ScanCompletionConvergenceTest#failedCompletionLeavesOpenBasketForScanningAndRetry` with every assertion.
   - An unknown transaction gives 404. An empty basket gives 409 `EMPTY_BASKET`, and Inventory reports NOT_PROCESSED.
@@ -656,14 +656,14 @@ The receipt and every error match the established contract, with captured prices
     - Remove a scanned SKU from Inventory's disposable catalog before Complete, so Inventory answers INVALID_REQUEST.
     - Complete returns 500 `INTERNAL_ERROR`, the transaction reopens with its basket, the attempt is REJECTED with that reason, and no stock changes.
     - With the insufficient-stock case above, this covers every compensation that a normal Saga path can trigger.
-- [ ] T060 [P] [US1] Write `server/tests/integration/ConcurrentCompletionTest.java` (US1 scenario 3), migrating `concurrentCompletion_exactlyOneSucceeds_stockNeverNegative` with every assertion. Read and set stock in `cs6510_inventory` with Inventory's own credentials.
-- [ ] T061 [P] [US1] Write `server/tests/integration/DuplicateCompletionTest.java` (US1 scenario 4), migrating `duplicateCompletion_stockDecrementedExactlyOnce` with every assertion. Read stock in `cs6510_inventory` with Inventory's own credentials instead of `cs6510_selfcheckout`.
-- [ ] T062 [P] [US1] Write `server/tests/integration/StockConservationTest.java`, migrating `concurrentCompletions_stockConservation` with every assertion. Account for any fixture stock restore, so that the invariants still hold.
-- [ ] T063 [P] [US1] Write `server/tests/integration/CompletionDurabilityTest.java`, migrating `completedTransaction_committedBeforeResponseReturned` with every assertion. Check the transaction row in `cs6510_transaction` with Transaction's credentials, and stock in `cs6510_inventory` with Inventory's.
-- [ ] T064 [P] [US1] Write `server/tests/rpc/ProtoCompatibilityTest.java` and its baseline `server/tests/rpc/baseline/descriptor-summary.txt` (FR-013):
+- [X] T060 [P] [US1] Write `server/tests/integration/ConcurrentCompletionTest.java` (US1 scenario 3), migrating `concurrentCompletion_exactlyOneSucceeds_stockNeverNegative` with every assertion. Read and set stock in `cs6510_inventory` with Inventory's own credentials.
+- [X] T061 [P] [US1] Write `server/tests/integration/DuplicateCompletionTest.java` (US1 scenario 4), migrating `duplicateCompletion_stockDecrementedExactlyOnce` with every assertion. Read stock in `cs6510_inventory` with Inventory's own credentials instead of `cs6510_selfcheckout`.
+- [X] T062 [P] [US1] Write `server/tests/integration/StockConservationTest.java`, migrating `concurrentCompletions_stockConservation` with every assertion. Account for any fixture stock restore, so that the invariants still hold.
+- [X] T063 [P] [US1] Write `server/tests/integration/CompletionDurabilityTest.java`, migrating `completedTransaction_committedBeforeResponseReturned` with every assertion. Check the transaction row in `cs6510_transaction` with Transaction's credentials, and stock in `cs6510_inventory` with Inventory's.
+- [X] T064 [P] [US1] Write `server/tests/rpc/ProtoCompatibilityTest.java` and its baseline `server/tests/rpc/baseline/descriptor-summary.txt` (FR-013):
   - Generate the baseline once from the initial `contracts.jar` descriptors.
   - Assert that every baseline message field keeps its number, name, and type; every enum value keeps its number; and every RPC keeps its request and response types. Additions are allowed.
-- [ ] T065 [P] [US1] Write `server/tests/performance/CompleteStatementBudgetTest.java` (R22).
+- [X] T065 [P] [US1] Write `server/tests/performance/CompleteStatementBudgetTest.java` (R22).
   - **Strict, exact, gating**:
     - T1 commits before `ApplyCheckout` is sent: with the T1 commit delayed, the fake gateway sees no call until the commit returns;
     - no 200 is produced before the T3 commit returns;
@@ -673,31 +673,31 @@ The receipt and every error match the established contract, with captured prices
     - T1: statements (design 2: 1 UPDATE, 1 INSERT) and commits (design 1);
     - T3: statements (design 2 UPDATEs) and commits (design 1);
     - reopen: statements (design 2 UPDATEs) and commits (design 1).
-- [ ] T066 [P] [US1] Write `server/tests/performance/InventoryApplyStatementBudgetTest.java` (R22).
+- [X] T066 [P] [US1] Write `server/tests/performance/InventoryApplyStatementBudgetTest.java` (R22).
   - **Strict**: the outcome row and the stock UPDATE share one commit, and a replay or a rejection issues no stock UPDATE.
   - **Budget guard**, with keys `inventory.apply.applied.*` and `inventory.apply.rejected.*`, for baskets of 1, 5, and 20 lines:
     - APPLIED: statements (design 3: 1 locking SELECT, 1 INSERT, 1 UPDATE) and commits (design 1);
     - rejected: statements (design 2: 1 SELECT, 1 INSERT) and commits (design 1);
     - the counts must not grow with basket size.
-- [ ] T067 [P] [US1] Write `server/tests/performance/HeldConnectionDuringRpcTest.java`. While a fake `InventoryGateway` blocks inside `ApplyCheckout`, assert that:
+- [X] T067 [P] [US1] Write `server/tests/performance/HeldConnectionDuringRpcTest.java`. While a fake `InventoryGateway` blocks inside `ApplyCheckout`, assert that:
   - the Transaction pool's active count is back at its baseline;
   - another connection can run `SELECT … FROM transaction WHERE transaction_id=? FOR UPDATE NOWAIT` immediately, so no row lock is held (FR-033).
-- [ ] T041 [P] [US1] Write `server/tests/integration/DurableBasketTest.java` for the per-schema topology, with Transaction and Inventory over disposable schemas. Migrate all three legacy methods with every assertion: `completedBasketKeepsCapturedPriceAndRejectsFurtherScansOrCompletion`, `failedCompletionKeepsTheSameOpenBasketAndAllowsAnotherScan`, and `concurrentScansCommitPositiveQuantitiesAndDistinctEvents`. Each one completes a checkout, so the file belongs to US1.
-- [ ] T109 [P] [US1] Write `server/tests/integration/DatabaseOutageContractTest.java`, migrating `failedScanAndCompletionReturnInternalErrorThenCommittedStateRecovers` with every assertion:
+- [X] T041 [P] [US1] Write `server/tests/integration/DurableBasketTest.java` for the per-schema topology, with Transaction and Inventory over disposable schemas. Migrate all three legacy methods with every assertion: `completedBasketKeepsCapturedPriceAndRejectsFurtherScansOrCompletion`, `failedCompletionKeepsTheSameOpenBasketAndAllowsAnotherScan`, and `concurrentScansCommitPositiveQuantitiesAndDistinctEvents`. Each one completes a checkout, so the file belongs to US1.
+- [X] T109 [P] [US1] Write `server/tests/integration/DatabaseOutageContractTest.java`, migrating `failedScanAndCompletionReturnInternalErrorThenCommittedStateRecovers` with every assertion:
   - **During the outage**: Transaction's `transaction` table is unavailable, renamed through `TransactionTestSchema`. Scan and Complete give 500 `INTERNAL_ERROR`, no `accepted_scan` row is written, and stock is unchanged.
   - **After recovery**: Scan gives 200; a Complete during a renewed outage gives 500; the next Complete gives 200, stock drops by one, and lookup shows COMPLETED.
   - **Isolation**: Inventory's routes are unaffected by Transaction's outage.
-- [ ] T142 [P] [US1] Extend `server/tests/integration/TransactionRestartDurabilityTest.java` with the two legacy methods that need Complete, keeping every assertion:
+- [X] T142 [P] [US1] Extend `server/tests/integration/TransactionRestartDurabilityTest.java` with the two legacy methods that need Complete, keeping every assertion:
   - `acknowledgedOpenBasketSurvivesProcessRestartAndCompletesExactlyOnce`: the basket survives a Transaction process restart and completes with the captured receipt, and a repeated Complete gives 409.
   - `publicTransactionErrorsKeepTheirStatusesAndShapes`: the 400, 404, and 409 codes with the `{error, message}` shape, including `EMPTY_BASKET` and `TRANSACTION_NOT_OPEN`.
-- [ ] T143 [P] [US1] Extend `server/tests/performance/TransactionCacheCorrectnessTest.java` and `server/tests/performance/AmbiguousCommitReconcileTest.java` for Complete (R19):
+- [X] T143 [P] [US1] Extend `server/tests/performance/TransactionCacheCorrectnessTest.java` and `server/tests/performance/AmbiguousCommitReconcileTest.java` for Complete (R19):
   - **Stale cache**: change the row behind a warm cache before each guarded write (T1, T3, reopen), including a stale `attempt_count` before T1. Each guard misses, the entry reloads, and the outcome equals the cache-off outcome, with no duplicate-key failure.
   - **Ambiguous T1 commit**, for both `FaultingConnections` faults:
     - the Complete answers 500, the entry is invalidated, a reconcile entry is queued, and the next Complete reloads first;
     - if the first commit happened, the next Complete finds the pending attempt; otherwise, it begins attempt n again;
     - no second PENDING attempt ever exists.
   - **Ambiguous T3 commit**: the retry's guard miss leads to a 200 with the durable `completed_at`, one COMPLETED attempt, and one deduction.
-- [ ] T144 [P] [US1] Extend `server/tests/performance/MultiInstanceTransactionTest.java` for Complete:
+- [X] T144 [P] [US1] Extend `server/tests/performance/MultiInstanceTransactionTest.java` for Complete:
   - Concurrent Completes of one transaction through both instances create exactly one attempt and one Inventory deduction, and give exactly one 200.
   - The other requests give 409 `TRANSACTION_NOT_OPEN`, or 500 while the attempt is pending; T085 later replaces the 500 with waiting.
   - A Scan through one instance during the other instance's pending attempt never joins the frozen basket.
@@ -705,13 +705,13 @@ The receipt and every error match the established contract, with captured prices
 
 ### Implementation for User Story 1
 
-- [ ] T068 [P] [US1] Create `server/inventory/src/database/CheckoutOperationStore.java` and `JdbcCheckoutOperationStore.java`:
+- [X] T068 [P] [US1] Create `server/inventory/src/database/CheckoutOperationStore.java` and `JdbcCheckoutOperationStore.java`:
   - Implement statements 1–5 of contracts/grpc-internal-contracts.md §ApplyCheckout, the §RestoreCheckout table, and `GetCheckoutOutcome`.
   - Deadlocks and lock-wait timeouts retry through `JdbcUnitOfWork`. Exhaustion raises a contention failure (ABORTED).
   - A duplicate primary key reads the recorded row: different lines are a mismatch, RESTORED or BLOCKED gives STOCK_RESTORED, and otherwise the outcome is replayed.
   - A unique `applied_transaction_id` violation raises an integrity failure (FAILED_PRECONDITION).
   - Metrics: `inventory.apply.lockWait` (locking-SELECT duration), `inventory.apply.commit`, and `inventory.apply.retries`.
-- [ ] T069 [US1] Create `server/inventory/src/inventory/CheckoutStockService.java`:
+- [X] T069 [US1] Create `server/inventory/src/inventory/CheckoutStockService.java`:
   - Contract validation.
   - Canonical lines `[{"sku":"…","quantity":n}]`, sorted by SKU with no whitespace.
   - Outcome mapping.
@@ -721,7 +721,7 @@ The receipt and every error match the established contract, with captured prices
   - payload mismatch or an integrity violation gives FAILED_PRECONDITION;
   - `StoreFailure` gives UNAVAILABLE, contention gives ABORTED, and anything unexpected gives INTERNAL;
   - record the `inventory.grpc.apply` metric.
-- [ ] T070 [P] [US1] Create `server/transaction/src/database/CheckoutAttemptStore.java` and `JdbcCheckoutAttemptStore.java` per the contracts/checkout-saga.md Steps table:
+- [X] T070 [P] [US1] Create `server/transaction/src/database/CheckoutAttemptStore.java` and `JdbcCheckoutAttemptStore.java` per the contracts/checkout-saga.md Steps table:
   - `begin`: guarded UPDATE, whose `WHERE` clause includes the expected `attempt_count`, plus INSERT of the attempt with `next_retry_at = created_at + CHECKOUT_RESPONSE_BUDGET_MS`. Recovery therefore leaves a live request's attempt alone until its budget ends.
   - `complete`: guarded UPDATE plus an attempt UPDATE that sets `client_outcome='SUCCESS'` when the request is still being answered.
   - `reopen`, and `markPendingError`, which also sets `next_retry_at` to now.
@@ -730,16 +730,16 @@ The receipt and every error match the established contract, with captured prices
     - `findPending(dueBefore, afterKey, limit)`, keyset-paginated over the `(state, next_retry_at)` index with `LIMIT` (default 100);
     - `findAttempt(key)`;
     - `scheduleRetry(key, nextRetryAt, lastError)`.
-- [ ] T071 [P] [US1] Add `applyCheckout(key, lines, deadline)` and `checkoutOutcome(key)` to `server/transaction/src/transaction/InventoryGateway.java`, and implement them in `server/transaction/src/rpc/GrpcInventoryGateway.java`:
+- [X] T071 [P] [US1] Add `applyCheckout(key, lines, deadline)` and `checkoutOutcome(key)` to `server/transaction/src/transaction/InventoryGateway.java`, and implement them in `server/transaction/src/rpc/GrpcInventoryGateway.java`:
   - The per-call deadline comes from `ResponseBudget`.
   - Results map to Applied, Rejected(reason, sku), StockRestored, Uncertain, PayloadMismatch, or InvalidRequest.
   - Record `transaction.rpc.applyCheckout` latency and status counters.
-- [ ] T145 [P] [US1] Create `server/transaction/src/transaction/RecoverySchedule.java` (R7):
+- [X] T145 [P] [US1] Create `server/transaction/src/transaction/RecoverySchedule.java` (R7):
   - It is an in-memory delay queue of attempt keys with due times, de-duplicated by key.
   - `enqueue(key, dueAt)` and `reconcile(key)` (due now) add entries; `take(timeout)` returns the next due key; `size()` feeds a gauge.
   - US1 only fills it; the recovery worker (T084) consumes it.
   - T084's startup scan rebuilds it from the database, so a crash loses nothing.
-- [ ] T072 [US1] Create `server/transaction/src/transaction/SettlementRegistry.java` and `server/transaction/src/transaction/CheckoutOrchestrator.java`. Implement the contracts/checkout-saga.md steps and response mapping within `CHECKOUT_RESPONSE_BUDGET_MS` (8000) and `INVENTORY_RPC_DEADLINE_MS` (2000):
+- [X] T072 [US1] Create `server/transaction/src/transaction/SettlementRegistry.java` and `server/transaction/src/transaction/CheckoutOrchestrator.java`. Implement the contracts/checkout-saga.md steps and response mapping within `CHECKOUT_RESPONSE_BUDGET_MS` (8000) and `INVENTORY_RPC_DEADLINE_MS` (2000):
   - `SettlementRegistry` holds one settlement future per pending attempt, plus live-request ownership. A settler completes a future only while holding the transaction's stripe lock, after the settlement commit.
   - T1 runs under `TransactionLocks.lockFor(txId)`, which is released before the RPC. Its guard repeats the cached `attempt_count`, so a stale entry leads to a reload instead of a duplicate attempt number.
   - In-request retries happen after 50, 100, 200, and 400 ms.
@@ -750,16 +750,16 @@ The receipt and every error match the established contract, with captured prices
   - On budget expiry, it writes `PENDING_ERROR` (with `next_retry_at` now), enqueues the attempt in `RecoverySchedule` in a `finally` block, then raises `CheckoutPendingFailure`.
   - The receipt comes from the cached snapshot.
   - Metrics: `transaction.complete.t1|t3|budgetExpired|ambiguousCommit`.
-- [ ] T073 [US1] Finish the Complete wiring in `server/transaction/src/transaction/TransactionService.java`:
+- [X] T073 [US1] Finish the Complete wiring in `server/transaction/src/transaction/TransactionService.java`:
   - Delegate Complete to `CheckoutOrchestrator`.
   - Delete `server/transaction/src/database/CheckoutCompletionStore.java` and `JdbcCheckoutCompletionStore.java`.
   - Confirm that `server/transaction/src/api/ApiErrorMapper.java` still maps only `TransactionFailure` codes. These failures therefore become 500 `INTERNAL_ERROR`: `CheckoutPendingFailure`, `ProductCatalogUnavailableFailure`, `DependencyUnavailableFailure`, and the INVALID_REQUEST and STOCK_RESTORED failure.
-- [ ] T074 [US1] Wire `JdbcCheckoutAttemptStore`, `RecoverySchedule`, `SettlementRegistry`, and `CheckoutOrchestrator` into `server/transaction/src/transaction/TransactionMain.java`. Remove the temporary completion store, and read the budget and deadline environment variables.
-- [ ] T146 [US1] Verify US1 and run its parity gate with `server/run-tests.sh`:
+- [X] T074 [US1] Wire `JdbcCheckoutAttemptStore`, `RecoverySchedule`, `SettlementRegistry`, and `CheckoutOrchestrator` into `server/transaction/src/transaction/TransactionMain.java`. Remove the temporary completion store, and read the budget and deadline environment variables.
+- [X] T146 [US1] Verify US1 and run its parity gate with `server/run-tests.sh`:
   - With Transaction and Inventory on their own schemas, run `PARITY_GATE=US1 server/run-tests.sh` with `SERVER_BASE_URL` set.
   - The whole suite must pass, including T041, T054–T067, T109, T142–T144, and the live Complete tests excused at T053.
   - Record `T146` in `Verified at` for every row whose test passed.
-- [ ] T075 [US1] CP1 attribution checkpoint (R22), recorded in `load-client/reports/microservices-architecture/checkpoints.md`:
+- [X] T075 [US1] CP1 attribution checkpoint (R22), recorded in `load-client/reports/microservices-architecture/checkpoints.md`:
   - Run `server/benchmark-microservices.ps1 -Workload default -SkipAnalytics -OutputLabel cp1-default-1`, then repeat with `cp1-default-2`.
   - Record in `checkpoints.md`:
     - the actual client-observed `totalTransactions` of each run, and its change against the CP0 default median (Implementation Rule 6);

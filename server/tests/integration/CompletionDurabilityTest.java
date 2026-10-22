@@ -3,6 +3,7 @@ package integration;
 import api.json.Json;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import support.LiveSchemas;
 
 import java.net.ConnectException;
 import java.net.URI;
@@ -10,7 +11,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Map;
@@ -20,18 +20,16 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Integration test: after a successful completion response, the transaction and inventory
- * rows must already be committed and queryable immediately over a fresh, direct JDBC connection
- * through the layered transaction route (FR-015, Constitution II; US1).
+ * rows must already be committed and queryable immediately over fresh, direct JDBC connections
+ * through the deployed transaction route (FR-015, Constitution II; US1).
  *
- * Requires a running server AND a reachable MySQL instance.
+ * Requires a running deployment. The transaction, its basket record (accepted_scan, which replaced
+ * transaction_line), and its checkout attempt are read in Transaction's schema with Transaction's own
+ * credentials; stock is read in Inventory's schema with Inventory's (R3).
  */
 public class CompletionDurabilityTest {
 
     private static final String BASE_URL = System.getProperty("SERVER_BASE_URL", "http://localhost:8080");
-    private static final String DB_URL   = System.getProperty("DB_URL",
-        "jdbc:mysql://127.0.0.1:3307/cs6510_selfcheckout?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC");
-    private static final String DB_USER  = System.getProperty("DB_USER", "root");
-    private static final String DB_PASS  = System.getProperty("DB_PASS", "");
 
     private static final String STATION = "station-durability-test";
     private static final String SKU_A   = "SKU-000100";
@@ -50,8 +48,8 @@ public class CompletionDurabilityTest {
 
     @Test
     void completedTransaction_committedBeforeResponseReturned() throws Exception {
-        int initialStockA = queryStock(SKU_A);
-        int initialStockB = queryStock(SKU_B);
+        int initialStockA = LiveSchemas.stock(SKU_A);
+        int initialStockB = LiveSchemas.stock(SKU_B);
 
         // Start, scan two distinct SKUs, complete
         String txId = startAndGetId(STATION);
@@ -67,7 +65,7 @@ public class CompletionDurabilityTest {
         assertEquals(txId, receipt.get("transactionId"), "transactionId must match");
 
         // Verify durability via a FRESH DB connection (no caching)
-        try (Connection fresh = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS)) {
+        try (Connection fresh = LiveSchemas.transaction()) {
 
             // 1. Transaction row must be COMPLETED with completed_at set
             try (PreparedStatement ps = fresh.prepareStatement(
@@ -82,9 +80,9 @@ public class CompletionDurabilityTest {
                 }
             }
 
-            // 2. transaction_line rows must exist for both SKUs
+            // 2. The basket's lines must exist for both SKUs: one accepted_scan row per unit
             try (PreparedStatement ps = fresh.prepareStatement(
-                    "SELECT sku, quantity FROM transaction_line WHERE transaction_id = ? ORDER BY sku")) {
+                    "SELECT sku, COUNT(*) AS quantity FROM accepted_scan WHERE transaction_id = ? GROUP BY sku ORDER BY sku")) {
                 ps.setString(1, txId);
                 try (ResultSet rs = ps.executeQuery()) {
                     int rowCount = 0;
@@ -99,27 +97,29 @@ public class CompletionDurabilityTest {
                 }
             }
 
-            // 3. Inventory must be decremented by the scanned quantities
-            assertEquals(initialStockA - 2, queryStock(SKU_A),
-                "Stock for SKU_A must be decremented by 2");
-            assertEquals(initialStockB - 1, queryStock(SKU_B),
-                "Stock for SKU_B must be decremented by 1");
+            // 3. The settled attempt carries the same lines, completed before the response
+            try (PreparedStatement ps = fresh.prepareStatement(
+                    "SELECT state, `lines`, client_outcome FROM checkout_attempt WHERE transaction_id = ?")) {
+                ps.setString(1, txId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    assertTrue(rs.next(), "the checkout attempt must exist");
+                    assertEquals("COMPLETED", rs.getString("state"));
+                    assertEquals("[{\"sku\":\"" + SKU_A + "\",\"quantity\":2},{\"sku\":\"" + SKU_B + "\",\"quantity\":1}]",
+                        rs.getString("lines"));
+                    assertEquals("SUCCESS", rs.getString("client_outcome"));
+                    assertFalse(rs.next(), "exactly one attempt");
+                }
+            }
         }
+
+        // 4. Inventory must be decremented by the scanned quantities
+        assertEquals(initialStockA - 2, LiveSchemas.stock(SKU_A),
+            "Stock for SKU_A must be decremented by 2");
+        assertEquals(initialStockB - 1, LiveSchemas.stock(SKU_B),
+            "Stock for SKU_B must be decremented by 1");
     }
 
     // ------------------------------------------------------------------ helpers
-
-    private int queryStock(String sku) throws Exception {
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-             PreparedStatement ps = conn.prepareStatement(
-                "SELECT stock_quantity FROM inventory WHERE sku = ?")) {
-            ps.setString(1, sku);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertTrue(rs.next(), "SKU must exist in inventory: " + sku);
-                return rs.getInt(1);
-            }
-        }
-    }
 
     private String startAndGetId(String stationId) throws Exception {
         HttpResponse<String> resp = post("/transactions",
