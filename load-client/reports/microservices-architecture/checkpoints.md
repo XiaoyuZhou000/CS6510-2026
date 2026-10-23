@@ -31,6 +31,10 @@ Latencies are client-side p95 / p99 in milliseconds, from the Load Client JSON r
 | CP1 | default, without Analytics | 2 | 4537 | 4519–4555 |
 | CP2 | default | 2 | 4335 | 4314–4356 |
 | CP2 | stress | 1 | 11185 | 11185 |
+| CP4 (T152, interleaved with fresh CP0) | default | 3 | 4326 | 4261–4339 |
+| CP0 (T152, fresh) | default | 3 | 4879 | 4861–4978 |
+| CP4 (T152, interleaved with fresh CP0) | stress | 3 | 11105 | 10413–11240 |
+| CP0 (T152, fresh) | stress | 3 | 14916 | 14296–14918 |
 
 ## CP0: attribution baseline (T001)
 
@@ -179,3 +183,96 @@ The second default run uses `-OutputLabel cp2-default-2`; the stress run uses `-
 - **R23 evidence**: relay writes measurably slow Scans. This meets the entry criteria of two deferred options: "coalescing relay rounds after partial batches" and "in-memory relay queue or watermark". Coalescing is the cheaper candidate. It keeps per-row `delivered_at` and at-least-once delivery, and the 5 s visibility target leaves more than 4.6 s of headroom. Per R23, it must be confirmed by a CP3 A/B before adoption, so nothing is changed at CP2.
 - **Stress, −22.2% against CP0**: dominated by Inventory's hot-SKU row locks. `inventory.apply.lockWait` p99 is 751 ms, and the Inventory pool sits at its 48-connection ceiling with a 893 ms p99 borrow wait, so Complete's mean is 480 ms. The relay's share of the stress run cannot be separated, because CP1 ran no stress workload. This is the entry evidence for the deferred split-hot-SKU option, but that criterion also requires an unaffected default workload, which CP2's relay cost prevents. CP3 should first separate the relay's cost.
 - Statement counts and latencies explain these results; they establish no improvement. Only the interleaved CP0-versus-CP4 runs (T152) compare the designs.
+
+## CP3: tuning A/B (T123)
+
+**Measured**: 2026-10-21 21:16 to 2026-10-22 20:27 local time, with pauses. Every comparison is an interleaved A/B run from `server/benchmark-compare.ps1`. Variant A is the current defaults, and variant B differs only in the knob under test. All variants use the same build, working copy on top of commit `f51e85d`: `gitDirty=true`, with the JAR SHA-256s in each `evidence.json`. Every run had its own full reset, all three services, and the exact Load Client command, and passed the validator (`comparable=true`).
+
+**Method**: the comparisons for server prepared statements and the 10/32 Inventory pool ran under the original R22 rule, which extended close results to five pairs and decided them with a one-sided Mann–Whitney U test. The driver is `compare/cp3-campaign-v1.ps1`. On 2026-10-22 the policy was streamlined (R22, T123), and the driver became `compare/cp3-campaign.ps1`:
+- differences within ±3% are practically equivalent;
+- a screen is one pair per relevant workload, and pool sizes are measured only under stress;
+- three fresh confirmation pairs are run only after a screen of +5% or more;
+- the cache-off attribution run was skipped.
+
+None of the four earlier comparisons screened at +5%, so both earlier variants are rejected under either rule.
+
+**Confidence**: a one-pair screen cannot separate differences under about 3–5% from run-to-run noise. The incumbent's own `totalTransactions` moved between screens: 4,102–4,381 at default and 10,416–11,131 under stress. Only the paired difference inside one comparison is meaningful. No result below claims statistical significance.
+
+| Variant (B) | Workload | Pairs | Defaults (A) median (range) | Variant (B) median (range) | Δ B vs A | A vs CP0 | B vs CP0 | Outcome |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| `DB_SERVER_PREPARED_STATEMENTS=true` | default | 1 (screen) | 4174 | 4328 | +3.69% | −12.3% | −9.1% | screened on |
+| | stress | 1 (screen) | 10982 | 10946 | −0.33% | −23.6% | −23.9% | screened on |
+| | default | 5 | 4344 (4161–4390) | 4402 (4318–4451) | +1.34% | −8.7% | −7.5% | no demonstrated improvement |
+| | stress | 5 | 11131 (10955–11398) | 11217 (11048–11317) | +0.77% | −22.6% | −22.0% | no demonstrated improvement |
+| Inventory pool 10/32 | default | 1 (screen) | 4381 | 4346 | −0.80% | −7.9% | −8.7% | screened on |
+| | stress | 1 (screen) | 10796 | 11048 | +2.33% | −24.9% | −23.1% | screened on |
+| | default | 5 | 4201 (3841–4285) | 4201 (4068–4395) | 0.00% | −11.7% | −11.7% | no demonstrated improvement |
+| | stress | 5 | 11000 (10486–11183) | 10945 (10920–11280) | −0.50% | −23.5% | −23.9% | no demonstrated improvement; Complete p99 +34% |
+| Inventory pool 24/64 | stress | 1 (screen) | 10416 | 10789 | +3.58% | −27.5% | −24.9% | no demonstrated improvement |
+| Transaction pool 48/80 | stress | 1 (screen) | 10641 | 10632 | −0.08% | −26.0% | −26.0% | no demonstrated improvement |
+| `OUTBOX_COALESCE_MS=100` | default | 1 (screen) | 4102 | 4135 | +0.80% | −13.8% | −13.1% | no demonstrated improvement |
+| | stress | 1 (screen) | 10548 | 10786 | +2.26% | −26.6% | −25.0% | no demonstrated improvement |
+
+CP0 medians: default 4,759 and stress 14,375.5 (T001). The labels are `cp3-<variant>-<workload>` and `cp3-screen-<variant>-<workload>`. Each comparison's `compare/<label>/compare.json` holds every run, its background CPU, and every invalidated attempt.
+
+**Decision**: no variant is kept. Every default stays as it was:
+- `DB_SERVER_PREPARED_STATEMENTS=false`;
+- Transaction pool 32/64, Inventory pool 16/48, Analytics pool 10;
+- `OUTBOX_COALESCE_MS=0`, which leaves relay coalescing off;
+- `TRANSACTION_CACHE_MAX_ENTRIES=100000`.
+
+T124 therefore changes no default and no statement budget.
+
+**Attribution** (explanations only, Implementation Rule 6):
+- **Pools**: neither pool size changed the stress result beyond noise. Stress is bound by Inventory's row locks on the hot SKUs (`inventory.apply.lockWait` p99 of 0.53–1.26 s across the stress runs), not by pool queuing. A smaller Inventory pool cut that lock wait p99 from 893 to 689 ms over five pairs. It also raised Complete p99 from 1.49 to 1.99 s and left `totalTransactions` unchanged, which is the expected trade of waiting for a connection instead of a row lock. The split-hot-SKU option (R23) remains the only lever on this limit, and its default-workload entry criterion is still unmet.
+- **Relay coalescing**: it did what CP2 predicted mechanically, cutting commits per completed transaction from 15.99 to 14.67 at default and from 23.46 to 22.82 under stress. It gained only +0.8% and +2.3% in `totalTransactions`, inside the noise of a single pair. The relay's extra commits cost less than CP2's per-basket estimate suggested, so coalescing is not adopted. The switch stays in the code, off by default, as a documented A/B setting like `DB_SERVER_PREPARED_STATEMENTS`.
+- **Server prepared statements**: commits per completed transaction were unchanged (16.06 against 15.96 at default, 24.22 against 24.48 under stress). A likely reason, not measured here, is that Connector/J's client-side statement cache (R20) already removes most of the per-statement parse cost.
+
+**Harness and machine notes**:
+- **First attempt** (2026-10-21 21:20): `benchmark-compare.ps1` failed with "Argument types do not match" before recording its first one-pair screen. Windows PowerShell 5.1 throws on `@($list).Count` for a one-element generic List. The fix counts runs through the pipeline. The pair is kept, unused, in `compare/aborted-attempts/`.
+- **Machine load** (2026-10-21 21:50–22:30): a game (`WardogsClient-Win64-Shipping`) used about 12 cores. Defaults dropped about 10%, and two default runs had 20 s commit stalls. Every run that overlapped it is kept, unused, in `compare/invalidated-machine-load/`. An idle-machine gate was then added. Before each run it waits for named blocking processes and for low background CPU. Afterwards it measures that run's background CPU and repeats a loaded run under the same label. The limit was 1.0 of the 24 logical cores, raised on 2026-10-22 at 19:54 to 2.0, because ordinary desktop load of about 1.1–1.5 cores invalidated every attempt. The game is blocked by name, as is a second game seen later (`ROTTR`).
+- **Port conflicts** (2026-10-22 17:28): this machine's TCP dynamic port range starts at 1024, so another program (`WeChatAppEx`) took gRPC port 9093 as a client port, and Analytics could not bind it. The three affected screens are in `compare/failed-port-conflict/`. A logged "REJECT inv10-32" was caused by that failure, not measured, and the variant was screened again. The gate now waits until no other program holds a benchmark port, and it repeats a run whose services fail to start.
+- **Interruptions**: one shutdown and two ended sessions interrupted the campaign. `benchmark-compare.ps1` now resumes an interrupted comparison from its complete pairs; `cp3-ps-stress` resumed with two. An orphaned driver from an ended session briefly ran beside a new one, and both were stopped before either measured anything.
+- **Superseded runs**: the half-finished Inventory 24/64 default screen is in `compare/superseded-by-streamlined-policy/`, because the streamlined policy measures pool sizes only under stress.
+
+## CP4: final CP0-versus-CP4 comparison (T152)
+
+**Measured**: 2026-10-22, 21:01–21:41 local time: three default pairs, then three stress pairs, interleaved on the same machine and evening, under the idle-machine gate (2.0 cores). No run was invalidated or resumed.
+
+**Variants**:
+- **A, CP0**: the service-based implementation at commit `26c89af`, from the worktree `..\cs6510-cp0`, built with its own `server/build.sh` and `load-client/build.sh`. Each run was its own T001 harness run: `benchmark-scan.ps1 -Variant retained -Workload <workload> -TransactionPoolSize 32 -TransactionPoolMaxSize 64`. The harness ran in its own `powershell.exe` and received the one-line T001 harness fix, which changes no measured code.
+- **B, CP4**: the microservices build that passed T125, working copy on top of `f51e85d`, with every default unchanged by CP3.
+
+**Official reports**: `cp4-final-default-b-1` and `cp4-final-stress-b-1`, designated before the runs and validated by T126 and T127. Both were the first attempt of their run.
+
+**Confidence**: three pairs per workload describe the change; they do not test it, and no statistical significance is claimed. CP0 was ahead in every pair of both workloads.
+
+| Workload | Pair | CP0 `totalTransactions` | CP4 `totalTransactions` | Δ |
+|---|---:|---:|---:|---:|
+| default | 1 | 4978 | 4326 | −13.10% |
+| default | 2 | 4861 | 4261 | −12.34% |
+| default | 3 | 4879 | 4339 | −11.07% |
+| stress | 1 | 14296 | 11105 | −22.32% |
+| stress | 2 | 14916 | 10413 | −30.19% |
+| stress | 3 | 14918 | 11240 | −24.65% |
+
+| Workload | Variant | `totalTransactions` median (range) | Completed/s median | Start p95 / p99 | Scan p95 / p99 | Complete p95 / p99 | Errors (all operations) |
+|---|---|---:|---:|---:|---:|---:|---|
+| default | CP0 | 4879 (4861–4978) | 81.12 | 12.0 / 28.8 | 13.4 / 32.3 | 32.2 / 54.3 | 0 |
+| default | CP4 | 4326 (4261–4339) | 71.76 | 12.9 / 29.2 | 13.8 / 35.4 | 59.8 / 110.6 | 0 |
+| stress | CP0 | 14916 (14296–14918) | 123.77 | 60.9 / 103.8 | 59.1 / 98.6 | 692.5 / 797.8 | Complete 41,202 of 85,332 (48.3%), all `409 INSUFFICIENT_STOCK` |
+| stress | CP4 | 11105 (10413–11240) | 91.95 | 21.0 / 55.7 | 23.2 / 56.2 | 1023.4 / 1458.2 | Complete 18,876 of 51,634 (36.6%), all `409 INSUFFICIENT_STOCK` |
+
+Latencies are client-side medians over each variant's three runs, in milliseconds.
+
+**Result**: CP4 completes **11.3% fewer** transactions than CP0 at default (median 4,326 against 4,879) and **25.6% fewer** under stress (11,105 against 14,916). This is the only comparison of the two designs (Implementation Rule 6). The microservices design does not improve `totalTransactions` on this machine.
+
+**Why** (attribution from CP1–CP3, explanations only):
+- **Default**: CP4 commits N + 4 durable transactions per basket for N Scans: Start, the Scans, T1, Inventory's apply, and T3. CP0 commits N + 2. Database per service (C-II) and a durable T1 before the remote step (C-V) make those two extra commits mandatory. They serialize on Complete, whose p95 roughly doubles from 32 to 60 ms. The relay and Analytics' ingestion add about 1.5 durable commits per basket on the same MySQL instance (CP2). The official default run measured 15.81 commits per completed transaction at 10.36 Scans per basket, which is N + 5.45. The memory-first Scan and Start kept their latency level with CP0 despite those commits.
+- **Stress**: Inventory's row locks on the hot SKUs dominate. `inventory.apply.lockWait` p99 was 689 ms, and the Inventory pool ran at its 48-connection ceiling with a 974 ms p99 borrow wait. Complete p95 rose from 0.69 to 1.02 s, and each station starts fewer baskets. CP4's Start and Scan are 2–3 times faster than CP0's under stress (Scan p99 56 against 99 ms), because they no longer queue behind Complete for the Transaction pool. But a basket still waits on the hot-SKU lock at Complete. CP3 found no pool size or switch that changes this; the split-hot-SKU option (R23) is the remaining lever.
+
+**Durability and completion (FR-054)**: in both official runs every COMPLETED transaction matches a client success, with zero background completions, zero completions without a recorded response, and a remaining difference of 0. `innodb_flush_log_at_trx_commit=1`, `sync_binlog=1`, and `log_bin=1` were unchanged in every run.
+
+**Harness notes**:
+- The first attempt at `cp4-final-default` failed at 21:00 before any load. `benchmark-compare.ps1` called the CP0 harness in-process with redirected streams, and Windows PowerShell 5.1 turned Nginx's ordinary stderr into a terminating error under the harness's own `Stop` preference. Its only output, a `samples.csv`, is kept in `compare/cp4-final-default/failed-harness/`. The script now runs the CP0 harness as a separate `powershell.exe`, as T001 ran it, and the comparison was rerun from the start.
+- The CP0 harness samples a commit counter that does not change during its runs, so CP0's commits per basket are given by its design (N + 2), not measured.

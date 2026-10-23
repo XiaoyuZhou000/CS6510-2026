@@ -1,0 +1,620 @@
+{
+    "label":  "cp3-screen-ps-stress-b-1",
+    "workload":  "stress",
+    "command":  "java -cp out Main --stations=100 --duration=120",
+    "exactCommand":  true,
+    "gitCommit":  "f51e85dec752500032ffece944a06f485a7d2323",
+    "gitDirty":  true,
+    "jarSha256":  {
+                      "transaction.jar":  "6e1db581b8958c9caf40f0779583490cbacc66b103fd0ccf7f6481670d3cb992",
+                      "inventory.jar":  "225cf7999daa9c13955a1c40d8d71c839ae7eb557eb8962e5df1aab499e63435",
+                      "analytics.jar":  "efac50fb90261647313990ee5c170e3ede8a020e57d58dc650e1d7437ba24549",
+                      "common.jar":  "204cb93db82799b6d7ddabb5d9f3bfcc85803c5271a56e5a6cd1dea2ff94ab04",
+                      "contracts.jar":  "ee9c69dd71a7c606f052cf224e48925a93f0c08272310966d2290644c493b89e"
+                  },
+    "extraEnv":  {
+                     "DB_SERVER_PREPARED_STATEMENTS":  "true"
+                 },
+    "skipAnalytics":  false,
+    "client":  {
+                   "report":  "report-20261021-212755.json",
+                   "reportSha256":  "e7d2c0ca7f4d069c23154de148f3becbc804d887b0fd191a3a149f95649226ff",
+                   "totalTransactions":  10946,
+                   "totalItemsScanned":  180185,
+                   "transactionsPerSecond":  90.71646439765391,
+                   "wallClockSeconds":  120.661669,
+                   "operations":  {
+                                      "START_TRANSACTION":  {
+                                                                "successCount":  17164,
+                                                                "errorCount":  0,
+                                                                "p95Ms":  21.7011,
+                                                                "p99Ms":  57.7225
+                                                            },
+                                      "SCAN_ITEM":  {
+                                                        "successCount":  180185,
+                                                        "errorCount":  0,
+                                                        "p95Ms":  23.6088,
+                                                        "p99Ms":  60.6809
+                                                    },
+                                      "COMPLETE_TRANSACTION":  {
+                                                                   "successCount":  10946,
+                                                                   "errorCount":  6218,
+                                                                   "p95Ms":  1073.4062,
+                                                                   "p99Ms":  1501.4008
+                                                               }
+                                  }
+               },
+    "durability":  {
+                       "innodb_flush_log_at_trx_commit":  "1",
+                       "sync_binlog":  "1",
+                       "log_bin":  "1"
+                   },
+    "samples":  {
+                    "count":  65,
+                    "peakUndelivered":  147,
+                    "peakPendingAttempts":  87,
+                    "peakUnpublishedBoundaries":  1,
+                    "rowLockWaitsDelta":  16483,
+                    "rowLockTimeMsDelta":  5593685,
+                    "commitsDelta":  259280,
+                    "logWaitsDelta":  0
+                },
+    "pools":  {
+                  "inventory":  {
+                                    "borrowWaitP99Ms":  974.198,
+                                    "holdTimeP99Ms":  893.344,
+                                    "peakOccupancy":  48
+                                },
+                  "transaction":  {
+                                      "borrowWaitP99Ms":  0.050,
+                                      "holdTimeP99Ms":  60.887,
+                                      "peakOccupancy":  64
+                                  },
+                  "analytics":  {
+                                    "borrowWaitP99Ms":  0.050,
+                                    "holdTimeP99Ms":  55.834,
+                                    "peakOccupancy":  3
+                                }
+              },
+    "recovery":  {
+                     "scanQueries":  5,
+                     "scanRows":  0,
+                     "waitDbChecks":  0
+                 },
+    "locks":  {
+                  "waitP99Ms":  0.050,
+                  "holdP99Ms":  60.887,
+                  "contended":  838,
+                  "collisions":  838,
+                  "inventoryApplyLockWaitP99Ms":  893.344
+              },
+    "idlePolls":  {
+                      "relay":  340,
+                      "analyticsPoller":  1300
+                  },
+    "validator":  {
+                      "passed":  true,
+                      "exitCode":  0,
+                      "output":  "validator.txt"
+                  },
+    "fr054":  {
+                  "completedTransactions":  10946,
+                  "backgroundCompletions":  0,
+                  "completionsWithoutResponse":  0,
+                  "remainingDifference":  0
+              },
+    "serviceMetrics":  {
+                           "inventory":  {
+                                             "service":  "inventory",
+                                             "ts":  1792643285037,
+                                             "timers":  {
+                                                            "inventory.apply":  {
+                                                                                    "count":  17188,
+                                                                                    "p50_ms":  579.262,
+                                                                                    "p95_ms":  1062.371,
+                                                                                    "p99_ms":  1502.419,
+                                                                                    "max_ms":  3818.827,
+                                                                                    "mean_ms":  540.896
+                                                                                },
+                                                            "inventory.apply.commit":  {
+                                                                                           "count":  17164,
+                                                                                           "p50_ms":  6.979,
+                                                                                           "p95_ms":  16.600,
+                                                                                           "p99_ms":  43.054,
+                                                                                           "max_ms":  489.540,
+                                                                                           "mean_ms":  8.665
+                                                                                       },
+                                                            "inventory.apply.lockWait":  {
+                                                                                             "count":  17188,
+                                                                                             "p50_ms":  409.600,
+                                                                                             "p95_ms":  631.690,
+                                                                                             "p99_ms":  893.344,
+                                                                                             "max_ms":  1033.829,
+                                                                                             "mean_ms":  325.834
+                                                                                         },
+                                                            "inventory.grpc.apply":  {
+                                                                                         "count":  17188,
+                                                                                         "p50_ms":  579.262,
+                                                                                         "p95_ms":  1062.371,
+                                                                                         "p99_ms":  1502.419,
+                                                                                         "max_ms":  3820.207,
+                                                                                         "mean_ms":  541.060
+                                                                                     },
+                                                            "inventory.outcome":  {
+                                                                                      "count":  24,
+                                                                                      "p50_ms":  1.037,
+                                                                                      "p95_ms":  344.431,
+                                                                                      "p99_ms":  426.408,
+                                                                                      "max_ms":  426.408,
+                                                                                      "mean_ms":  58.001
+                                                                                  },
+                                                            "inventory.pool.borrowWait":  {
+                                                                                              "count":  17225,
+                                                                                              "p50_ms":  111.668,
+                                                                                              "p95_ms":  631.690,
+                                                                                              "p99_ms":  974.198,
+                                                                                              "max_ms":  3425.933,
+                                                                                              "mean_ms":  205.276
+                                                                                          },
+                                                            "inventory.pool.holdTime":  {
+                                                                                            "count":  17225,
+                                                                                            "p50_ms":  409.600,
+                                                                                            "p95_ms":  631.690,
+                                                                                            "p99_ms":  893.344,
+                                                                                            "max_ms":  1065.199,
+                                                                                            "mean_ms":  334.652
+                                                                                        },
+                                                            "inventory.status":  {
+                                                                                     "count":  4,
+                                                                                     "p50_ms":  223.336,
+                                                                                     "p95_ms":  323.678,
+                                                                                     "p99_ms":  323.678,
+                                                                                     "max_ms":  323.678,
+                                                                                     "mean_ms":  217.513
+                                                                                 }
+                                                        },
+                                             "counters":  {
+                                                              "inventory.apply.integrityAlarms":  0,
+                                                              "inventory.apply.retries":  0
+                                                          },
+                                             "gauges":  {
+                                                            "inventory.pool.occupancy":  0,
+                                                            "inventory.pool.occupancyHighWater":  48,
+                                                            "inventory.pool.size":  48,
+                                                            "inventory.pool.waiters":  0
+                                                        }
+                                         },
+                           "transaction":  {
+                                               "service":  "transaction",
+                                               "ts":  1792643285613,
+                                               "timers":  {
+                                                              "transaction.complete.reopen":  {
+                                                                                                  "count":  6218,
+                                                                                                  "p50_ms":  8.300,
+                                                                                                  "p95_ms":  27.917,
+                                                                                                  "p99_ms":  60.887,
+                                                                                                  "max_ms":  489.676,
+                                                                                                  "mean_ms":  10.610
+                                                                                              },
+                                                              "transaction.complete.t1":  {
+                                                                                              "count":  17164,
+                                                                                              "p50_ms":  9.051,
+                                                                                              "p95_ms":  25.600,
+                                                                                              "p99_ms":  72.408,
+                                                                                              "max_ms":  436.497,
+                                                                                              "mean_ms":  11.206
+                                                                                          },
+                                                              "transaction.complete.t3":  {
+                                                                                              "count":  10946,
+                                                                                              "p50_ms":  8.300,
+                                                                                              "p95_ms":  23.475,
+                                                                                              "p99_ms":  60.887,
+                                                                                              "max_ms":  307.975,
+                                                                                              "mean_ms":  10.401
+                                                                                          },
+                                                              "transaction.http.complete":  {
+                                                                                                "count":  17164,
+                                                                                                "p50_ms":  631.690,
+                                                                                                "p95_ms":  1062.371,
+                                                                                                "p99_ms":  1502.419,
+                                                                                                "max_ms":  3835.910,
+                                                                                                "mean_ms":  563.674
+                                                                                            },
+                                                              "transaction.http.get":  {
+                                                                                           "count":  1,
+                                                                                           "p50_ms":  2.839,
+                                                                                           "p95_ms":  2.839,
+                                                                                           "p99_ms":  2.839,
+                                                                                           "max_ms":  2.839,
+                                                                                           "mean_ms":  2.839
+                                                                                       },
+                                                              "transaction.http.scan":  {
+                                                                                            "count":  180185,
+                                                                                            "p50_ms":  9.051,
+                                                                                            "p95_ms":  23.475,
+                                                                                            "p99_ms":  60.887,
+                                                                                            "max_ms":  514.362,
+                                                                                            "mean_ms":  10.962
+                                                                                        },
+                                                              "transaction.http.start":  {
+                                                                                             "count":  17164,
+                                                                                             "p50_ms":  8.300,
+                                                                                             "p95_ms":  21.527,
+                                                                                             "p99_ms":  51.200,
+                                                                                             "max_ms":  513.247,
+                                                                                             "mean_ms":  9.977
+                                                                                         },
+                                                              "transaction.lock.hold":  {
+                                                                                            "count":  231677,
+                                                                                            "p50_ms":  8.300,
+                                                                                            "p95_ms":  21.527,
+                                                                                            "p99_ms":  60.887,
+                                                                                            "max_ms":  514.290,
+                                                                                            "mean_ms":  10.052
+                                                                                        },
+                                                              "transaction.lock.wait":  {
+                                                                                            "count":  231677,
+                                                                                            "p50_ms":  0.050,
+                                                                                            "p95_ms":  0.050,
+                                                                                            "p99_ms":  0.050,
+                                                                                            "max_ms":  488.741,
+                                                                                            "mean_ms":  0.033
+                                                                                        },
+                                                              "transaction.pool.borrowWait":  {
+                                                                                                  "count":  242123,
+                                                                                                  "p50_ms":  0.050,
+                                                                                                  "p95_ms":  0.050,
+                                                                                                  "p99_ms":  0.050,
+                                                                                                  "max_ms":  56.153,
+                                                                                                  "mean_ms":  0.021
+                                                                                              },
+                                                              "transaction.pool.holdTime":  {
+                                                                                                "count":  242123,
+                                                                                                "p50_ms":  9.051,
+                                                                                                "p95_ms":  23.475,
+                                                                                                "p99_ms":  60.887,
+                                                                                                "max_ms":  514.281,
+                                                                                                "mean_ms":  10.522
+                                                                                            },
+                                                              "transaction.relay.batch":  {
+                                                                                              "count":  5040,
+                                                                                              "p50_ms":  19.740,
+                                                                                              "p95_ms":  55.834,
+                                                                                              "p99_ms":  111.668,
+                                                                                              "max_ms":  522.931,
+                                                                                              "mean_ms":  23.763
+                                                                                          },
+                                                              "transaction.relay.count":  {
+                                                                                              "count":  13,
+                                                                                              "p50_ms":  0.617,
+                                                                                              "p95_ms":  6.427,
+                                                                                              "p99_ms":  6.427,
+                                                                                              "max_ms":  6.427,
+                                                                                              "mean_ms":  1.314
+                                                                                          },
+                                                              "transaction.relay.latency":  {
+                                                                                                "count":  180185,
+                                                                                                "p50_ms":  27.917,
+                                                                                                "p95_ms":  86.108,
+                                                                                                "p99_ms":  187.802,
+                                                                                                "max_ms":  562.656,
+                                                                                                "mean_ms":  34.325
+                                                                                            },
+                                                              "transaction.relay.mark":  {
+                                                                                             "count":  5040,
+                                                                                             "p50_ms":  9.051,
+                                                                                             "p95_ms":  23.475,
+                                                                                             "p99_ms":  66.398,
+                                                                                             "max_ms":  514.200,
+                                                                                             "mean_ms":  11.302
+                                                                                         },
+                                                              "transaction.relay.mark.commit":  {
+                                                                                                    "count":  5040,
+                                                                                                    "p50_ms":  8.300,
+                                                                                                    "p95_ms":  18.102,
+                                                                                                    "p99_ms":  51.200,
+                                                                                                    "max_ms":  512.440,
+                                                                                                    "mean_ms":  9.739
+                                                                                                },
+                                                              "transaction.relay.select":  {
+                                                                                               "count":  5380,
+                                                                                               "p50_ms":  0.476,
+                                                                                               "p95_ms":  0.673,
+                                                                                               "p99_ms":  1.234,
+                                                                                               "max_ms":  28.385,
+                                                                                               "mean_ms":  0.525
+                                                                                           },
+                                                              "transaction.replica.load":  {
+                                                                                               "count":  2,
+                                                                                               "p50_ms":  1.131,
+                                                                                               "p95_ms":  18.925,
+                                                                                               "p99_ms":  18.925,
+                                                                                               "max_ms":  18.925,
+                                                                                               "mean_ms":  9.992
+                                                                                           },
+                                                              "transaction.replica.refresh":  {
+                                                                                                  "count":  1,
+                                                                                                  "p50_ms":  327.900,
+                                                                                                  "p95_ms":  327.900,
+                                                                                                  "p99_ms":  327.900,
+                                                                                                  "max_ms":  327.900,
+                                                                                                  "mean_ms":  327.900
+                                                                                              },
+                                                              "transaction.replica.replace":  {
+                                                                                                  "count":  1,
+                                                                                                  "p50_ms":  73.951,
+                                                                                                  "p95_ms":  73.951,
+                                                                                                  "p99_ms":  73.951,
+                                                                                                  "max_ms":  73.951,
+                                                                                                  "mean_ms":  73.951
+                                                                                              },
+                                                              "transaction.replica.replace.commit":  {
+                                                                                                         "count":  1,
+                                                                                                         "p50_ms":  6.432,
+                                                                                                         "p95_ms":  6.432,
+                                                                                                         "p99_ms":  6.432,
+                                                                                                         "max_ms":  6.432,
+                                                                                                         "mean_ms":  6.432
+                                                                                                     },
+                                                              "transaction.rpc.applyCheckout":  {
+                                                                                                    "count":  17188,
+                                                                                                    "p50_ms":  579.262,
+                                                                                                    "p95_ms":  1062.371,
+                                                                                                    "p99_ms":  1502.419,
+                                                                                                    "max_ms":  2008.866,
+                                                                                                    "mean_ms":  541.068
+                                                                                                },
+                                                              "transaction.rpc.deliverScanEvents":  {
+                                                                                                        "count":  5040,
+                                                                                                        "p50_ms":  9.870,
+                                                                                                        "p95_ms":  23.475,
+                                                                                                        "p99_ms":  66.398,
+                                                                                                        "max_ms":  355.584,
+                                                                                                        "mean_ms":  11.922
+                                                                                                    },
+                                                              "transaction.status":  {
+                                                                                         "count":  4,
+                                                                                         "p50_ms":  27.917,
+                                                                                         "p95_ms":  50.223,
+                                                                                         "p99_ms":  50.223,
+                                                                                         "max_ms":  50.223,
+                                                                                         "mean_ms":  32.478
+                                                                                     },
+                                                              "transaction.store.begin":  {
+                                                                                              "count":  17164,
+                                                                                              "p50_ms":  9.051,
+                                                                                              "p95_ms":  23.475,
+                                                                                              "p99_ms":  66.398,
+                                                                                              "max_ms":  436.482,
+                                                                                              "mean_ms":  11.066
+                                                                                          },
+                                                              "transaction.store.begin.commit":  {
+                                                                                                     "count":  17164,
+                                                                                                     "p50_ms":  8.300,
+                                                                                                     "p95_ms":  19.740,
+                                                                                                     "p99_ms":  51.200,
+                                                                                                     "max_ms":  435.730,
+                                                                                                     "mean_ms":  9.900
+                                                                                                 },
+                                                              "transaction.store.complete":  {
+                                                                                                 "count":  10946,
+                                                                                                 "p50_ms":  8.300,
+                                                                                                 "p95_ms":  23.475,
+                                                                                                 "p99_ms":  60.887,
+                                                                                                 "max_ms":  307.960,
+                                                                                                 "mean_ms":  10.359
+                                                                                             },
+                                                              "transaction.store.complete.commit":  {
+                                                                                                        "count":  10946,
+                                                                                                        "p50_ms":  7.611,
+                                                                                                        "p95_ms":  18.102,
+                                                                                                        "p99_ms":  51.200,
+                                                                                                        "max_ms":  307.369,
+                                                                                                        "mean_ms":  9.186
+                                                                                                    },
+                                                              "transaction.store.findPending":  {
+                                                                                                    "count":  5,
+                                                                                                    "p50_ms":  0.617,
+                                                                                                    "p95_ms":  4.128,
+                                                                                                    "p99_ms":  4.128,
+                                                                                                    "max_ms":  4.128,
+                                                                                                    "mean_ms":  1.263
+                                                                                                },
+                                                              "transaction.store.reopen":  {
+                                                                                               "count":  6218,
+                                                                                               "p50_ms":  8.300,
+                                                                                               "p95_ms":  27.917,
+                                                                                               "p99_ms":  60.887,
+                                                                                               "max_ms":  489.629,
+                                                                                               "mean_ms":  10.549
+                                                                                           },
+                                                              "transaction.store.reopen.commit":  {
+                                                                                                      "count":  6218,
+                                                                                                      "p50_ms":  7.611,
+                                                                                                      "p95_ms":  19.740,
+                                                                                                      "p99_ms":  51.200,
+                                                                                                      "max_ms":  489.239,
+                                                                                                      "mean_ms":  9.348
+                                                                                                  },
+                                                              "transaction.store.scan":  {
+                                                                                             "count":  180185,
+                                                                                             "p50_ms":  9.051,
+                                                                                             "p95_ms":  23.475,
+                                                                                             "p99_ms":  60.887,
+                                                                                             "max_ms":  514.283,
+                                                                                             "mean_ms":  10.849
+                                                                                         },
+                                                              "transaction.store.scan.commit":  {
+                                                                                                    "count":  180185,
+                                                                                                    "p50_ms":  8.300,
+                                                                                                    "p95_ms":  19.740,
+                                                                                                    "p99_ms":  51.200,
+                                                                                                    "max_ms":  513.819,
+                                                                                                    "mean_ms":  9.855
+                                                                                                },
+                                                              "transaction.store.start":  {
+                                                                                              "count":  17164,
+                                                                                              "p50_ms":  8.300,
+                                                                                              "p95_ms":  21.527,
+                                                                                              "p99_ms":  51.200,
+                                                                                              "max_ms":  513.205,
+                                                                                              "mean_ms":  9.865
+                                                                                          },
+                                                              "transaction.store.start.commit":  {
+                                                                                                     "count":  17164,
+                                                                                                     "p50_ms":  7.611,
+                                                                                                     "p95_ms":  18.102,
+                                                                                                     "p99_ms":  46.951,
+                                                                                                     "max_ms":  513.080,
+                                                                                                     "mean_ms":  9.328
+                                                                                                 },
+                                                              "transaction.wait":  {
+                                                                                       "count":  0,
+                                                                                       "p50_ms":  0.000,
+                                                                                       "p95_ms":  0.000,
+                                                                                       "p99_ms":  0.000,
+                                                                                       "max_ms":  0.000,
+                                                                                       "mean_ms":  0.000
+                                                                                   }
+                                                          },
+                                               "counters":  {
+                                                                "transaction.cache.evictions":  10946,
+                                                                "transaction.cache.guardMisses":  0,
+                                                                "transaction.cache.hits":  197349,
+                                                                "transaction.cache.invalidations":  0,
+                                                                "transaction.cache.misses":  0,
+                                                                "transaction.complete.ambiguousCommit":  0,
+                                                                "transaction.complete.applyRetries":  24,
+                                                                "transaction.complete.budgetExpired":  0,
+                                                                "transaction.complete.foreignSettlements":  0,
+                                                                "transaction.complete.integrityAlarms":  0,
+                                                                "transaction.lock.acquisitions":  231677,
+                                                                "transaction.lock.collisions":  838,
+                                                                "transaction.lock.contended":  838,
+                                                                "transaction.recovery.alarms":  0,
+                                                                "transaction.recovery.dropped":  0,
+                                                                "transaction.recovery.pending":  0,
+                                                                "transaction.recovery.retries":  0,
+                                                                "transaction.recovery.scanQueries":  5,
+                                                                "transaction.recovery.scanRows":  0,
+                                                                "transaction.recovery.scheduled":  0,
+                                                                "transaction.recovery.settled":  0,
+                                                                "transaction.relay.duplicates":  0,
+                                                                "transaction.relay.events":  180185,
+                                                                "transaction.relay.failures":  0,
+                                                                "transaction.relay.idlePolls":  340,
+                                                                "transaction.relay.invalidBatches":  0,
+                                                                "transaction.replica.swaps":  1,
+                                                                "transaction.rpc.applyCheckout.DEADLINE_EXCEEDED":  24,
+                                                                "transaction.rpc.applyCheckout.OK":  17164,
+                                                                "transaction.rpc.deliverScanEvents.OK":  5040,
+                                                                "transaction.wait.dbChecks":  0,
+                                                                "transaction.wait.signalled":  0,
+                                                                "transaction.wait.timedOut":  0
+                                                            },
+                                               "gauges":  {
+                                                              "transaction.pool.occupancy":  0,
+                                                              "transaction.pool.occupancyHighWater":  64,
+                                                              "transaction.pool.size":  64,
+                                                              "transaction.pool.waiters":  0,
+                                                              "transaction.recovery.scheduleSize":  0,
+                                                              "transaction.relay.backlog":  0
+                                                          }
+                                           },
+                           "analytics":  {
+                                             "service":  "analytics",
+                                             "ts":  1792643286762,
+                                             "timers":  {
+                                                            "analytics.ingest":  {
+                                                                                     "count":  5040,
+                                                                                     "p50_ms":  9.051,
+                                                                                     "p95_ms":  21.527,
+                                                                                     "p99_ms":  60.887,
+                                                                                     "max_ms":  299.173,
+                                                                                     "mean_ms":  11.084
+                                                                                 },
+                                                            "analytics.ingest.batch":  {
+                                                                                           "count":  5040,
+                                                                                           "p50_ms":  9.051,
+                                                                                           "p95_ms":  21.527,
+                                                                                           "p99_ms":  60.887,
+                                                                                           "max_ms":  299.186,
+                                                                                           "mean_ms":  11.096
+                                                                                       },
+                                                            "analytics.ingest.commit":  {
+                                                                                            "count":  5040,
+                                                                                            "p50_ms":  7.611,
+                                                                                            "p95_ms":  18.102,
+                                                                                            "p99_ms":  46.951,
+                                                                                            "max_ms":  298.083,
+                                                                                            "mean_ms":  9.098
+                                                                                        },
+                                                            "analytics.names.load":  {
+                                                                                         "count":  1,
+                                                                                         "p50_ms":  25.267,
+                                                                                         "p95_ms":  25.267,
+                                                                                         "p99_ms":  25.267,
+                                                                                         "max_ms":  25.267,
+                                                                                         "mean_ms":  25.267
+                                                                                     },
+                                                            "analytics.poller.read":  {
+                                                                                          "count":  2474,
+                                                                                          "p50_ms":  0.367,
+                                                                                          "p95_ms":  0.673,
+                                                                                          "p99_ms":  1.131,
+                                                                                          "max_ms":  21.793,
+                                                                                          "mean_ms":  0.394
+                                                                                      },
+                                                            "analytics.pool.borrowWait":  {
+                                                                                              "count":  7881,
+                                                                                              "p50_ms":  0.050,
+                                                                                              "p95_ms":  0.050,
+                                                                                              "p99_ms":  0.050,
+                                                                                              "max_ms":  0.189,
+                                                                                              "mean_ms":  0.002
+                                                                                          },
+                                                            "analytics.pool.holdTime":  {
+                                                                                            "count":  7881,
+                                                                                            "p50_ms":  8.300,
+                                                                                            "p95_ms":  18.102,
+                                                                                            "p99_ms":  55.834,
+                                                                                            "max_ms":  299.168,
+                                                                                            "mean_ms":  7.824
+                                                                                        },
+                                                            "analytics.status":  {
+                                                                                     "count":  4,
+                                                                                     "p50_ms":  0.476,
+                                                                                     "p95_ms":  0.642,
+                                                                                     "p99_ms":  0.642,
+                                                                                     "max_ms":  0.642,
+                                                                                     "mean_ms":  0.505
+                                                                                 },
+                                                            "analytics.window.publishLag":  {
+                                                                                                "count":  359,
+                                                                                                "p50_ms":  66.398,
+                                                                                                "p95_ms":  121.775,
+                                                                                                "p99_ms":  172.216,
+                                                                                                "max_ms":  345.000,
+                                                                                                "mean_ms":  64.889
+                                                                                            }
+                                                        },
+                                             "counters":  {
+                                                              "analytics.grpc.deliver.OK":  5040,
+                                                              "analytics.ingest.duplicates":  0,
+                                                              "analytics.ingest.nameWrites":  2000,
+                                                              "analytics.ingest.stored":  180185,
+                                                              "analytics.poller.idlePolls":  1300,
+                                                              "analytics.window.published":  359
+                                                          },
+                                             "gauges":  {
+                                                            "analytics.pool.occupancy":  0,
+                                                            "analytics.pool.occupancyHighWater":  3,
+                                                            "analytics.pool.size":  10,
+                                                            "analytics.pool.waiters":  0
+                                                        }
+                                         }
+                       },
+    "clientOk":  true,
+    "drained":  true,
+    "comparable":  true
+}

@@ -461,19 +461,31 @@ The benchmark harness (R21) records these next to each report. Minimization come
 | CP0 | Before any code change | Existing `benchmark-scan.ps1`: default ×3, stress ×2, on the current implementation | Attribution reference during implementation |
 | CP1 | Core checkout path complete: Inventory + Transaction memory-first Scan, Saga, and cache; Analytics may still be down | `benchmark-microservices.ps1 -Workload default` ×2 | Attribution: the commit-count trade-off |
 | CP2 | Full system: relay and ingestion | Default ×2, stress ×1 | Attribution: Analytics load, backlog, recovery and wait cost, idle reads |
-| CP3 | Tuning A/B: JDBC flags, server prepared statements, pool sizes, cache on or off, statement-budget alternatives | Interleaved A/B pairs per variant and workload (`benchmark-compare.ps1`) | Keep only measured wins |
-| CP4 | Final, after the full suite passes | Exactly `java -cp out Main` and `java -cp out Main --stations=100 --duration=120`, each after its own reset, interleaved with fresh CP0 runs from a worktree of the baseline commit: 5 default pairs and 3 stress pairs | The final comparison, and the official evidence (FR-055): the first CP4 run of each workload, designated in advance |
+| CP3 | Tuning A/B: JDBC flags, server prepared statements, pool sizes, statement-budget alternatives | Interleaved A/B pairs per variant on its relevant workloads (`benchmark-compare.ps1`): one screening pair, three confirmation pairs only for a promising variant | Keep only meaningful measured wins |
+| CP4 | Final, after the full suite passes | Exactly `java -cp out Main` and `java -cp out Main --stations=100 --duration=120`, each after its own reset, interleaved with fresh CP0 runs from a worktree of the baseline commit: 3 default pairs and 3 stress pairs | The final comparison, and the official evidence (FR-055): the first CP4 run of each workload, designated in advance |
 
 - **Checkpoint record**: each checkpoint records results in `load-client/reports/microservices-architecture/checkpoints.md`.
 - **Final comparison**: only the interleaved CP0 and CP4 runs compare the designs. The CP1–CP3 runs ran on other days and at other stages, so they only attribute costs.
 - **Claims**: every checkpoint reports the actual client-observed `totalTransactions` and compares it with the CP0 baseline of the same workload. A performance improvement is claimed only from that measurement. Fewer statements and lower latency explain results but never establish an improvement on their own.
 - **Regression guideline**: a `totalTransactions` drop of more than 5% against the previous checkpoint, without a correctness reason, is investigated before the next stage. This is not a hard gate, because run variance is about 1–2% at default.
-- **A/B decision rule** (`benchmark-compare.ps1`):
-  - **Equivalence**: variants differ only in the knob under test. Every run uses all three services, the exact Load Client command, its own reset, and a passing validator.
+- **A/B decision rule** (`benchmark-compare.ps1`; streamlined 2026-10-22, see below):
+  - **Goal**: find meaningful gains in `totalTransactions`, not resolve 1–3% differences. Priority order: correctness, then `totalTransactions`, then p99 latency, then resource use.
+  - **Equivalence**: variants differ only in the knob under test. Every run uses all three services, the exact Load Client command, its own reset, and a passing validator. A run that fails validation or is not comparable rejects the variant, whatever its speed.
   - **Order**: pairs alternate their order (A B, B A, …) to cancel drift.
-  - **Decision**: after 3 pairs, a variant wins when the `totalTransactions` medians differ by at least 3% and the ranges do not overlap. Otherwise the comparison extends to 5 pairs and decides only if a one-sided Mann–Whitney U test is significant at 5%.
-  - **Ties**: Scan and Complete p99, then resource use (pool wait, lock waits, commits per transaction), then simplicity.
-  - **Objective**: `totalTransactions` first, then tail latency, then resource use.
+  - **Change**: Δ is the variant's `totalTransactions` median minus the incumbent's, as a percentage of the incumbent's. Differences within ±3% are practically equivalent.
+  - **Relevant workloads**: a variant is measured only on the workloads where its knob can realistically change the result. Pool sizes are measured under the 100-station stress workload, because at 10 stations the peak pool occupancy (about 12 Transaction and 6 Inventory connections at CP1–CP2) stays below every candidate's initial pool size. Other knobs are measured on both workloads.
+  - **Screening**: one interleaved pair per relevant workload.
+    - Δ ≥ +5%: **promising**, so the variant goes to confirmation on that workload.
+    - Δ ≤ −3%: **regression**; the variant is rejected.
+    - Otherwise: **no demonstrated improvement**; the variant is rejected without further pairs.
+  - **Confirmation**: three fresh interleaved pairs on each workload where the variant was promising. The screening pair is reported but not counted, because selecting on it would bias the result upward. There is no extension beyond three pairs.
+    - **Improvement**: Δ ≥ +3% and the variant ahead in at least two of the three pairs.
+    - Otherwise: **no demonstrated improvement** (or **regression** at Δ ≤ −3%); the variant is rejected.
+  - **Regression check**: a confirmed variant also needs at least one default-workload pair, unless the default workload was already measured. It is rejected on any correctness failure, a Δ ≤ −3% on any measured workload, or a Scan or Complete p99 median more than 10% above the incumbent's on any measured workload.
+  - **Resource use** (pool wait, lock waits, commits per transaction) is reported to explain results. It never retains a variant on its own.
+  - **Confidence**: one pair cannot separate differences under about 3–5% from run-to-run noise, and three pairs only confirm a clear effect. Records state the number of pairs, the medians, the ranges, and the per-pair differences, and claim no statistical significance.
+  - **Scope**: variants that cannot plausibly change `totalTransactions` meaningfully are not run. The cache-off attribution run (R19) is skipped unless a correctness issue or a major regression needs it.
+  - **Revision**: until 2026-10-22, close results extended to five pairs and were decided by a one-sided Mann–Whitney U test. The four CP3 comparisons completed under that rule (server prepared statements and the 10/32 Inventory pool, each on both workloads) stand as recorded. Neither variant screened at +5% or more, so both would also be rejected under the streamlined rule.
 
 Automated performance regression tests live in `server/tests/performance/`. They use counting and fault-injecting connection decorators, injected through a test-only hook on `ConnectionPool`. They have two kinds of assertion.
 
@@ -510,13 +522,14 @@ A non-gating `-Workload smoke` harness run, of 20 s, is part of each checkpoint.
 
 **Rationale**:
 - Strict assertions protect correctness and durability deterministically. Budgets catch accidental round trips without freezing the design when a measured alternative is faster.
-- Interleaved, repeated A/B runs separate real effects from run-to-run noise.
+- Interleaved A/B pairs cancel drift. One screening pair finds effects of about 5% or more, which are the only ones worth keeping a variant for, and three fresh pairs confirm them. Effects of 1–3% are treated as no demonstrated improvement instead of being resolved statistically.
 - Benchmark checkpoints attribute costs stage by stage.
 
 **Alternatives considered**:
 - *Timing-threshold unit tests*: flaky.
 - *Exact, immutable statement counts*: would block a demonstrably faster alternative that adds a statement, for example one that shortens lock hold time.
-- *Single runs per variant*: cannot separate a 2–3% effect from noise.
+- *Single runs per variant*: cannot separate a 2–3% effect from noise. Accepted for screening only, because a 2–3% effect is not worth keeping a variant for.
+- *Extending close results to five pairs with a significance test* (the rule until 2026-10-22): about 1.5–2 hours per variant to resolve differences too small to matter.
 - *Measuring only at the end*: cannot attribute regressions.
 
 ## R15. Testing and fault injection

@@ -24,6 +24,9 @@ import java.util.concurrent.atomic.LongAdder;
  *       at once. Any other outcome leaves the rows undelivered; they are reselected and resent after a
  *       backoff from 100 ms to 5 s. INVALID_ARGUMENT also raises an alarm, and nothing is ever skipped.</li>
  *   <li>With nothing to send it polls every 50 ms, counting {@code transaction.relay.idlePolls}.</li>
+ *   <li>{@code OUTBOX_COALESCE_MS} (default 0, off) is the CP3 coalescing switch (R23): after a partial batch
+ *       the next round waits that long, so it carries more events and costs fewer delivery commits. A full
+ *       batch still starts the next round at once.</li>
  * </ul>
  *
  * <p>No cursor is kept, so a restart resumes from the undelivered rows and a row that commits late with a
@@ -36,6 +39,7 @@ public final class ScanEventRelay implements AutoCloseable {
     public static final Duration DEFAULT_IDLE_POLL = Duration.ofMillis(50);
     public static final Duration MIN_BACKOFF = Duration.ofMillis(100);
     public static final Duration MAX_BACKOFF = Duration.ofSeconds(5);
+    public static final Duration MAX_COALESCE = Duration.ofSeconds(1);
     private static final LatencyHistogram BATCH = PerfMetrics.timer("transaction.relay.batch");
     private static final LatencyHistogram LATENCY = PerfMetrics.timer("transaction.relay.latency");
     private static final LongAdder EVENTS = PerfMetrics.counter("transaction.relay.events");
@@ -47,24 +51,34 @@ public final class ScanEventRelay implements AutoCloseable {
     /** What one round did. */
     public enum Round { IDLE, DELIVERED, FAILED }
 
-    public record Settings(int batchSize, Duration idlePoll, Duration minBackoff, Duration maxBackoff) {
+    public record Settings(int batchSize, Duration idlePoll, Duration minBackoff, Duration maxBackoff,
+                           Duration coalesce) {
         public Settings {
             if (batchSize < 1 || batchSize > 1_000) throw new IllegalArgumentException("batchSize must be 1 to 1,000");
             positive(idlePoll, "idlePoll");
             positive(minBackoff, "minBackoff");
             positive(maxBackoff, "maxBackoff");
             if (maxBackoff.compareTo(minBackoff) < 0) throw new IllegalArgumentException("maxBackoff < minBackoff");
+            if (coalesce == null || coalesce.isNegative() || coalesce.compareTo(MAX_COALESCE) > 0) {
+                throw new IllegalArgumentException("coalesce must be 0 to " + MAX_COALESCE.toMillis() + " ms");
+            }
         }
 
         public static Settings defaults() {
-            return new Settings(DEFAULT_BATCH_SIZE, DEFAULT_IDLE_POLL, MIN_BACKOFF, MAX_BACKOFF);
+            return new Settings(DEFAULT_BATCH_SIZE, DEFAULT_IDLE_POLL, MIN_BACKOFF, MAX_BACKOFF, Duration.ZERO);
         }
 
-        /** {@code OUTBOX_BATCH_SIZE} (500); the poll and backoff are fixed by the contract. */
+        /**
+         * {@code OUTBOX_BATCH_SIZE} (500) and {@code OUTBOX_COALESCE_MS} (0); the poll and backoff are fixed by
+         * the contract.
+         */
         public static Settings fromEnvironment(Map<String, String> environment) {
             String size = environment.get("OUTBOX_BATCH_SIZE");
             int batchSize = size == null || size.isBlank() ? DEFAULT_BATCH_SIZE : Integer.parseInt(size.trim());
-            return new Settings(batchSize, DEFAULT_IDLE_POLL, MIN_BACKOFF, MAX_BACKOFF);
+            String coalesce = environment.get("OUTBOX_COALESCE_MS");
+            long coalesceMs = coalesce == null || coalesce.isBlank() ? 0 : Long.parseLong(coalesce.trim());
+            if (coalesceMs < 0) throw new IllegalArgumentException("OUTBOX_COALESCE_MS must not be negative");
+            return new Settings(batchSize, DEFAULT_IDLE_POLL, MIN_BACKOFF, MAX_BACKOFF, Duration.ofMillis(coalesceMs));
         }
 
         private static void positive(Duration value, String name) {
@@ -76,6 +90,7 @@ public final class ScanEventRelay implements AutoCloseable {
     private final ScanEventSink sink;
     private final Settings settings;
     private Duration backoff;
+    private boolean lastBatchFull;
     private boolean failing;
     private boolean alarmed;
     private volatile boolean running;
@@ -132,6 +147,7 @@ public final class ScanEventRelay implements AutoCloseable {
         for (RelayStore.UndeliveredScan scan : batch) {
             LATENCY.record(Math.max(0, Duration.between(scan.acceptedAt(), acknowledged).toNanos()));
         }
+        lastBatchFull = batch.size() >= settings.batchSize();
         EVENTS.add(batch.size());
         DUPLICATES.add(delivered.duplicates());
         BATCH.recordSince(started);
@@ -139,10 +155,13 @@ public final class ScanEventRelay implements AutoCloseable {
         return Round.DELIVERED;
     }
 
-    /** The delay after a round with this outcome; a failure doubles the next backoff up to its ceiling. */
-    Duration delayAfter(Round round) {
+    /**
+     * The delay after a round with this outcome; a failure doubles the next backoff up to its ceiling. Exposed
+     * for tests; only the relay thread calls it.
+     */
+    public Duration delayAfter(Round round) {
         return switch (round) {
-            case DELIVERED -> Duration.ZERO;
+            case DELIVERED -> lastBatchFull ? Duration.ZERO : settings.coalesce();
             case IDLE -> settings.idlePoll();
             case FAILED -> {
                 Duration delay = backoff;

@@ -1,0 +1,236 @@
+{
+    "label":  "cp3-screen-inv24-64-stress",
+    "workload":  "stress",
+    "variants":  {
+                     "A":  {
+
+                           },
+                     "B":  {
+                               "INVENTORY_DB_POOL_MAX_SIZE":  "64",
+                               "INVENTORY_DB_POOL_SIZE":  "24"
+                           }
+                 },
+    "runOrder":  [
+                     "cp3-screen-inv24-64-stress-a-1",
+                     "cp3-screen-inv24-64-stress-b-1"
+                 ],
+    "idleGate":  {
+                     "idleCpuCores":  2,
+                     "blockingProcesses":  [
+                                               "WardogsClient-Win64-Shipping",
+                                               "ROTTR"
+                                           ],
+                     "invalidatedRuns":  [
+
+                                         ]
+                 },
+    "resumedPairs":  0,
+    "runs":  {
+                 "A":  [
+                           {
+                               "source":  "benchmark-microservices",
+                               "comparable":  true,
+                               "totalTransactions":  10416,
+                               "scanP99Ms":  64.3882,
+                               "completeP99Ms":  1626.7782,
+                               "borrowWaitP99Ms":  0.050,
+                               "inventoryLockWaitP99Ms":  1062.371,
+                               "rowLockWaitsDelta":  15143,
+                               "commitsPerTransaction":  22.869719662058372,
+                               "backgroundCpuCores":  1.346,
+                               "label":  "cp3-screen-inv24-64-stress-a-1"
+                           }
+                       ],
+                 "B":  [
+                           {
+                               "source":  "benchmark-microservices",
+                               "comparable":  true,
+                               "totalTransactions":  10789,
+                               "scanP99Ms":  59.7234,
+                               "completeP99Ms":  1242.3779,
+                               "borrowWaitP99Ms":  0.050,
+                               "inventoryLockWaitP99Ms":  1158.524,
+                               "rowLockWaitsDelta":  15891,
+                               "commitsPerTransaction":  23.1833348781166,
+                               "backgroundCpuCores":  1.564,
+                               "label":  "cp3-screen-inv24-64-stress-b-1"
+                           }
+                       ]
+             },
+    "summary":  {
+                    "totalTransactions":  {
+                                              "A":  {
+                                                        "median":  10416,
+                                                        "range":  {
+                                                                      "min":  10416,
+                                                                      "max":  10416
+                                                                  },
+                                                        "values":  [
+                                                                       10416
+                                                                   ]
+                                                    },
+                                              "B":  {
+                                                        "median":  10789,
+                                                        "range":  {
+                                                                      "min":  10789,
+                                                                      "max":  10789
+                                                                  },
+                                                        "values":  [
+                                                                       10789
+                                                                   ]
+                                                    }
+                                          },
+                    "scanP99Ms":  {
+                                      "A":  {
+                                                "median":  64.3882,
+                                                "range":  {
+                                                              "min":  64.3882,
+                                                              "max":  64.3882
+                                                          },
+                                                "values":  [
+                                                               64.3882
+                                                           ]
+                                            },
+                                      "B":  {
+                                                "median":  59.7234,
+                                                "range":  {
+                                                              "min":  59.7234,
+                                                              "max":  59.7234
+                                                          },
+                                                "values":  [
+                                                               59.7234
+                                                           ]
+                                            }
+                                  },
+                    "completeP99Ms":  {
+                                          "A":  {
+                                                    "median":  1626.7782,
+                                                    "range":  {
+                                                                  "min":  1626.7782,
+                                                                  "max":  1626.7782
+                                                              },
+                                                    "values":  [
+                                                                   1626.7782
+                                                               ]
+                                                },
+                                          "B":  {
+                                                    "median":  1242.3779,
+                                                    "range":  {
+                                                                  "min":  1242.3779,
+                                                                  "max":  1242.3779
+                                                              },
+                                                    "values":  [
+                                                                   1242.3779
+                                                               ]
+                                                }
+                                      },
+                    "borrowWaitP99Ms":  {
+                                            "A":  {
+                                                      "median":  0.05,
+                                                      "range":  {
+                                                                    "min":  0.05,
+                                                                    "max":  0.05
+                                                                },
+                                                      "values":  [
+                                                                     0.05
+                                                                 ]
+                                                  },
+                                            "B":  {
+                                                      "median":  0.05,
+                                                      "range":  {
+                                                                    "min":  0.05,
+                                                                    "max":  0.05
+                                                                },
+                                                      "values":  [
+                                                                     0.05
+                                                                 ]
+                                                  }
+                                        },
+                    "inventoryLockWaitP99Ms":  {
+                                                   "A":  {
+                                                             "median":  1062.371,
+                                                             "range":  {
+                                                                           "min":  1062.371,
+                                                                           "max":  1062.371
+                                                                       },
+                                                             "values":  [
+                                                                            1062.371
+                                                                        ]
+                                                         },
+                                                   "B":  {
+                                                             "median":  1158.524,
+                                                             "range":  {
+                                                                           "min":  1158.524,
+                                                                           "max":  1158.524
+                                                                       },
+                                                             "values":  [
+                                                                            1158.524
+                                                                        ]
+                                                         }
+                                               },
+                    "rowLockWaitsDelta":  {
+                                              "A":  {
+                                                        "median":  15143,
+                                                        "range":  {
+                                                                      "min":  15143,
+                                                                      "max":  15143
+                                                                  },
+                                                        "values":  [
+                                                                       15143
+                                                                   ]
+                                                    },
+                                              "B":  {
+                                                        "median":  15891,
+                                                        "range":  {
+                                                                      "min":  15891,
+                                                                      "max":  15891
+                                                                  },
+                                                        "values":  [
+                                                                       15891
+                                                                   ]
+                                                    }
+                                          },
+                    "commitsPerTransaction":  {
+                                                  "A":  {
+                                                            "median":  22.869719662058372,
+                                                            "range":  {
+                                                                          "min":  22.869719662058372,
+                                                                          "max":  22.869719662058372
+                                                                      },
+                                                            "values":  [
+                                                                           22.869719662058372
+                                                                       ]
+                                                        },
+                                                  "B":  {
+                                                            "median":  23.1833348781166,
+                                                            "range":  {
+                                                                          "min":  23.1833348781166,
+                                                                          "max":  23.1833348781166
+                                                                      },
+                                                            "values":  [
+                                                                           23.1833348781166
+                                                                       ]
+                                                        }
+                                              }
+                },
+    "decision":  {
+                     "pairs":  1,
+                     "changePercent":  3.58,
+                     "equivalent":  false,
+                     "pairsAheadB":  1,
+                     "perPair":  [
+                                     {
+                                         "pair":  1,
+                                         "A":  10416,
+                                         "B":  10789,
+                                         "changePercent":  3.58
+                                     }
+                                 ],
+                     "classification":  "no-demonstrated-improvement",
+                     "latencyRegressions":  [
+
+                                            ],
+                     "winner":  "A",
+                     "uDescriptive":  0
+                 }
+}

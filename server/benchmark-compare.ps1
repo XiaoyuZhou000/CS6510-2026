@@ -10,16 +10,30 @@
     <label>-b-<n>. A variant run that is not comparable aborts the comparison, and a baseline run must
     pass its own harness's checks.
 
-    Decision rule:
-      1. Clear: after -Pairs, the totalTransactions medians differ by at least 3% and the ranges do
-         not overlap. The faster variant wins.
-      2. Close: otherwise run up to -MaxPairs, deciding on totalTransactions only once the one-sided
-         Mann-Whitney U is at or below the 5% critical value for that number of pairs
-         (n=3: 0, n=4: 1, n=5: 4).
-      3. Tie: otherwise compare Scan p99, then Complete p99, then resource use (pool borrow-wait p99,
-         inventory.apply.lockWait p99, Innodb_row_lock_waits delta, Com_commit per completed
-         transaction), deciding on a metric only when its ranges do not overlap. If none decides,
-         keep variant A, the incumbent.
+    Decision rule (R22, streamlined 2026-10-22): the script runs exactly -Pairs pairs, never more, and
+    classifies the result by delta, B's totalTransactions median against A's in percent. Differences
+    within +/-3% are practically equivalent.
+      - One pair (screening): promising at delta >= +5%, regression at delta <= -3%, otherwise
+        no-demonstrated-improvement.
+      - More pairs (confirmation): improvement at delta >= +3% with B ahead in a majority of the
+        pairs (two of three), regression at delta <= -3%, otherwise no-demonstrated-improvement.
+      - A Scan or Complete p99 median more than 10% above A's is a latency regression, which stops
+        B from being retained. Resource use is reported only, and the Mann-Whitney U value is kept as
+        description; no significance is claimed.
+
+    Idle-machine gate: every run needs an otherwise idle machine. Before each run the script waits
+    until no -BlockingProcess is running, no other program holds a benchmark port, and the CPU used
+    by processes outside the benchmark stays at or below -IdleCpuCores for three consecutive 10 s
+    samples. A run whose services fail to start is set aside and repeated like a loaded one. After the run it measures that
+    background CPU again, averaged over the run; a run with a higher average, or one during which a
+    blocking process ran, is moved to compare/<label>/invalidated/ and repeated under the same label,
+    up to -MaxRunAttempts times. Waits and invalidations are logged to compare/idle-gate.log, and
+    compare.json records each run's background CPU and every invalidated attempt.
+
+    Resume: rerunning an interrupted comparison (one without compare.json) with the same label keeps
+    its complete pairs and repeats the rest. The runs of an incomplete pair, including one cut off
+    mid-run, are moved to compare/<label>/interrupted/. compare.json records how many pairs were
+    resumed, so a comparison that spans a restart is visible.
 
     Output: load-client/reports/microservices-architecture/compare/<label>/compare.json, plus a
     Markdown row for checkpoints.md, printed and saved as compare.md.
@@ -28,8 +42,8 @@
     running a comparison.
 
 .EXAMPLE
-    ./benchmark-compare.ps1 -Workload default -Label cp3-cache -VariantA @{} -VariantB @{ TRANSACTION_CACHE_MAX_ENTRIES = '0' } -NginxBin C:\nginx\nginx.exe
-    ./benchmark-compare.ps1 -Workload stress -Label cp4-stress -BaselineWorktree ..\..\cs6510-cp0 -Pairs 3 -MaxPairs 3 -NginxBin C:\nginx\nginx.exe
+    ./benchmark-compare.ps1 -Workload stress -Label cp3-screen-tx48-80-stress -VariantB @{ TRANSACTION_DB_POOL_SIZE = '48'; TRANSACTION_DB_POOL_MAX_SIZE = '80' } -NginxBin C:\nginx\nginx.exe
+    ./benchmark-compare.ps1 -Workload stress -Label cp4-final-stress -BaselineWorktree ..\..\cs6510-cp0 -Pairs 3 -NginxBin C:\nginx\nginx.exe
 #>
 param(
     [ValidateSet('default', 'stress')][string]$Workload,
@@ -37,15 +51,19 @@ param(
     [hashtable]$VariantA = @{},
     [hashtable]$VariantB = @{},
     [string]$BaselineWorktree,
-    [ValidateRange(1, 20)][int]$Pairs = 3,
-    [ValidateRange(1, 20)][int]$MaxPairs = 5,
+    [ValidateRange(1, 20)][int]$Pairs = 1,
     [string]$MySqlExe,
     [string]$NginxBin,
-    [string]$JavaExe
+    [string]$JavaExe,
+    [ValidateRange(0.1, 64)][double]$IdleCpuCores = 1.0,
+    [string[]]$BlockingProcess = @(),
+    [ValidateRange(1, 20)][int]$MaxRunAttempts = 5
 )
 
-# One-sided 5% critical values of U for n against n (equal group sizes).
-$script:MannWhitneyCritical = @{ 3 = 0; 4 = 1; 5 = 4; 6 = 7; 7 = 11; 8 = 15 }
+# R22 thresholds, in percent of variant A's median.
+$script:EquivalencePercent = 3
+$script:PromisingPercent = 5
+$script:LatencyRegressionPercent = 10
 $script:ResourceMetrics = @('borrowWaitP99Ms', 'inventoryLockWaitP99Ms', 'rowLockWaitsDelta', 'commitsPerTransaction')
 
 function Get-Median([double[]]$Values) {
@@ -62,12 +80,8 @@ function Get-Range([double[]]$Values) {
     return [pscustomobject]@{ min = [double]$measure.Minimum; max = [double]$measure.Maximum }
 }
 
-function Test-RangesOverlap($A, $B) {
-    return -not ($A.max -lt $B.min -or $B.max -lt $A.min)
-}
-
-# U counts the pairs in which the loser beats the winner (ties count one half); a small U supports
-# "winner > loser".
+# U counts the pairs in which the loser beats the winner (ties count one half). It is recorded as a
+# description of the overlap only; no decision uses it.
 function Get-MannWhitneyU([double[]]$Winner, [double[]]$Loser) {
     $u = 0.0
     foreach ($l in $Loser) {
@@ -78,58 +92,67 @@ function Get-MannWhitneyU([double[]]$Winner, [double[]]$Loser) {
     return $u
 }
 
+# Counts runs through the pipeline: in Windows PowerShell 5.1, @($list).Count throws "Argument types do not
+# match" for a one-element generic List.
+function Get-RunCount($Runs) { return @($Runs | ForEach-Object { $_ }).Count }
+
 function Get-VariantSummary($Runs, [string]$Metric) {
     $values = @($Runs | ForEach-Object { $_.$Metric } | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ })
-    if ($values.Count -ne @($Runs).Count -or $values.Count -eq 0) { return $null }
+    if ($values.Count -ne (Get-RunCount $Runs) -or $values.Count -eq 0) { return $null }
     return [pscustomobject]@{ median = Get-Median $values; range = Get-Range $values; values = $values }
 }
 
 <#
-    Applies the decision rule to completed runs. $Stage is 'pairs' after the initial -Pairs or
-    'extended' once more pairs ran. Returns $null while a close result can still be extended.
+    Classifies completed runs by the R22 rule. Runs are paired by position: the n-th A run and the
+    n-th B run belong to pair n.
 #>
-function Get-Decision($RunsA, $RunsB, [string]$Stage, [bool]$CanExtend) {
+function Get-Decision($RunsA, $RunsB) {
     $a = Get-VariantSummary $RunsA 'totalTransactions'
     $b = Get-VariantSummary $RunsB 'totalTransactions'
-    $n = @($RunsA).Count
-    $faster = 'A'; $slower = 'B'; $fastSummary = $a; $slowSummary = $b
-    if ($b.median -gt $a.median) { $faster = 'B'; $slower = 'A'; $fastSummary = $b; $slowSummary = $a }
-    $difference = 0.0
-    if ($a.median -gt 0) { $difference = [Math]::Abs($b.median - $a.median) / $a.median * 100 }
-    $u = Get-MannWhitneyU $fastSummary.values $slowSummary.values
-    $critical = $null
-    if ($script:MannWhitneyCritical.ContainsKey($n)) { $critical = $script:MannWhitneyCritical[$n] }
-    function New-Decision([string]$Winner, [string]$Rule, $DecidingMetric) {
-        return [pscustomobject][ordered]@{
-            pairs = $n; medianDifferencePercent = [Math]::Round($difference, 2); u = $u; uCritical = $critical
-            winner = $Winner; rule = $Rule; decidingMetric = $DecidingMetric
-        }
+    $n = Get-RunCount $RunsA
+    $listA = @($RunsA | ForEach-Object { $_ })
+    $listB = @($RunsB | ForEach-Object { $_ })
+    $change = 0.0
+    if ($a.median -gt 0) { $change = [Math]::Round(($b.median - $a.median) / $a.median * 100, 2) }
+    $perPair = @()
+    $ahead = 0
+    for ($i = 0; $i -lt $n; $i++) {
+        $ta = [double]$listA[$i].totalTransactions
+        $tb = [double]$listB[$i].totalTransactions
+        if ($tb -gt $ta) { $ahead++ }
+        $pairChange = $null
+        if ($ta -gt 0) { $pairChange = [Math]::Round(($tb - $ta) / $ta * 100, 2) }
+        $perPair += [pscustomobject][ordered]@{ pair = $i + 1; A = $ta; B = $tb; changePercent = $pairChange }
     }
-
-    if ($Stage -eq 'pairs') {
-        if ($difference -ge 3 -and -not (Test-RangesOverlap $a.range $b.range)) {
-            return New-Decision $faster 'clear' 'totalTransactions'
-        }
-        # Close: extend toward -MaxPairs before any significance test.
-        if ($CanExtend) { return $null }
-    }
-    if ($null -ne $critical -and $u -le $critical -and $fastSummary.median -ne $slowSummary.median) {
-        return New-Decision $faster 'mann-whitney' 'totalTransactions'
-    }
-    if ($CanExtend) { return $null }
-
-    # Tie: latency first, then resource use; lower is better, and only non-overlapping ranges decide.
-    foreach ($metric in @('scanP99Ms', 'completeP99Ms') + $script:ResourceMetrics) {
+    $latencyRegressions = @()
+    foreach ($metric in @('scanP99Ms', 'completeP99Ms')) {
         $ma = Get-VariantSummary $RunsA $metric
         $mb = Get-VariantSummary $RunsB $metric
-        if ($null -eq $ma -or $null -eq $mb) { continue }
-        if (-not (Test-RangesOverlap $ma.range $mb.range)) {
-            $winner = 'A'
-            if ($mb.median -lt $ma.median) { $winner = 'B' }
-            return New-Decision $winner 'tie-break' $metric
-        }
+        if ($null -eq $ma -or $null -eq $mb -or $ma.median -le 0) { continue }
+        $rise = ($mb.median - $ma.median) / $ma.median * 100
+        if ($rise -gt $script:LatencyRegressionPercent) { $latencyRegressions += ('{0} +{1:0.0}%' -f $metric, $rise) }
     }
-    return New-Decision 'A' 'no-decision-keep-incumbent' $null
+    if ($change -le -$script:EquivalencePercent) { $classification = 'regression' }
+    elseif ($n -eq 1) {
+        $classification = 'no-demonstrated-improvement'
+        if ($change -ge $script:PromisingPercent) { $classification = 'promising' }
+    } else {
+        $classification = 'no-demonstrated-improvement'
+        if ($change -ge $script:EquivalencePercent -and 2 * $ahead -gt $n) { $classification = 'improvement' }
+    }
+    $winner = 'A'
+    if ($classification -eq 'improvement' -and $latencyRegressions.Count -eq 0) { $winner = 'B' }
+    return [pscustomobject][ordered]@{
+        pairs = $n
+        changePercent = $change
+        equivalent = [Math]::Abs($change) -lt $script:EquivalencePercent
+        pairsAheadB = $ahead
+        perPair = $perPair
+        classification = $classification
+        latencyRegressions = $latencyRegressions
+        winner = $winner
+        uDescriptive = Get-MannWhitneyU $b.values $a.values
+    }
 }
 
 function Read-MicroservicesRun([string]$EvidencePath) {
@@ -187,6 +210,116 @@ function Read-BaselineRun([string]$RunDir) {
     }
 }
 
+# Processes that belong to the benchmark itself (services, gateway, database, harness shells) and
+# the kernel's own accounting entries; every other process counts as background load.
+$script:BenchmarkProcessNames = @('Idle', 'System', 'Secure System', 'java', 'javaw', 'nginx', 'mysqld', 'mysql',
+    'powershell', 'pwsh', 'conhost', 'bash', 'sh', 'git')
+
+# Cumulative CPU seconds of every background process, keyed by PID and start time so a reused PID
+# is not mistaken for the same process.
+function Get-BackgroundCpuSnapshot {
+    $snapshot = @{}
+    foreach ($process in Get-Process) {
+        if ($script:BenchmarkProcessNames -contains $process.ProcessName) { continue }
+        $cpu = $null; $start = $null
+        try { $cpu = $process.CPU; $start = $process.StartTime } catch { }
+        if ($null -eq $cpu) { continue }
+        $ticks = 0
+        if ($start) { $ticks = $start.Ticks }
+        $snapshot['{0}@{1}' -f $process.Id, $ticks] = [pscustomobject]@{ name = $process.ProcessName; cpu = [double]$cpu }
+    }
+    return $snapshot
+}
+
+<#
+    The average number of cores that background processes used between two snapshots, plus the
+    blocking processes seen in either snapshot. A process that started after $Before counts with all
+    of its CPU time; one that both started and exited in between is missed.
+#>
+function Measure-BackgroundLoad($Before, $After, [double]$Seconds, [string[]]$Blocking) {
+    $used = 0.0
+    $byName = @{}
+    foreach ($key in $After.Keys) {
+        $now = $After[$key]
+        $delta = $now.cpu
+        if ($Before.ContainsKey($key)) { $delta = $now.cpu - $Before[$key].cpu }
+        if ($delta -le 0) { continue }
+        $used += $delta
+        if (-not $byName.ContainsKey($now.name)) { $byName[$now.name] = 0.0 }
+        $byName[$now.name] += $delta
+    }
+    $names = @(@($Before.Values) + @($After.Values) | ForEach-Object { $_.name } | Sort-Object -Unique)
+    $seen = @($Blocking | Where-Object { $names -contains $_ })
+    $span = [Math]::Max($Seconds, 0.001)
+    $heaviest = @($byName.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3 |
+        ForEach-Object { '{0}={1:0.00}' -f $_.Key, ($_.Value / $span) })
+    return [pscustomobject]@{ cores = [Math]::Round($used / $span, 3); blocking = $seen; heaviest = $heaviest }
+}
+
+function Write-IdleGateLog([string]$Path, [string]$Text) {
+    $line = "$(Get-Date -Format s) $Text"
+    Write-Host "[idle-gate] $line"
+    # A reader may hold the log open briefly; retry rather than fail the comparison.
+    for ($try = 0; $try -lt 20; $try++) {
+        try { [IO.File]::AppendAllText($Path, $line + "`r`n", (New-Object System.Text.UTF8Encoding $false)); return }
+        catch { Start-Sleep -Milliseconds 250 }
+    }
+}
+
+# The services' HTTP and gRPC ports, and the baseline harness's disposable gateway ports. Windows may
+# hand these out as client ports when its dynamic range starts low, and a service then cannot bind.
+$script:BenchmarkPorts = @(8080, 8081, 8082, 8083, 9092, 9093, 18080, 18081, 18082, 18083)
+
+# Connections on a benchmark port that would stop a service from binding it, as "port (process)".
+# Between runs no benchmark process is running, so every such connection belongs to another program.
+function Get-ForeignBenchmarkPortUsers {
+    return @(Get-NetTCPConnection -LocalPort $script:BenchmarkPorts -ErrorAction SilentlyContinue |
+        Where-Object { @('TimeWait', 'Closed') -notcontains [string]$_.State } | ForEach-Object {
+            $name = (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName
+            "$($_.LocalPort) ($name)"
+        } | Sort-Object -Unique)
+}
+
+# Blocks until no blocking process runs, no other program holds a benchmark port, and background
+# CPU stays low for three 10 s samples.
+function Wait-IdleMachine([string]$LogPath) {
+    $quiet = 0
+    $waiting = $null
+    while ($quiet -lt 3) {
+        $running = @()
+        if ($BlockingProcess.Count -gt 0) {
+            $running = @(Get-Process -Name $BlockingProcess -ErrorAction SilentlyContinue | ForEach-Object ProcessName | Sort-Object -Unique)
+        }
+        if ($running.Count -gt 0) {
+            $quiet = 0
+            $reason = "blocking process running: $($running -join ', ')"
+            if ($waiting -ne $reason) { Write-IdleGateLog $LogPath "waiting, $reason"; $waiting = $reason }
+            Start-Sleep -Seconds 30
+            continue
+        }
+        $ports = @(Get-ForeignBenchmarkPortUsers)
+        if ($ports.Count -gt 0) {
+            $quiet = 0
+            $reason = "benchmark port in use: $($ports -join ', ')"
+            if ($waiting -ne $reason) { Write-IdleGateLog $LogPath "waiting, $reason"; $waiting = $reason }
+            Start-Sleep -Seconds 30
+            continue
+        }
+        $before = Get-BackgroundCpuSnapshot
+        $started = Get-Date
+        Start-Sleep -Seconds 10
+        $load = Measure-BackgroundLoad $before (Get-BackgroundCpuSnapshot) ((Get-Date) - $started).TotalSeconds $BlockingProcess
+        if ($load.cores -le $IdleCpuCores) { $quiet++; continue }
+        $quiet = 0
+        $reason = "background CPU above $IdleCpuCores cores"
+        if ($waiting -ne $reason) {
+            Write-IdleGateLog $LogPath "waiting, $reason ($($load.cores); $($load.heaviest -join ', '))"
+            $waiting = $reason
+        }
+    }
+    if ($waiting) { Write-IdleGateLog $LogPath 'machine idle again; resuming' }
+}
+
 function Format-Summary($Summary) {
     if ($null -eq $Summary) { return 'n/a' }
     return ('{0} ({1}-{2})' -f $Summary.median, $Summary.range.min, $Summary.range.max)
@@ -196,7 +329,6 @@ function Invoke-Comparison {
     $ErrorActionPreference = 'Stop'
     if (-not $Workload) { throw '-Workload default|stress is required' }
     if (-not $Label -or $Label -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw '-Label is required (letters, digits, . _ -)' }
-    if ($MaxPairs -lt $Pairs) { throw '-MaxPairs must be at least -Pairs' }
     $server = $PSScriptRoot
     $repo = Split-Path -Parent $server
     $reports = Join-Path $repo 'load-client/reports/microservices-architecture'
@@ -222,21 +354,71 @@ function Invoke-Comparison {
     $runsA = New-Object System.Collections.Generic.List[object]
     $runsB = New-Object System.Collections.Generic.List[object]
     $order = New-Object System.Collections.Generic.List[string]
+    $invalidated = New-Object System.Collections.Generic.List[object]
+    $gateLog = Join-Path $reports 'compare/idle-gate.log'
 
+    # Runs one variant once under the idle-machine gate, repeating an attempt that background load
+    # invalidated.
     function Invoke-Run([string]$Variant, [int]$Number) {
         $runLabel = "$Label-$($Variant.ToLowerInvariant())-$Number"
         $order.Add($runLabel)
-        Write-Host "=== $runLabel ===" -ForegroundColor Cyan
+        for ($attempt = 1; ; $attempt++) {
+            Wait-IdleMachine $gateLog
+            Write-Host "=== $runLabel (attempt $attempt) ===" -ForegroundColor Cyan
+            $before = Get-BackgroundCpuSnapshot
+            $started = Get-Date
+            $run = $null; $failure = $null
+            try { $run = Invoke-MeasuredRun $Variant $runLabel } catch { $failure = $_ }
+            $load = Measure-BackgroundLoad $before (Get-BackgroundCpuSnapshot) ((Get-Date) - $started).TotalSeconds $BlockingProcess
+            # A failure while the services start (for example, another program took a port) happens
+            # before any load, so the attempt is set aside and repeated like a loaded one.
+            $startupFailure = $failure -and "$($failure.Exception.Message)" -match 'while waiting for|Benchmark ports are in use'
+            if ($load.cores -le $IdleCpuCores -and $load.blocking.Count -eq 0 -and -not $startupFailure) {
+                if ($failure) { throw $failure }
+                $run | Add-Member -NotePropertyName backgroundCpuCores -NotePropertyValue $load.cores
+                # Kept beside the run so a resumed comparison still reports it.
+                [IO.File]::WriteAllText((Join-Path $reports "$runLabel/idle-gate.json"),
+                    ([ordered]@{ backgroundCpuCores = $load.cores; heaviest = $load.heaviest } | ConvertTo-Json),
+                    (New-Object System.Text.UTF8Encoding $false))
+                break
+            }
+            $reason = "background CPU $($load.cores) cores ($($load.heaviest -join ', '))"
+            if ($load.blocking.Count -gt 0) { $reason = "blocking process ran: $($load.blocking -join ', '); $reason" }
+            if ($startupFailure) { $reason = "startup failed: $($failure.Exception.Message); $reason" }
+            $moved = Join-Path $compareDir "invalidated/$runLabel-attempt$attempt"
+            New-Item -ItemType Directory -Force -Path (Split-Path $moved) | Out-Null
+            if (Test-Path (Join-Path $reports $runLabel)) { Move-Item (Join-Path $reports $runLabel) $moved }
+            if ($BaselineWorktree) {
+                $baselineRun = Join-Path (Resolve-Path $BaselineWorktree).Path "load-client/reports/transaction-optimization/$runLabel"
+                if (Test-Path $baselineRun) { Move-Item $baselineRun "$moved-baseline" }
+            }
+            $invalidated.Add([pscustomobject][ordered]@{ label = $runLabel; attempt = $attempt; reason = $reason
+                failed = [bool]$failure; movedTo = "invalidated/$runLabel-attempt$attempt" })
+            Write-IdleGateLog $gateLog "invalidated $runLabel attempt ${attempt}: $reason"
+            if ($attempt -ge $MaxRunAttempts) { throw "Run $runLabel was invalidated $attempt times; the comparison is aborted" }
+        }
+        $run | Add-Member -NotePropertyName label -NotePropertyValue $runLabel
+        if ($Variant -eq 'A') { $runsA.Add($run) } else { $runsB.Add($run) }
+    }
+
+    function Invoke-MeasuredRun([string]$Variant, [string]$runLabel) {
         if ($Variant -eq 'A' -and $BaselineWorktree) {
             $baselineServer = Join-Path (Resolve-Path $BaselineWorktree).Path 'server'
             if (-not $env:DB_USER) { throw 'The baseline harness needs DB_USER and DB_PASSWORD' }
-            Push-Location $baselineServer
-            try {
-                & (Join-Path $baselineServer 'benchmark-scan.ps1') -MySqlExe $mysql -NginxBin $NginxBin -JavaExe $JavaExe `
-                    -Variant retained -Workload $Workload -TransactionPoolSize 32 -TransactionPoolMaxSize 64 -OutputLabel $runLabel
-            } finally {
-                Pop-Location
-            }
+            # A separate powershell.exe runs the baseline harness as it ran for T001: its native tools
+            # write stderr to files instead of PowerShell error records, which its own 'Stop' preference
+            # would turn into failures here, and its environment variables cannot leak into CP4 runs.
+            $harnessLog = Join-Path $compareDir "$runLabel-harness"
+            # Start-Process joins arguments with spaces and does not quote them, so quote each one.
+            $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $baselineServer 'benchmark-scan.ps1'),
+                '-MySqlExe', $mysql, '-NginxBin', $NginxBin, '-JavaExe', $JavaExe, '-Variant', 'retained', '-Workload', $Workload,
+                '-TransactionPoolSize', '32', '-TransactionPoolMaxSize', '64', '-OutputLabel', $runLabel) | ForEach-Object { '"' + $_ + '"' }
+            $harness = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WorkingDirectory $baselineServer -WindowStyle Hidden -PassThru `
+                -ArgumentList ($arguments -join ' ') -RedirectStandardOutput "$harnessLog-stdout.txt" -RedirectStandardError "$harnessLog-stderr.txt"
+            # Windows PowerShell 5.1 reports a null ExitCode unless the process handle is opened before exit.
+            $null = $harness.Handle
+            $harness.WaitForExit()
+            if ($harness.ExitCode -ne 0) { throw "Baseline harness for $runLabel exited with code $($harness.ExitCode); see $harnessLog-stderr.txt" }
             $baselineDir = Join-Path (Resolve-Path $BaselineWorktree).Path "load-client/reports/transaction-optimization/$runLabel/$Workload"
             $invariants = Join-Path $baselineDir "$Workload-invariants.txt"
             if (-not (Test-Path $invariants) -or -not (Select-String -Path $invariants -Pattern 'PASS' -Quiet)) {
@@ -251,26 +433,80 @@ function Invoke-Comparison {
             if ($Variant -eq 'B') { $extra = $VariantB }
             $arguments = @{ Workload = $Workload; OutputLabel = $runLabel; MySqlExe = $mysql; JavaExe = $JavaExe; ExtraEnv = $extra }
             if ($NginxBin) { $arguments.NginxBin = $NginxBin }
-            & (Join-Path $server 'benchmark-microservices.ps1') @arguments
+            & (Join-Path $server 'benchmark-microservices.ps1') @arguments | ForEach-Object { Write-Host $_ }
             $evidencePath = Join-Path $reports "$runLabel/evidence.json"
             if (-not (Test-Path $evidencePath)) { throw "Run $runLabel left no evidence.json" }
             $run = Read-MicroservicesRun $evidencePath
             if (-not $run.comparable) { throw "Run $runLabel is not comparable; the comparison is aborted" }
         }
+        return $run
+    }
+
+    # A finished run of an earlier, interrupted invocation: its evidence (or, for the baseline, its
+    # copied report and passing invariants) is complete and the run passed its checks.
+    function Test-CompletedRun([string]$Variant, [string]$RunLabel) {
+        $dir = Join-Path $reports $RunLabel
+        if ($Variant -eq 'A' -and $BaselineWorktree) {
+            $invariants = Join-Path $dir "$Workload-invariants.txt"
+            return (Test-Path (Join-Path $dir 'samples.csv')) -and (Test-Path $invariants) -and
+                (Select-String -Path $invariants -Pattern 'PASS' -Quiet) -and
+                [bool](Get-ChildItem $dir -Filter 'report-*.json' -ErrorAction SilentlyContinue)
+        }
+        $evidence = Join-Path $dir 'evidence.json'
+        if (-not (Test-Path $evidence)) { return $false }
+        return (Read-MicroservicesRun $evidence).comparable
+    }
+
+    function Add-ResumedRun([string]$Variant, [int]$Number) {
+        $runLabel = "$Label-$($Variant.ToLowerInvariant())-$Number"
+        $dir = Join-Path $reports $runLabel
+        if ($Variant -eq 'A' -and $BaselineWorktree) { $run = Read-BaselineRun $dir }
+        else { $run = Read-MicroservicesRun (Join-Path $dir 'evidence.json') }
+        $cores = $null
+        $gate = Join-Path $dir 'idle-gate.json'
+        if (Test-Path $gate) { $cores = (Get-Content -Raw $gate | ConvertFrom-Json).backgroundCpuCores }
+        $run | Add-Member -NotePropertyName backgroundCpuCores -NotePropertyValue $cores
+        $run | Add-Member -NotePropertyName resumed -NotePropertyValue $true
         $run | Add-Member -NotePropertyName label -NotePropertyValue $runLabel
+        $order.Add($runLabel)
         if ($Variant -eq 'A') { $runsA.Add($run) } else { $runsB.Add($run) }
     }
 
-    $decision = $null
-    for ($pair = 1; $pair -le $MaxPairs; $pair++) {
+    # Resume: keep the leading complete pairs of an interrupted invocation, in their original order,
+    # and move every other run of this label aside so it is repeated.
+    $resumedPairs = 0
+    for ($pair = 1; $pair -le $Pairs; $pair++) {
+        if (-not ((Test-CompletedRun 'A' "$Label-a-$pair") -and (Test-CompletedRun 'B' "$Label-b-$pair"))) { break }
+        if ($pair % 2 -eq 1) { Add-ResumedRun 'A' $pair; Add-ResumedRun 'B' $pair }
+        else { Add-ResumedRun 'B' $pair; Add-ResumedRun 'A' $pair }
+        $resumedPairs = $pair
+    }
+    $pattern = '^' + [regex]::Escape($Label) + '-[ab]-(\d+)$'
+    $leftovers = @(Get-ChildItem $reports -Directory | Where-Object {
+        $_.Name -match $pattern -and [int]$Matches[1] -gt $resumedPairs } |
+        ForEach-Object { [pscustomobject]@{ item = $_; suffix = '' } })
+    if ($BaselineWorktree) {
+        $baselineReports = Join-Path (Resolve-Path $BaselineWorktree).Path 'load-client/reports/transaction-optimization'
+        if (Test-Path $baselineReports) {
+            $leftovers += @(Get-ChildItem $baselineReports -Directory | Where-Object {
+                $_.Name -match $pattern -and [int]$Matches[1] -gt $resumedPairs } |
+                ForEach-Object { [pscustomobject]@{ item = $_; suffix = '-baseline' } })
+        }
+    }
+    foreach ($leftover in $leftovers) {
+        $name = $leftover.item.Name
+        $target = Join-Path $compareDir "interrupted/$name-$(Get-Date -Format yyyyMMddHHmmss)$($leftover.suffix)"
+        New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+        Move-Item $leftover.item.FullName $target
+        Write-IdleGateLog $gateLog "moved interrupted run $name$($leftover.suffix) to interrupted/"
+    }
+    if ($resumedPairs -gt 0) { Write-IdleGateLog $gateLog "resumed $Label with $resumedPairs complete pairs" }
+
+    for ($pair = $resumedPairs + 1; $pair -le $Pairs; $pair++) {
         if ($pair % 2 -eq 1) { Invoke-Run 'A' $pair; Invoke-Run 'B' $pair }
         else { Invoke-Run 'B' $pair; Invoke-Run 'A' $pair }
-        if ($pair -lt $Pairs) { continue }
-        $stage = 'extended'
-        if ($pair -eq $Pairs) { $stage = 'pairs' }
-        $decision = Get-Decision $runsA $runsB $stage ($pair -lt $MaxPairs)
-        if ($null -ne $decision) { break }
     }
+    $decision = Get-Decision $runsA $runsB
 
     $metrics = @('totalTransactions', 'scanP99Ms', 'completeP99Ms') + $script:ResourceMetrics
     $summary = [ordered]@{}
@@ -283,6 +519,8 @@ function Invoke-Comparison {
         workload = $Workload
         variants = [ordered]@{ A = $variantADescription; B = $VariantB }
         runOrder = $order
+        idleGate = [ordered]@{ idleCpuCores = $IdleCpuCores; blockingProcesses = $BlockingProcess; invalidatedRuns = $invalidated }
+        resumedPairs = $resumedPairs
         runs = [ordered]@{ A = $runsA; B = $runsB }
         summary = $summary
         decision = $decision
@@ -295,11 +533,14 @@ function Invoke-Comparison {
     $describeB = ($VariantB.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', '
     if (-not $describeA) { $describeA = 'defaults' }
     if (-not $describeB) { $describeB = 'defaults' }
-    $row = '| `{0}` | {1} | A: {2}; B: {3} | {4} | {5} | {6} | {7} | {8} ({9}) | {10} |' -f $Label, $Workload, $describeA, $describeB,
-        $decision.pairs, (Format-Summary $tx.A), (Format-Summary $tx.B), $decision.u, $decision.winner, $decision.rule, $decision.decidingMetric
+    $latency = 'none'
+    if ($decision.latencyRegressions.Count -gt 0) { $latency = $decision.latencyRegressions -join ', ' }
+    $row = '| `{0}` | {1} | A: {2}; B: {3} | {4} | {5} | {6} | {7:+0.00;-0.00;0.00}% | {8} of {4} | {9} | {10} |' -f $Label, $Workload,
+        $describeA, $describeB, $decision.pairs, (Format-Summary $tx.A), (Format-Summary $tx.B), $decision.changePercent,
+        $decision.pairsAheadB, $decision.classification, $latency
     Set-Content -Encoding UTF8 -Path (Join-Path $compareDir 'compare.md') -Value @(
-        '| Label | Workload | Variants | Pairs | A median (range) | B median (range) | U | Decision | Deciding metric |',
-        '|---|---|---|---:|---:|---:|---:|---|---|',
+        '| Label | Workload | Variants | Pairs | A median (range) | B median (range) | Delta | B ahead | Classification | p99 regression |',
+        '|---|---|---|---:|---:|---:|---:|---:|---|---|',
         $row)
     Write-Host $row
     Write-Host "Recorded $compareDir/compare.json" -ForegroundColor Green

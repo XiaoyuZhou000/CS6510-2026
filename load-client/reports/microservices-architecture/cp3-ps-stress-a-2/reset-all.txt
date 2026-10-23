@@ -1,0 +1,34 @@
+﻿Resetting inventory schema 'cs6510_inventory' on 127.0.0.1:3307 as 'cs6510_inventory_svc'...
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\inventory\schema.sql
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\inventory\seed.sql
++---------------+----------------+-------------+---------------------+--------------------------------------+
+| catalog_items | inventory_rows | total_units | checkout_operations | catalog_version                      |
++---------------+----------------+-------------+---------------------+--------------------------------------+
+|          2000 |           2000 |    20000000 |                   0 | 34829508-cdf5-11f1-8687-00fffb1eae59 |
++---------------+----------------+-------------+---------------------+--------------------------------------+
+inventory schema reset.
+Resetting transaction schema 'cs6510_transaction' on 127.0.0.1:3307 as 'cs6510_transaction_svc'...
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\transaction\schema.sql
++--------------+----------------+-------------------+------------------+-----------------+
+| transactions | accepted_scans | checkout_attempts | replica_products | replica_version |
++--------------+----------------+-------------------+------------------+-----------------+
+|            0 |              0 |                 0 |                0 | NULL            |
++--------------+----------------+-------------------+------------------+-----------------+
+transaction schema reset.
+Resetting analytics schema 'cs6510_analytics' on 127.0.0.1:3307 as 'cs6510_analytics_svc'...
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\analytics\schema.sql
++----------------+---------------+---------------+-----------------+-----------------+
+| accepted_scans | last_position | product_names | popular_windows | last_window_end |
++----------------+---------------+---------------+-----------------+-----------------+
+|              0 |             0 |             0 |               0 |               0 |
++----------------+---------------+---------------+-----------------+-----------------+
+analytics schema reset.
+Baseline:
+  catalog rows                     2000
+  inventory rows                   2000
+  stock units                      20000000
+  transactions                     0
+  Transaction accepted_scan rows   0
+  Analytics accepted_scan rows     0
+  Analytics last_position          0
+All three service schemas are at the baseline.

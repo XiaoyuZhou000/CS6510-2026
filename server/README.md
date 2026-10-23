@@ -66,6 +66,7 @@ Every setting comes from the environment. Each service reads only its own `<SERV
 | `CHECKOUT_RECOVERY_SCAN_SECONDS`, `CHECKOUT_WAIT_BACKSTOP_MS` | Transaction | 30, 1000. These are the recovery safety-scan interval and the waiter's database backstop. Waiting and recovery are otherwise event-driven. |
 | `CATALOG_REFRESH_SECONDS` | Transaction | 30 |
 | `OUTBOX_BATCH_SIZE`, `ANALYTICS_RPC_DEADLINE_MS` | Transaction | 500, 5000 |
+| `OUTBOX_COALESCE_MS` | Transaction | 0 (off). A CP3 A/B switch: after a partial batch, the relay waits this long before its next round, so rounds carry more events. At most 1000. |
 | `TRANSACTION_CACHE_MAX_ENTRIES` | Transaction | 100000. 0 disables the transaction state cache, for A/B runs. |
 | `DB_SERVER_PREPARED_STATEMENTS` | all | `false`. A CP3 A/B switch that adds `useServerPrepStmts=true`. |
 | `PERF_METRICS`, `PERF_METRICS_INTERVAL_SECONDS` | all | `false`, 10. When enabled, each service prints one JSON metrics line per interval and at shutdown. This replaces the former `SCAN_PROFILE`. |
@@ -187,11 +188,13 @@ Benchmark baseline procedure:
 - **Comparability**: `comparable=true` requires all three services, the exact Load Client command, and a passing validator.
 - **Variants**: `-ExtraEnv @{ NAME = 'value' }` passes a variant's settings to every service.
 
-`server/benchmark-compare.ps1` runs two variants as interleaved pairs (A B, B A, A B, …), each run after its own reset, and writes `compare/<label>/compare.json` and `compare.md`. `-BaselineWorktree` runs variant A as the CP0 baseline from a worktree of commit `26c89af`. The R22 decision rule:
+`server/benchmark-compare.ps1` runs two variants as interleaved pairs (A B, B A, A B, …), each run after its own reset, and writes `compare/<label>/compare.json` and `compare.md`. `-BaselineWorktree` runs variant A as the CP0 baseline from a worktree of commit `26c89af`. It runs exactly `-Pairs` pairs (default 1) and classifies the result by the R22 rule. Δ is variant B's `totalTransactions` median against variant A's, and differences within ±3% are practically equivalent.
 
-1. **Clear**: after `-Pairs` (3), the `totalTransactions` medians differ by at least 3% and the ranges do not overlap. The faster variant wins.
-2. **Close**: otherwise, up to `-MaxPairs` (5) pairs, deciding on `totalTransactions` once the one-sided Mann-Whitney U reaches the 5% critical value.
-3. **Tie**: otherwise, compare Scan p99, then Complete p99, then resource use. If nothing decides, the incumbent, variant A, stays.
+1. **Screening** (one pair): promising at Δ ≥ +5%, regression at Δ ≤ −3%, otherwise no demonstrated improvement.
+2. **Confirmation** (three fresh pairs, only for a promising variant): improvement at Δ ≥ +3% with B ahead in at least two pairs; otherwise no demonstrated improvement or regression. Close results are not extended.
+3. **Latency veto**: a Scan or Complete p99 median more than 10% above A's is flagged as a latency regression. Resource use is reported only.
+
+Before each run an idle-machine gate waits until no `-BlockingProcess` runs, no other program holds a benchmark port, and background CPU stays at or below `-IdleCpuCores` (1.0). A loaded or failed-to-start run is moved to `compare/<label>/invalidated/` and repeated. Rerunning an interrupted comparison with the same label keeps its complete pairs. Statistical significance is never claimed: one pair screens and three pairs confirm a clear effect.
 
 Checkpoints CP0–CP4 are recorded in [checkpoints.md](../load-client/reports/microservices-architecture/checkpoints.md). CP1–CP3 attribute costs, and only the interleaved CP0-versus-CP4 runs form the final comparison. Every checkpoint reports the client-observed `totalTransactions` against the CP0 baseline. Fewer statements or lower latency never count as an improvement on their own.
 

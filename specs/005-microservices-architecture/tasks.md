@@ -354,6 +354,15 @@ These rules bind every task below.
     2. **Close**: otherwise, run up to `-MaxPairs`. Decide on `totalTransactions` only if U is at or below the one-sided 5% critical value for that number of pairs (U ≤ 4 for 5 against 5).
     3. **Tie**: otherwise, compare Scan and Complete p99, then resource use, and decide on a metric only when its ranges do not overlap. If none decides, keep the simpler or incumbent variant.
   - **Output**: `load-client/reports/microservices-architecture/compare/<label>/compare.json`, plus a Markdown row to paste into `checkpoints.md`: variants, pairs, medians, ranges, U, decision, and the deciding metric.
+  - **Revised 2026-10-22 during T123** (streamlined policy, R22):
+    - The script runs exactly `-Pairs` pairs with no extension; `-MaxPairs` is removed.
+    - It classifies the result by Δ instead of deciding with the Mann–Whitney U test:
+      - with one pair: promising (Δ ≥ +5%), regression (Δ ≤ −3%), or no demonstrated improvement;
+      - with more pairs: improvement (Δ ≥ +3% and ahead in at least two pairs), regression, or no demonstrated improvement.
+    - A Scan or Complete p99 median more than 10% above the incumbent's is flagged as a latency regression.
+    - It records the per-pair differences, and the U value only as description.
+    - The idle-machine gate, retries for startup failures, and resume of interrupted comparisons were added during T123, so runs stay valid on a shared machine.
+    - The gate limit is 2.0 of the 24 logical cores, as passed by the CP3 and CP4 drivers. At 1.0, ordinary desktop load of about 1.1–1.5 cores invalidated every attempt; the games that contaminated earlier runs are blocked by name. Each run records its measured background load.
 - [X] T137 Verify the foundation and run its parity gate with `server/run-tests.sh`:
   - Run `server/build.sh` and `server/build-tests.sh`, then `PARITY_GATE=Foundational server/run-tests.sh`. Set `SERVER_BASE_URL` against the pre-migration deployment, so the live retained tests run too.
   - The whole suite must pass: every `RETAINED` and `ADAPTED` test, every legacy test that still compiles, and T024–T027, T134, and T135.
@@ -1125,46 +1134,51 @@ The receipt and every error match the established contract, with captured prices
 
 **Independent Test**: Reset all three services, run the default command and verify invariants after settlement, then repeat with a separate reset for the stress command. Inspect both reports and their evidence files.
 
-- [ ] T123 [US7] CP3 tuning A/B (R16, R20, R22) with `server/benchmark-compare.ps1`, recorded in `load-client/reports/microservices-architecture/checkpoints.md`:
+- [X] T123 [US7] CP3 tuning A/B (R16, R20, R22) with `server/benchmark-compare.ps1`, recorded in `load-client/reports/microservices-architecture/checkpoints.md`:
   - **Equivalent workloads and functionality**:
     - every variant uses the same build, the same reset baseline, all three services, the exact Load Client command, and the same configuration apart from the knob under test;
     - every run must be `comparable` (T020);
     - a variant that changes behavior, or whose run fails validation, is rejected regardless of speed.
-  - **Variants**, each against the current defaults:
-    - server-side prepared statements: `DB_SERVER_PREPARED_STATEMENTS=true`;
-    - Inventory pool: `INVENTORY_DB_POOL_SIZE` and `INVENTORY_DB_POOL_MAX_SIZE` at 10/32 and at 24/64;
-    - Transaction pool: 48/80, within the MySQL connection budget (80 + 48 + 10 = 138, under 151);
-    - cache off: `TRANSACTION_CACHE_MAX_ENTRIES=0`, to quantify R19;
-    - any statement-budget alternative proposed during implementation (T135).
-  - **Procedure**:
-    1. Screen each variant with one pair per workload, and drop it if it loses by more than 5% on both workloads.
-    2. Otherwise, compare default and stress with `-Pairs 3 -MaxPairs 5`, and apply the T136 decision rule: `totalTransactions` first, then Scan and Complete p99, then resource use, then simplicity.
-  - **Keep** a variant only if it wins on at least one workload and shows no measurable loss on the other. Record every comparison row and each keep or reject decision.
-  - **Report** each variant's actual client-observed `totalTransactions` (median and range) next to the current defaults' and the CP0 baseline's (Implementation Rule 6). A variant that only lowers statement counts or latency, without a measured `totalTransactions` gain, is not a win.
-- [ ] T124 [US7] Apply only the CP3 winners: change the defaults in the service mains' `DatabaseConfig.fromEnvironment` arguments or in the run scripts, and update the configuration table in `specs/005-microservices-architecture/contracts/service-deployment.md`. When a winner changes a statement count, update `server/tests/performance/statement-budgets.properties` with the new ceiling and its `.evidence` label (T135). Then rerun `server/tests/performance/**`.
-- [ ] T125 [US7] Run the complete suite and the final parity gate with `server/run-tests.sh`:
+  - **Variants**, each against the current defaults, measured on its relevant workloads (R22):
+    - server-side prepared statements: `DB_SERVER_PREPARED_STATEMENTS=true`, on both workloads;
+    - Inventory pool: `INVENTORY_DB_POOL_SIZE` and `INVENTORY_DB_POOL_MAX_SIZE` at 10/32 and at 24/64, on stress;
+    - Transaction pool: 48/80, within the MySQL connection budget (80 + 48 + 10 = 138, under 151), on stress;
+    - any statement-budget alternative proposed during implementation (T135): relay coalescing, `OUTBOX_COALESCE_MS=100` (R23, from CP2's evidence), on both workloads.
+    - The cache-off attribution run (`TRANSACTION_CACHE_MAX_ENTRIES=0`, R19) is skipped unless a correctness issue or a major regression needs it.
+  - **Procedure** (streamlined 2026-10-22; R22 has the thresholds):
+    1. **Screen** each variant with one interleaved pair (`-Pairs 1`) per relevant workload. Reject it unless Δ ≥ +5% on some workload. Within ±3% counts as practically equivalent, and below +5% is no demonstrated improvement.
+    2. **Confirm** a promising variant with three fresh pairs (`-Pairs 3`) on each workload where it was promising. Keep it only if Δ ≥ +3% and it is ahead in at least two of the three pairs. Close results are not extended.
+    3. **Regression check**: a confirmed variant needs at least one default-workload pair, unless the default was already measured. Reject it on any correctness failure, a Δ ≤ −3% on any measured workload, or a Scan or Complete p99 median more than 10% above the incumbent's.
+    4. **Stop** once the remaining candidates are unlikely to give a meaningful gain.
+    - The comparisons completed under the earlier five-pair rule stand as recorded: server prepared statements and Inventory 10/32, each on both workloads.
+  - **Keep** a variant only if it passes confirmation and the regression check. Record every comparison row and each keep or reject decision. State the number of pairs, and acknowledge the reduced statistical confidence of one-pair screens and three-pair confirmations; claim no significance.
+  - **Report** each variant's actual client-observed `totalTransactions` (median and range) next to the current defaults' and the CP0 baseline's (Implementation Rule 6). A variant that only lowers statement counts, latency, or resource use, without a measured `totalTransactions` gain, is not a win.
+- [X] T124 [US7] Apply only the CP3 winners: change the defaults in the service mains' `DatabaseConfig.fromEnvironment` arguments or in the run scripts, and update the configuration table in `specs/005-microservices-architecture/contracts/service-deployment.md`. When a winner changes a statement count, update `server/tests/performance/statement-budgets.properties` with the new ceiling and its `.evidence` label (T135). Then rerun `server/tests/performance/**`.
+- [X] T125 [US7] Run the complete suite and the final parity gate with `server/run-tests.sh`:
   - With all services and the gateway running, run `server/build-tests.sh`, then `PARITY_GATE=final SERVER_BASE_URL=http://localhost:8080 server/run-tests.sh`.
   - Require zero failures and no skipped contract, integration, rpc, or performance tests; only the opt-in `ResetBaselineTest` may abort.
   - Require a ledger with no `PENDING` row and a `Verified at` value on every row.
-- [ ] T152 [US7] Run the final CP0-versus-CP4 comparison (R22) with `server/benchmark-compare.ps1`, recorded in `load-client/reports/microservices-architecture/checkpoints.md`:
+- [X] T152 [US7] Run the final CP0-versus-CP4 comparison (R22) with `server/benchmark-compare.ps1`, recorded in `load-client/reports/microservices-architecture/checkpoints.md`:
   - Create a worktree of commit 26c89af outside the repository with `git worktree add ../cs6510-cp0 26c89af`, and build it as in T001.
-  - On the same machine and day, with nothing else running, run interleaved pairs: default with `-Pairs 5`, and stress with `-Pairs 3`. Variant A is CP0 (`-BaselineWorktree ../cs6510-cp0`). Variant B is CP4, the current build with its defaults.
+  - On the same machine and day, with nothing else running (the idle-machine gate), run three interleaved pairs per workload: default and stress, each with `-Pairs 3`. Variant A is CP0 (`-BaselineWorktree ../cs6510-cp0`). Variant B is CP4, the current build with its defaults.
   - Designate the official reports before running: the first CP4 run of each workload, `cp4-final-default-b-1` and `cp4-final-stress-b-1`. Never substitute a later or better run.
   - Record per workload:
-    - the median and range of `totalTransactions`, the percentage change, and the Mann–Whitney U value;
+    - the median and range of `totalTransactions`, the percentage change, and the per-pair differences;
     - the medians of Start, Scan, and Complete p95/p99.
     
+    Report the measured differences without claiming statistical significance. Three pairs per workload describe the change; they do not test it.
+    
     These are the only figures used for the CP0-to-CP4 comparison; CP1–CP3 serve only for attribution. Any performance claim is stated in client-observed `totalTransactions` against CP0, never in statement counts or latency alone (Implementation Rule 6).
-- [ ] T126 [US7] Validate and publish the official default report (FR-055, SC-010, SC-011): the predesignated run `cp4-final-default-b-1` from T152, in `load-client/reports/microservices-architecture/`. That run executed exactly `java -cp out Main` after a fresh reset of all three services.
+- [X] T126 [US7] Validate and publish the official default report (FR-055, SC-010, SC-011): the predesignated run `cp4-final-default-b-1` from T152, in `load-client/reports/microservices-architecture/`. That run executed exactly `java -cp out Main` after a fresh reset of all three services.
   - Require zero errors for every operation, zero background completions, validator PASS, and evidence showing `innodb_flush_log_at_trx_commit=1` and `sync_binlog=1`.
   - If any requirement fails, fix the cause, then rerun T125 and the whole of T152. Never substitute another run.
   - Copy the client JSON byte for byte to `load-client/reports/microservices-architecture/default.json`.
-- [ ] T127 [US7] Validate and publish the official stress report: the predesignated run `cp4-final-stress-b-1` from T152, in `load-client/reports/microservices-architecture/`. That run executed exactly `java -cp out Main --stations=100 --duration=120` after its own fresh reset.
+- [X] T127 [US7] Validate and publish the official stress report: the predesignated run `cp4-final-stress-b-1` from T152, in `load-client/reports/microservices-architecture/`. That run executed exactly `java -cp out Main --stations=100 --duration=120` after its own fresh reset.
   - Require validator PASS, and report and explain the background completions (FR-058). The no-substitution rule of T126 applies.
   - Copy the client JSON byte for byte to `load-client/reports/microservices-architecture/stress.json`.
-- [ ] T128 [US7] Write `load-client/reports/microservices-architecture/README.md` with:
+- [X] T128 [US7] Write `load-client/reports/microservices-architecture/README.md` with:
   - the deployment, the JAR SHA-256 hashes, and the exact commands;
-  - the final comparison, taken only from T152: CP0 against CP4 per workload with medians, ranges, percentage change, and the U statistic. It leads with `totalTransactions`, then throughput, per-operation error rates, and p95/p99.
+  - the final comparison, taken only from T152: CP0 against CP4 per workload with medians, ranges, percentage change, and per-pair differences, stated without claims of statistical significance. It leads with `totalTransactions`, then throughput, per-operation error rates, and p95/p99.
   - an attribution table for CP1–CP3, labeled as attribution rather than comparison: each checkpoint's actual `totalTransactions` against CP0, pool wait and hold time, `TransactionLocks` wait, contention, and collisions, Inventory lock wait, `ApplyCheckout` latency, relay and Analytics backlog, visibility delay, recovery queries, wait checks, and idle polls;
   - a statement that every performance claim rests on client-observed `totalTransactions`; statement counts and latencies appear only as explanations (Implementation Rule 6);
   - the R18 mandatory-versus-optional cost breakdown, with the measured commits per basket;
@@ -1352,7 +1366,7 @@ Task: "RestartDuringWorkloadTest in server/tests/integration/RestartDuringWorklo
 - **Benchmarks**:
   - CP0 and CP4, interleaved on the same day (T152), form the final comparison. CP1–CP3 attribute costs.
   - CP3 variants run under equivalent workloads and functionality.
-  - Close A/B results are repeated up to five pairs before a decision.
+  - A/B screens use one pair per relevant workload; only a variant promising about +5% gets three confirmation pairs. Close results are no demonstrated improvement, not a reason for more pairs (R22, streamlined 2026-10-22).
   - Decide on `totalTransactions` first, then tail latency, then resource use.
 - **Recovery and waiting**: driven by events rather than frequent polling. Recovery queries are indexed and bounded, and CP2 measures their cost along with connection hold time and idle reads.
 - **Locks**: lock wait time, contention, and stripe collisions are recorded at every checkpoint. Collisions may cost time but never change an outcome.

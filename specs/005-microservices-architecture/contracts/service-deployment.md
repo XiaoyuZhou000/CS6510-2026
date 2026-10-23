@@ -45,6 +45,7 @@ cd server
 | `CHECKOUT_RECOVERY_SCAN_SECONDS`, `CHECKOUT_WAIT_BACKSTOP_MS` | Transaction | 30, 1000. The recovery safety-scan interval, and the waiter's database backstop interval. Waiting and recovery are otherwise event-driven (R7). |
 | `CATALOG_REFRESH_SECONDS` | Transaction | 30 |
 | `OUTBOX_BATCH_SIZE`, `ANALYTICS_RPC_DEADLINE_MS` | Transaction | 500, 5000 |
+| `OUTBOX_COALESCE_MS` | Transaction | 0 (off). After a partial batch, the relay waits this long before its next round, so each round carries more events and costs fewer delivery commits; a full batch still continues at once. At most 1000. This is the checkpoint CP3 A/B switch for the R23 coalescing option, and the default changes only with measured evidence. |
 | `TRANSACTION_CACHE_MAX_ENTRIES` | Transaction | 100000 (0 disables the transaction state cache, for A/B runs and as a fallback; R19) |
 | `DB_SERVER_PREPARED_STATEMENTS` | all | `false`. When `true`, adds `useServerPrepStmts=true` to the JDBC URL. This is a checkpoint CP3 A/B switch (R20), and the default changes only with measured evidence. |
 | `PERF_METRICS`, `PERF_METRICS_INTERVAL_SECONDS` | all | `false`, 10. When enabled, each service logs a one-line JSON metrics summary every interval and at shutdown (R21). This replaces `SCAN_PROFILE`. |
@@ -127,7 +128,11 @@ Each query runs with the owning service's credentials. Each service also logs a 
 - the recovery query, wait-check, and idle-poll counters;
 - `comparable=true` when all three services ran, the exact Load Client command was used, and the validator passed.
 
-**A/B runs**: `server/benchmark-compare.ps1` (R22) runs two variants as interleaved pairs, each after its own reset. Variant A may instead be the baseline implementation, run from a worktree with its own `benchmark-scan.ps1`. The script applies the R22 decision rule: at least 3 pairs, up to 5 when the result is close, deciding on `totalTransactions`, then p99 latency, then resource use. It writes `compare/<label>/compare.json`.
+**A/B runs**: `server/benchmark-compare.ps1` (R22) runs two variants as interleaved pairs, each after its own reset. Variant A may instead be the baseline implementation, run from a worktree with its own `benchmark-scan.ps1`. The script runs exactly `-Pairs` pairs and classifies the result by the R22 rule, by the `totalTransactions` change Δ:
+- **one pair** (screening): promising at Δ ≥ +5%, regression at Δ ≤ −3%, otherwise no demonstrated improvement;
+- **more pairs** (confirmation): improvement at Δ ≥ +3% with the variant ahead in at least two pairs, otherwise no demonstrated improvement or regression.
+
+A Scan or Complete p99 median more than 10% above the incumbent's is flagged as a latency regression. Before each run, an idle-machine gate waits until no other program holds a benchmark port and background CPU is low; a loaded or failed-to-start run is set aside and repeated. An interrupted comparison resumes from its complete pairs. The script writes `compare/<label>/compare.json`.
 
 **Reporting rule**: every checkpoint reports the actual client-observed `totalTransactions` and its change against the CP0 baseline. Statement counts and latencies explain results but are never presented as an improvement on their own.
 

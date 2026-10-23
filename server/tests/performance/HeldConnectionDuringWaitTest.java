@@ -71,8 +71,16 @@ class HeldConnectionDuringWaitTest {
 
                 int sampled = 0;
                 while (!scan.isDone()) {
-                    assertEquals(baseline, waiterPool.occupancy().active(),
-                            "no pooled connection is held between the waiter's checks");
+                    int active = waiterPool.occupancy().active();
+                    if (active != baseline) {
+                        // A sample can land inside one of the bounded checks, which borrows a connection
+                        // for one read. A connection held between checks would still be held 100 ms
+                        // later, far inside the 1 s backstop; the hold-time assertions below bound every
+                        // borrow.
+                        Thread.sleep(100);
+                        active = waiterPool.occupancy().active();
+                    }
+                    assertEquals(baseline, active, "no pooled connection is held between the waiter's checks");
                     assertRowLockable(schema, id);
                     sampled++;
                     Thread.sleep(150);
