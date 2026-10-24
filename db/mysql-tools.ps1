@@ -4,7 +4,7 @@
         . (Join-Path $PSScriptRoot 'mysql-tools.ps1')
 
 .DESCRIPTION
-    - Resolve-MySqlExe finds the mysql client the same way db/init-db.ps1 does.
+    - Resolve-MySqlExe finds the mysql client the same way the retired db/init-db.ps1 did.
     - Get-ServiceDbCredential reads <SERVICE>_DB_NAME, <SERVICE>_DB_USER, and
       <SERVICE>_DB_PASSWORD, prompting securely for a missing password.
     - Invoke-MySql runs SQL text on stdin or one query, passing the password only

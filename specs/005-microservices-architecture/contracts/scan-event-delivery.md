@@ -88,7 +88,7 @@ Unchanged from feature 004:
 | After load stops, either benchmark workload | Published window reaches the highest eligible boundary within 60 s |
 | During an Analytics outage | Lag appears only as an older published window; Scan and Complete are unaffected |
 
-Measurement: the Analytics metrics record publication time against the boundary event's `accepted_at`, which the event carries. The harness samples backlog every 2 s (R21). The relay and the Analytics poller count their empty polls (`transaction.relay.idlePolls`, `analytics.poller.idlePolls`), so checkpoint CP2 can show whether idle reads matter. Signal-driven wake-up remains a deferred option (R23).
+Measurement: `analytics.window.publishLag` records the time from the boundary event's ingestion (its Analytics `accepted_scan.received_at`) to its window's commit. The harness samples backlog every 2 s (R21). The relay and the Analytics poller count their empty polls (`transaction.relay.idlePolls`, `analytics.poller.idlePolls`), so checkpoint CP2 can show whether idle reads matter. Signal-driven wake-up remains a deferred option (R23).
 
 ## 7. Failure behavior
 
@@ -108,4 +108,4 @@ Measurement: the Analytics metrics record publication time against the boundary 
 | `relay.afterAck` | After `OK` is received, before `delivered_at` commits |
 | `analytics.ingest.received` | After a batch arrives and passes validation, before the ingestion transaction begins |
 | `analytics.ingest.beforeCommit` and `analytics.ingest.afterCommit` | Around the ingestion commit. `afterCommit` runs after the commit and before the reply. |
-| `analytics.persist.afterCommit` | After a window, ranks, and checkpoint commit |
+| No named hook | A persistence interruption is simulated by a failing `PopularWindowStore` in `integration/AnalyticsCrashRecoveryTest` |

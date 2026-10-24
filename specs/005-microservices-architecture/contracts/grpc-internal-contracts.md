@@ -1,6 +1,6 @@
 # Internal gRPC Contracts
 
-**Sources**: [proto/inventory_service.proto](proto/inventory_service.proto), [proto/analytics_ingest.proto](proto/analytics_ingest.proto) | **Requirements**: FR-009–FR-013, FR-026–FR-032, FR-041–FR-043 | **Decisions**: R2, R5, R6, R8, R10, R11
+**Sources**: [inventory_service.proto](../../../server/contracts/src/main/proto/selfcheckout/inventory/v1/inventory_service.proto), [analytics_ingest.proto](../../../server/contracts/src/main/proto/selfcheckout/analytics/v1/analytics_ingest.proto) (the files in `proto/` point there) | **Requirements**: FR-009–FR-013, FR-026–FR-032, FR-041–FR-043 | **Decisions**: R2, R5, R6, R8, R10, R11
 
 These are the only synchronous service-to-service interfaces. Gateway traffic, client traffic, and the Scan path never use them (FR-012).
 

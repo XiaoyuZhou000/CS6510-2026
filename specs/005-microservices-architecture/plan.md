@@ -100,6 +100,19 @@ Evolve the existing three-process, one-database service-based system into three 
 
 **Post-design re-check**: [data-model.md](data-model.md), the five [contracts](contracts/), the [`.proto` baselines](contracts/proto/), and [quickstart.md](quickstart.md) preserve every gate under v5.1.0, including after the memory-first revision and the approved implementation constraints. No unresolved clarification remains, and no deviation remains.
 
+**Pre-release re-check (T133, 2026-10-23)**: every gate above still passes with no deviation.
+- **Constitution text**: `.specify/memory/constitution.md` reads v5.1.0 and contains changes 1–8 of the [amendment proposal](constitution-amendment-proposal.md) verbatim. None of the replaced v5.0.0 wording remains. The temporary Sync Impact Report comment was removed, as Governance requires, and no further amendment was made.
+- **Changes during implementation**: none touches a gate.
+  - The authoritative `.proto` files moved to `server/contracts/src/main/proto/`, and `contracts/proto/` now holds pointers to them.
+  - CP3 retained no tuning variant, so every default in [service-deployment.md](contracts/service-deployment.md) is unchanged.
+  - T129 retired the single-database scripts and CP0 harnesses, and CP0 stays reproducible from commit `26c89af`.
+  - T131 corrected doc names and commands only.
+- **Performance (VIII, IX)**: the CP4 result, a lower `totalTransactions` than CP0, is a measured outcome, not a deviation. VIII requires measured, reported results, not a numerical target, and the README and `checkpoints.md` in `load-client/reports/microservices-architecture/` report it with its attribution.
+- **Principle II and the *Transient and Settled Guarantees***: durable forward recovery and every safety invariant still hold across crashes, restarts, and multiple Transaction instances. The final parity gates (T125 and T130) passed, including:
+  - `integration/CheckoutSagaTest`, `CheckoutRecoveryFaultTest`, `BoundedWaitTest`, `TransactionRestartDurabilityTest`, `RestartDuringWorkloadTest`, `StockConservationTest`, `DuplicateCompletionTest`, and `AnalyticsIngestCrashTest`;
+  - `performance/MultiInstanceTransactionTest`, `AmbiguousCommitReconcileTest`, `CacheRebuildAfterRestartTest`, and `HeldConnectionDuringWaitTest`;
+  - `rpc/RestoreCheckoutDirectTest`.
+
 ## Planning Obligations Traceability
 
 | Spec obligation | Where it is resolved |
@@ -235,7 +248,7 @@ Each stage leaves a buildable tree. `/speckit-tasks` turns these stages into tas
 | `ConnectionPool`, `StoreFailure`, `HttpSupport`, `Json`, `ApiErrors` | Reused. `ConnectionPool` gains manual-commit and isolation setup, borrow-wait metrics, and a test-only connection decorator. `common` gains the `rpc` and `metrics` packages. |
 | `TransactionMain`, `InventoryMain`, `AnalyticsMain` | Adapted: configuration, gRPC servers and clients, background workers, metrics, ordered shutdown |
 | `db/init.sql`, `db/init-db.ps1`, `db/validate-invariants.sql`, `db/migrate-sql-materializer.sql` | Retired, kept in Git history; replaced by the per-service scripts |
-| `server/benchmark-scan.ps1`, `server/benchmark-materializer.ps1` | `benchmark-scan.ps1` is used once for CP0, then superseded by `benchmark-microservices.ps1`. `benchmark-materializer.ps1` is retired. |
+| `server/benchmark-scan.ps1`, `server/benchmark-materializer.ps1` | `benchmark-scan.ps1` was used for CP0 and is superseded by `benchmark-microservices.ps1`. Both were retired by T129, and CP0 stays reproducible from a worktree of commit `26c89af`. |
 | `deploy/nginx.conf` | Unchanged |
 | `server/tests/**` | Compatible tests kept unchanged; the rest migrated without weaker assertions (FR-057), tracked per method in `server/tests/COVERAGE-LEDGER.md` and verified at each story's parity gate. Support is split per schema, and stock is read through Inventory's credentials. |
 
@@ -302,7 +315,7 @@ server/
 ├── tests-legacy/                   # legacy tests parked by the task that broke them; deleted only after verified parity
 ├── lib/                            # Connector/J, JUnit (committed); grpc/ (Maven-resolved, git-ignored)
 ├── build.sh  build-tests.sh  run-tests.sh  run-transaction.sh  run-inventory.sh  run-analytics.sh
-├── benchmark-microservices.ps1     # NEW harness (R21); benchmark-scan.ps1 kept for CP0 only
+├── benchmark-microservices.ps1     # NEW harness (R21); benchmark-scan.ps1 retired by T129 (CP0 from commit 26c89af)
 └── benchmark-compare.ps1           # NEW interleaved A/B runner with the R22 decision rule
 
 db/

@@ -58,7 +58,7 @@ Every setting comes from the environment. Each service reads only its own `<SERV
 | `INVENTORY_DB_NAME`, `INVENTORY_DB_USER`, `INVENTORY_DB_PASSWORD` | Inventory | `cs6510_inventory`, `cs6510_inventory_svc`, none |
 | `INVENTORY_DB_POOL_SIZE`, `INVENTORY_DB_POOL_MAX_SIZE` | Inventory | 16, 48 |
 | `ANALYTICS_DB_NAME`, `ANALYTICS_DB_USER`, `ANALYTICS_DB_PASSWORD` | Analytics | `cs6510_analytics`, `cs6510_analytics_svc`, none |
-| `ANALYTICS_DB_POOL_SIZE` | Analytics | 10 |
+| `ANALYTICS_DB_POOL_SIZE`, `ANALYTICS_DB_POOL_MAX_SIZE` | Analytics | 10, 10 |
 | `TRANSACTION_PORT`, `INVENTORY_PORT`, `ANALYTICS_PORT` | own service | 8081, 8082, 8083. An optional numeric argument to a run script overrides it. |
 | `INVENTORY_GRPC_PORT`, `ANALYTICS_GRPC_PORT` | own service | 9092, 9093 |
 | `INVENTORY_GRPC_TARGET`, `ANALYTICS_GRPC_TARGET` | Transaction | `127.0.0.1:9092`, `127.0.0.1:9093` |
@@ -213,7 +213,7 @@ SERVER_BASE_URL=http://localhost:8080 ./run-tests.sh    # plus the live contract
 - **Reports**: JUnit XML goes to `out/test-results/`.
 - **Reset baseline test**: `integration.ResetBaselineTest` is destructive and disabled by default. With the deployment stopped, pass `-DRUN_RESET_BASELINE_TEST=true` to `run-tests.sh` to run the three per-service resets with only their own credentials, start fresh services on unused ports, and verify the baseline they serve.
 
-**Coverage ledger and parity gates (FR-057)**: [tests/COVERAGE-LEDGER.md](tests/COVERAGE-LEDGER.md) records every test method from before the redesign, where its assertions live now, and the gate that last verified it. Parked legacy tests live in `tests-legacy/`, which is never compiled. A story gate runs the whole suite with the ledger check for that story:
+**Coverage ledger and parity gates (FR-057)**: [tests/COVERAGE-LEDGER.md](tests/COVERAGE-LEDGER.md) records every test method from before the redesign, where its assertions live now, and the gate that last verified it. Legacy tests were parked in `tests-legacy/`, which was never compiled. T130 deleted every parked file after the final gate verified its parity, and the ledger remains the record; the legacy sources are in Git history at commit `26c89af`. A story gate runs the whole suite with the ledger check for that story:
 
 ```bash
 PARITY_GATE=US6 SERVER_BASE_URL=http://localhost:8080 ./run-tests.sh

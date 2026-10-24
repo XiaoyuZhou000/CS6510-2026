@@ -7,7 +7,9 @@ $ErrorActionPreference = "Stop"
 $repo = "E:\Wen\学习\NEU\CS6510\CS6510-2026"
 $bench = Join-Path $repo "benchmark-runs\20260923-architecture-comparison"
 $mysql = "C:\Program Files\MySQL\MySQL Server 8.4\bin\mysql.exe"
-$schema = Join-Path $repo "db\init.sql"
+# db/init.sql was retired in feature 005; take the version these runs used from commit 1c6855b.
+$schema = Join-Path $env:TEMP "cs6510-init-1c6855b.sql"
+Start-Process -FilePath git -ArgumentList @('-C', "`"$repo`"", 'show', '1c6855b:db/init.sql') -NoNewWindow -Wait -RedirectStandardOutput $schema
 $serverPort = 18080
 $databasePort = 3310
 

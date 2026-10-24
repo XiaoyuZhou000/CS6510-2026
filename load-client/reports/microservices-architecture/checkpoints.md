@@ -75,6 +75,14 @@ The other runs use the labels `cp0-default-2` and `cp0-default-3`, and `-Workloa
 
 **Use**: these runs are the reference for attributing costs at CP1–CP3. The final CP0-versus-CP4 comparison uses fresh, interleaved CP0 runs from a worktree of the baseline commit (T152).
 
+**Reproducing CP0**: T129 retired the single-database tooling (`db/init.sql`, `db/init-db.ps1`, `db/validate-invariants.sql`, `db/migrate-sql-materializer.sql`, `server/benchmark-scan.ps1`, and `server/benchmark-materializer.ps1`) and removed the `..\cs6510-cp0` worktree. Every CP0 run directory it produced had already been copied here byte for byte. CP0 stays reproducible from commit `26c89af`:
+1. Run `git worktree add ../cs6510-cp0 26c89af`.
+2. Apply the one-line harness fix above: in that worktree's `server/benchmark-scan.ps1`, add `$null = $clientProc.Handle` directly after the `$clientProc = Start-Process ...` line in `Run-Phase`.
+3. Build it with its own `server/build.sh` and `load-client/build.sh`.
+4. Run its `benchmark-scan.ps1` with the command above, or pass `-BaselineWorktree ../cs6510-cp0` to this branch's `server/benchmark-compare.ps1`, as T152 did.
+
+That worktree's harness writes to its own `load-client/reports/transaction-optimization/<label>/`.
+
 ## CP1: core checkout path (T075)
 
 **Measured**: 2026-10-21, 17:04–17:07 local time, two back-to-back runs on the benchmark machine.

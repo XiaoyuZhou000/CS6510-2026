@@ -1193,14 +1193,14 @@ The receipt and every error match the established contract, with captured prices
 
 **Purpose**: Cleanup and documentation only. Any runtime code change after CP4 requires rerunning T125, T152, and T126–T128.
 
-- [ ] T129 [P] Retire the single-database tooling: delete `db/init.sql`, `db/init-db.ps1`, `db/validate-invariants.sql`, `db/migrate-sql-materializer.sql`, `server/benchmark-scan.ps1`, and `server/benchmark-materializer.ps1`. Remove the CP0 worktree created by T152 with `git worktree remove ../cs6510-cp0`. Note in `load-client/reports/microservices-architecture/checkpoints.md` that CP0 is reproducible from commit 26c89af.
-- [ ] T130 Delete the parked legacy tests in `server/tests-legacy/`, including the legacy `CheckoutDatabase` and `AnalyticsDatabase`, only after verified parity (FR-057):
+- [X] T129 [P] Retire the single-database tooling: delete `db/init.sql`, `db/init-db.ps1`, `db/validate-invariants.sql`, `db/migrate-sql-materializer.sql`, `server/benchmark-scan.ps1`, and `server/benchmark-materializer.ps1`. Remove the CP0 worktree created by T152 with `git worktree remove ../cs6510-cp0`. Note in `load-client/reports/microservices-architecture/checkpoints.md` that CP0 is reproducible from commit 26c89af.
+- [X] T130 Delete the parked legacy tests in `server/tests-legacy/`, including the legacy `CheckoutDatabase` and `AnalyticsDatabase`, only after verified parity (FR-057):
   - Before deleting anything, `PARITY_GATE=final server/run-tests.sh` must pass. Every row of every parked file must be `MIGRATED` or `SUPERSEDED`, with a replacement that passed at the recorded gate.
   - Delete file by file, then rerun `CoverageParityLedgerTest`, which checks that every deleted file had fully verified parity.
   - Keep `server/tests/COVERAGE-LEDGER.md` as the record.
-- [ ] T131 [P] Reconcile `specs/005-microservices-architecture/quickstart.md` and `specs/005-microservices-architecture/contracts/*.md` with any names, defaults, or commands that changed during implementation. Behavior must not change.
-- [ ] T132 Run quickstart.md scenarios A–H on the final build, and record the outcomes in `load-client/reports/microservices-architecture/quickstart-validation.md`.
-- [ ] T133 Re-verify constitution alignment before release, in `.specify/memory/constitution.md` and `specs/005-microservices-architecture/plan.md` (Implementation Rule 5):
+- [X] T131 [P] Reconcile `specs/005-microservices-architecture/quickstart.md` and `specs/005-microservices-architecture/contracts/*.md` with any names, defaults, or commands that changed during implementation. Behavior must not change.
+- [X] T132 Run quickstart.md scenarios A–H on the final build, and record the outcomes in `load-client/reports/microservices-architecture/quickstart-validation.md`.
+- [X] T133 Re-verify constitution alignment before release, in `.specify/memory/constitution.md` and `specs/005-microservices-architecture/plan.md` (Implementation Rule 5):
   - The constitution reads v5.1.0 with exactly the approved text of `specs/005-microservices-architecture/constitution-amendment-proposal.md`.
   - Its temporary Sync Impact Report comment is removed before the constitution is committed, as Governance requires.
   - The plan's Constitution Check passes every gate with no deviation, and it reflects any change made during implementation.

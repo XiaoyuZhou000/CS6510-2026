@@ -115,14 +115,17 @@ class MicroserviceBoundaryTest {
 
     /**
      * The Scan profiler and the SQL materializer are gone (R21, R12): neither source exists, and nothing
-     * that builds, runs, or benchmarks the services names {@code SCAN_PROFILE}. The CP0 baseline harnesses
-     * {@code benchmark-scan.ps1} and {@code benchmark-materializer.ps1} measure commit 26c89af and are retired
-     * by T129, so they are not checked.
+     * that builds, runs, or benchmarks the services names {@code SCAN_PROFILE}. The single-database scripts
+     * and the CP0 baseline harnesses were retired by T129; CP0 is reproducible from commit 26c89af.
      */
     @Test
     void retiredProfilerAndMaterializerAreGone() throws Exception {
         List<String> violations = new ArrayList<>();
         Path server = serverRoot();
+        for (String retired : List.of("db/init.sql", "db/init-db.ps1", "db/validate-invariants.sql",
+                "db/migrate-sql-materializer.sql", "server/benchmark-scan.ps1", "server/benchmark-materializer.ps1")) {
+            if (Files.exists(repositoryRoot().resolve(retired))) violations.add(retired + " still exists");
+        }
         for (String owner : List.of("common", "transaction", "inventory", "analytics")) {
             try (Stream<Path> paths = Files.walk(server.resolve(owner + "/src"))) {
                 paths.map(path -> path.getFileName().toString())
@@ -234,13 +237,11 @@ class MicroserviceBoundaryTest {
         return sources;
     }
 
-    /** The build, run, test, and benchmark scripts in {@code server/}, except the retired CP0 harnesses. */
+    /** The build, run, test, and benchmark scripts in {@code server/}. */
     private static List<Path> serverScripts() throws Exception {
-        Set<String> retired = Set.of("benchmark-scan.ps1", "benchmark-materializer.ps1");
         try (Stream<Path> paths = Files.list(serverRoot())) {
             return paths.filter(Files::isRegularFile)
                     .filter(path -> path.toString().endsWith(".sh") || path.toString().endsWith(".ps1"))
-                    .filter(path -> !retired.contains(path.getFileName().toString()))
                     .toList();
         }
     }

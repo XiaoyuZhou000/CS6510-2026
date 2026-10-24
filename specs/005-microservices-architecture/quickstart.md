@@ -71,7 +71,9 @@ cd server
 SERVER_BASE_URL=http://localhost:8080 ./run-tests.sh
 ```
 
-Expected: all tests pass with no skipped live contract or integration tests. The suites include:
+A live run also needs the three `<SERVICE>_DB_PASSWORD` variables and `NGINX_BIN` pointing to `nginx.exe` for the gateway isolation tests.
+
+Expected: all tests pass with no skipped live contract or integration tests; only the opt-in, destructive `integration.ResetBaselineTest` is skipped unless `-DRUN_RESET_BASELINE_TEST=true` is passed with the deployment stopped. The suites include:
 - `tests/contract`: the seven routes, unchanged.
 - `tests/rpc`: gRPC outcomes, statuses, replay, payload mismatch, deadlines, Analytics acknowledgement after commit, and compatibility (FR-013).
 - `tests/integration`: concurrency, the Saga, crashes (including Analytics crashes from reception to acknowledgement), waiting, delivery, and isolation.
@@ -96,7 +98,7 @@ PARITY_GATE=final SERVER_BASE_URL=http://localhost:8080 ./run-tests.sh
 | A | Checkout across services (US1) | Through the gateway: start, scan two units of A and one of B, complete | 200 receipt with captured prices; Inventory stock drops by exactly 2 and 1; lookup shows COMPLETED; a repeat Complete gives 409 `TRANSACTION_NOT_OPEN` |
 | B | Insufficient stock reopens (US1, compensation path) | Integration test with a one-unit SKU and a two-unit basket | 409 `INSUFFICIENT_STOCK`; no stock change; transaction OPEN; scanning and retrying work as today |
 | C | Scan without Inventory (US2, SC-004) | Stop Inventory. Start, scan, and look up a new transaction. Restart Transaction and scan again. Request Complete. | Start, Scan, and Lookup succeed, including after the restart. Complete returns 500 `INTERNAL_ERROR` within 10 s and lookup still shows OPEN. Start Inventory again: lookup shows COMPLETED shortly after, and a repeat Complete gives 409. |
-| D | Interrupted checkout (US3, SC-003) | Run the fault-injection tests for each hook in the [Saga matrix](contracts/checkout-saga.md#crash-and-fault-matrix), or launch Transaction once with `-Dselfcheckout.faults=checkout.afterApplyReply:halt`, complete, then restart normally | Each attempt settles without manual steps: COMPLETED exactly when Inventory applied it. Stock changes once. No timeout triggers restoration. |
+| D | Interrupted checkout (US3, SC-003) | Run the fault-injection tests for each hook in the [Saga matrix](contracts/checkout-saga.md#crash-and-fault-matrix), or launch Transaction once from `server/` with `java -Dselfcheckout.faults=checkout.afterApplyReply:halt -cp "out/transaction.jar;out/common.jar;out/contracts.jar;lib/grpc/*;lib/mysql-connector-j-9.0.0.jar" transaction.TransactionMain` (`:` separators on Unix; `run-transaction.sh` passes its arguments to the program, not the JVM), complete, then restart normally | Each attempt settles without manual steps: COMPLETED exactly when Inventory applied it. Stock changes once. No timeout triggers restoration. |
 | E | Bounded waiting (FR-035) | Integration test: keep Inventory unresponsive, issue Complete, then Scan the same transaction | Scan waits, then returns 500 with no basket change. After Inventory recovers, the attempt settles and a new scan follows the settled state. |
 | F | Analytics outage (US5, SC-005) | Stop Analytics during a short Load Client run, then restart it | No Scan or Complete failures. Pending work drains to zero (see [operational status](contracts/service-deployment.md#operational-status-fr-039)). Every window matches recomputation. |
 | G | Isolation (US6, SC-008) | Connect as `cs6510_inventory_svc` and select from `cs6510_transaction.transaction`; repeat for every pair of services | MySQL error 1142 (command denied) for each attempt |
@@ -107,23 +109,25 @@ PARITY_GATE=final SERVER_BASE_URL=http://localhost:8080 ./run-tests.sh
 Each checkpoint run uses the harness described in the [deployment contract](contracts/service-deployment.md#benchmark-harness-and-checkpoints-r21-r22). The harness resets all three services, runs the unchanged Load Client, samples backlog and lock counters, waits for settlement, validates invariants, and records the MySQL durability settings.
 
 ```powershell
-./server/benchmark-microservices.ps1 -Workload smoke -OutputLabel cp1-smoke
+./server/benchmark-microservices.ps1 -Workload smoke -OutputLabel cp1-smoke -NginxBin <nginx.exe>
 ```
 
 ```powershell
-./server/benchmark-microservices.ps1 -Workload default -OutputLabel cp4-default
+./server/benchmark-microservices.ps1 -Workload default -OutputLabel cp4-default -NginxBin <nginx.exe>
 ```
 
 ```powershell
-./server/benchmark-microservices.ps1 -Workload stress -OutputLabel cp4-stress
+./server/benchmark-microservices.ps1 -Workload stress -OutputLabel cp4-stress -NginxBin <nginx.exe>
 ```
+
+`-NginxBin` may be omitted when `nginx` is on `PATH`; `-MySqlExe` and `-JavaExe` likewise select a client and JDK that are not on `PATH`.
 
 | Checkpoint | What to compare | Expected |
 |---|---|---|
-| CP0 attribution baseline (existing `server/benchmark-scan.ps1` on the current implementation, before changes: default ×3, stress ×2) | `totalTransactions` median and range, per-operation p95/p99, pool wait, row-lock counters | Recorded in `load-client/reports/microservices-architecture/checkpoints.md`; used only for attribution |
+| CP0 attribution baseline (`server/benchmark-scan.ps1` on the service-based implementation at commit `26c89af`, before changes: default ×3, stress ×2; the script is retired from this branch, so reproduce it from a git worktree of that commit as described in `load-client/reports/microservices-architecture/checkpoints.md`) | `totalTransactions` median and range, per-operation p95/p99, pool wait, row-lock counters | Recorded in `load-client/reports/microservices-architecture/checkpoints.md`; used only for attribution |
 | CP1 core checkout and CP2 full system (attribution) | `totalTransactions` against the previous checkpoint; Scan and Complete server-side p95/p99; Transaction and Inventory borrow wait and hold time; Inventory locking-SELECT time; `ApplyCheckout` latency; outbox and Analytics backlog. CP2 adds recovery queries, wait checks, and idle polls. | A drop of more than 5% without a correctness reason is investigated before continuing |
 | CP3 tuning A/B (`server/benchmark-compare.ps1`) | Each variant against the defaults, in interleaved pairs under equivalent workloads on its relevant workloads (pool sizes under stress): JDBC flags, server prepared statements, pool sizes, statement-budget alternatives | One screening pair per relevant workload; three confirmation pairs only when a screen shows Δ ≥ +5%; no extension. Keep a variant only with Δ ≥ +3%, ahead in at least two of three pairs, a passing default regression check, and no correctness failure or p99 regression over 10%. Record each decision and its reduced statistical confidence. |
-| CP4 final comparison and official evidence | Fresh CP0 runs (worktree of the baseline commit) interleaved with CP4: 3 default pairs and 3 stress pairs, reported without claims of statistical significance. The first CP4 run of each workload is the official report, designated in advance. | Default: zero errors and zero background completions (SC-010). Stress: background completions reported and explained (FR-058). Both pass the validator (SC-002, SC-006). `evidence.json` shows `innodb_flush_log_at_trx_commit=1` and `sync_binlog=1`. |
+| CP4 final comparison and official evidence | Fresh CP0 runs (`server/benchmark-compare.ps1 -BaselineWorktree <worktree of 26c89af>`) interleaved with CP4: 3 default pairs and 3 stress pairs, reported without claims of statistical significance. The first CP4 run of each workload is the official report, designated in advance. | Default: zero errors and zero background completions (SC-010). Stress: background completions reported and explained (FR-058). Both pass the validator (SC-002, SC-006). `evidence.json` shows `innodb_flush_log_at_trx_commit=1` and `sync_binlog=1`. |
 
 At every checkpoint, report the actual client-observed `totalTransactions` and its change against the CP0 baseline for the same workload. Fewer SQL statements or lower latency never count as an improvement on their own.
 

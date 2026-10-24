@@ -39,7 +39,7 @@ cd server
 | `INVENTORY_DB_NAME`, `INVENTORY_DB_USER`, `INVENTORY_DB_PASSWORD` | Inventory | `cs6510_inventory`, `cs6510_inventory_svc`, none |
 | `INVENTORY_DB_POOL_SIZE`, `INVENTORY_DB_POOL_MAX_SIZE` | Inventory | 16, 48 |
 | `ANALYTICS_DB_NAME`, `ANALYTICS_DB_USER`, `ANALYTICS_DB_PASSWORD` | Analytics | `cs6510_analytics`, `cs6510_analytics_svc`, none |
-| `ANALYTICS_DB_POOL_SIZE` | Analytics | 10 |
+| `ANALYTICS_DB_POOL_SIZE`, `ANALYTICS_DB_POOL_MAX_SIZE` | Analytics | 10, 10 |
 | `INVENTORY_GRPC_TARGET`, `ANALYTICS_GRPC_TARGET` | Transaction | `127.0.0.1:9092`, `127.0.0.1:9093` |
 | `CHECKOUT_RESPONSE_BUDGET_MS`, `INVENTORY_RPC_DEADLINE_MS` | Transaction | 8000, 2000 |
 | `CHECKOUT_RECOVERY_SCAN_SECONDS`, `CHECKOUT_WAIT_BACKSTOP_MS` | Transaction | 30, 1000. The recovery safety-scan interval, and the waiter's database backstop interval. Waiting and recovery are otherwise event-driven (R7). |
@@ -74,7 +74,7 @@ Each script runs in its own terminal. Use Ctrl+C in a service's terminal to stop
 
 | Script | Credentials | Effect |
 |---|---|---|
-| `db/bootstrap.ps1` | MySQL admin, prompted | One-time and idempotent: creates the three schemas and three users, granting each user privileges on its own schema only |
+| `db/bootstrap.ps1` | MySQL admin (`-AdminUser`, default `root`; password from `MYSQL_ADMIN_PASSWORD` or a secure prompt) | One-time and idempotent: creates the three schemas and three users, granting each user privileges on its own schema only |
 | `db/reset-service.ps1 -Service transaction` | `cs6510_transaction_svc` | Drops and recreates Transaction's tables (empty) |
 | `db/reset-service.ps1 -Service inventory` | `cs6510_inventory_svc` | Drops and recreates Inventory's tables, seeds 2,000 products at 10,000 units and threshold 50, and writes a new `catalog_version` |
 | `db/reset-service.ps1 -Service analytics` | `cs6510_analytics_svc` | Drops and recreates Analytics' tables with the singletons at 0 |
@@ -128,7 +128,7 @@ Each query runs with the owning service's credentials. Each service also logs a 
 - the recovery query, wait-check, and idle-poll counters;
 - `comparable=true` when all three services ran, the exact Load Client command was used, and the validator passed.
 
-**A/B runs**: `server/benchmark-compare.ps1` (R22) runs two variants as interleaved pairs, each after its own reset. Variant A may instead be the baseline implementation, run from a worktree with its own `benchmark-scan.ps1`. The script runs exactly `-Pairs` pairs and classifies the result by the R22 rule, by the `totalTransactions` change Δ:
+**A/B runs**: `server/benchmark-compare.ps1` (R22) runs two variants as interleaved pairs, each after its own reset. With `-BaselineWorktree <path>`, variant A is instead the baseline implementation, run from a git worktree of commit `26c89af` with that worktree's own `server/benchmark-scan.ps1` (retired from this branch). The script runs exactly `-Pairs` pairs and classifies the result by the R22 rule, by the `totalTransactions` change Δ:
 - **one pair** (screening): promising at Δ ≥ +5%, regression at Δ ≤ −3%, otherwise no demonstrated improvement;
 - **more pairs** (confirmation): improvement at Δ ≥ +3% with the variant ahead in at least two pairs, otherwise no demonstrated improvement or regression.
 

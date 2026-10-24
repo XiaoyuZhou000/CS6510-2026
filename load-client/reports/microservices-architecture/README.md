@@ -58,7 +58,7 @@ Every performance claim here rests on client-observed `totalTransactions`. State
 ./server/benchmark-microservices.ps1 -Workload default -OutputLabel <label> -MySqlExe <mysql.exe> -NginxBin <nginx.exe> -JavaExe <JDK21-java.exe>
 
 # The final interleaved comparison (T152): CP0 from a worktree of 26c89af against CP4
-git worktree add ../cs6510-cp0 26c89af   # then build it with its server/build.sh and load-client/build.sh
+git worktree add ../cs6510-cp0 26c89af   # apply the one-line harness fix and build it (checkpoints.md, "Reproducing CP0")
 ./server/benchmark-compare.ps1 -Workload default -Label cp4-final-default -BaselineWorktree ../cs6510-cp0 -Pairs 3 -IdleCpuCores 2.0 -MySqlExe <mysql.exe> -NginxBin <nginx.exe> -JavaExe <JDK21-java.exe>
 ```
 

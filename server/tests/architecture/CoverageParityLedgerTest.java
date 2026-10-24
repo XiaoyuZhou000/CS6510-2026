@@ -82,8 +82,16 @@ class CoverageParityLedgerTest {
                 violations.add(file + " exists in neither tests/ nor tests-legacy/, but not every row is MIGRATED or "
                         + "SUPERSEDED with a Verified at value");
             }
-            Path legacyCopy = Files.isRegularFile(parked) ? parked : original;
-            Set<String> legacyMethods = Files.isRegularFile(legacyCopy) ? testMethods(legacyCopy) : null;
+            // A parked copy deleted by T130 leaves at most a same-path replacement, which is not the legacy file.
+            for (Row row : entry.getValue()) {
+                if (!Files.isRegularFile(parked) && (row.status().equals("MIGRATED") || row.status().equals("SUPERSEDED"))
+                        && row.verifiedAt().isEmpty()) {
+                    violations.add(row.id() + " is " + row.status() + " without a Verified at value, but tests-legacy/"
+                            + file + ".java is gone");
+                }
+            }
+            Path legacyCopy = Files.isRegularFile(parked) ? parked : settled ? null : original;
+            Set<String> legacyMethods = legacyCopy != null && Files.isRegularFile(legacyCopy) ? testMethods(legacyCopy) : null;
             Set<String> originalMethods = Files.isRegularFile(original) ? testMethods(original) : Set.of();
             for (Row row : entry.getValue()) {
                 if (row.fileLevel()) {
