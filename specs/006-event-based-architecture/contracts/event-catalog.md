@@ -19,6 +19,8 @@ One Apache Kafka 4.1.0 node in KRaft mode, at `127.0.0.1:19092` (D1). Topics are
 
 The dead-letter destination is each consuming service's `dead_letter_event` table, the constitution's "equivalent parked state" (D6).
 
+On the Windows broker (D1) every topic also pins `segment.bytes=1073741824` and `segment.ms=9223372036854775807`, so segments never roll and the cleanup policy and retention above never act: topics keep every record until the baseline reset. Consumers rely only on replay order and per-key last values, never on compaction or retention having run.
+
 ## Event types
 
 Every type has `schema_version` 1 and exactly one owning producer.

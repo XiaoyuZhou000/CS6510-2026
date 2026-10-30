@@ -8,37 +8,49 @@ Each decision records what was chosen, why, and what else was considered. Togeth
 
 **Environment facts** that constrain the decisions:
 - Windows 10 with 24 logical CPUs and 32 GB of RAM.
-- Docker Desktop 26.1 (WSL 2) is installed but not running by default. Erlang is not installed.
+- Docker Desktop 26.1 is installed but cannot run: the Windows hypervisor stays off because it conflicts with a game used on this shared machine, so WSL 2 fails to start (`HCS_E_HYPERV_NOT_INSTALLED`, 2026-10-29). Erlang is not installed.
 - JDK 21 and Maven 3.9.9 are installed.
 - MySQL 8.4 runs on port 3307, where each durable commit costs about 7.5 ms (005 R18).
 - The TCP dynamic port range is 1024–15000, so ports above 15000 never collide with outbound connections.
 
 ---
 
-## D1. Message broker: Apache Kafka 4.1.0, one KRaft node in Docker
+## D1. Message broker: Apache Kafka 4.1.0, one KRaft node run natively on Windows
 
-**Decision**: Use Apache Kafka 4.1.0 as the only broker. It runs as a single combined broker and controller in KRaft mode, from the official `apache/kafka:4.1.0` image, through `deploy/kafka/compose.yaml`. The host listener is `127.0.0.1:19092`, and data lives on the named volume `cs6510-kafka-data`.
+**Decision**: Use Apache Kafka 4.1.0 as the only broker. It runs as a single combined broker and controller in KRaft mode, from the official binary release (`kafka_2.13-4.1.0.tgz`, unpacked anywhere and named by `KAFKA_HOME`), as a plain JVM on the host, started by `deploy/kafka/start-broker.ps1` with the committed configuration `deploy/kafka/server.properties`. The client listener is `127.0.0.1:19092`, the controller listener `127.0.0.1:19093`, and data lives in `KAFKA_DATA_DIR` (default `<KAFKA_HOME>\cs6510-data`).
+
+*Amended 2026-10-29*: the first version of this decision ran the `apache/kafka:4.1.0` image in Docker. Docker cannot run on the benchmark machine (environment facts above), so the broker moved to the host. The topics, the clients, and every guarantee below are unchanged; only deployment, stop semantics, and the baseline reset differ.
 
 | Setting | Value | Why |
 |---|---|---|
 | Replication factor, `min.insync.replicas` | 1, 1 | Single node (spec Assumptions) |
 | `auto.create.topics.enable` | `false` | Topics exist only as documented in the [event catalog](contracts/event-catalog.md) |
 | `unclean.leader.election.enable` | `false` | No acknowledged write is discarded |
+| `log.segment.bytes`, `log.roll.ms`, `offsets.topic.segment.bytes` | 1 GiB, `Long.MAX_VALUE`, 1 GiB; every topic also pins `segment.bytes` and `segment.ms` | Windows: see below. Segments never roll, so retention and compaction never delete or rewrite a file. |
+| `delete.topic.enable` | `false` | Windows: a topic deletion takes the broker down (below), so it is refused |
 | `log.flush.interval.messages` | Broker default (the OS page cache), with `KAFKA_FLUSH_EVERY_MESSAGE=true` as a measured option (D15) | See durability below |
 | Producer | `acks=all`, `enable.idempotence=true`, `max.in.flight.requests.per.connection=5`, `delivery.timeout.ms=30000`, `max.block.ms=1000` | A confirmation means the broker has the record in its log. Idempotence keeps per-partition order across internal retries. A request thread never blocks on a missing broker. |
 | Consumer | `enable.auto.commit=false`, `isolation.level=read_uncommitted` (no Kafka transactions), `auto.offset.reset=earliest` | Offsets are committed only after local commits (D6) |
 
-**Durability (FR-007)**: a confirmed record is in the broker's log before `acks=all` returns. A clean or crash restart of the Kafka process or its container keeps the log, because the page cache belongs to the Docker VM, which keeps running. Broker-restart tests use both `docker restart` and `docker kill` (D14). Losing the whole VM or host before the page cache is flushed is outside the constitution's broker-restart guarantee. That residual risk is documented, and `KAFKA_FLUSH_EVERY_MESSAGE=true` (`log.flush.interval.messages=1`) removes it if it is chosen at checkpoint CP3. Unconfirmed records are never lost, because each one stays unpublished in its producer's outbox (D5).
+**Windows constraints**, measured in a spike on 2026-10-29:
+- Kafka cannot rename or delete a log file that it still has open. Deleting a topic renames its open partition directory, fails with `AccessDeniedException`, and takes the whole log directory offline, which stops the broker (the KAFKA-1194 family of issues). Segment deletion by retention and segment rewriting by compaction fail the same way.
+- Producing, consuming, committed offsets, a compacted topic's writes, and recovery after a forced kill all work.
+- The Windows `.bat` wrappers fail with "input line too long" while building the classpath, so the scripts run the tools as their Java main classes.
+
+So segments never roll and topics are never deleted. Retention and compaction therefore never act: every topic keeps every record until the baseline reset (D13), which stops the broker and replaces its log directory. The catalog topic keeps `cleanup.policy=compact` to document its last-value-per-SKU meaning; a consumer that replays it from offset 0 (D9) obtains the same latest value per key whether or not compaction has run. Its size grows by one catalog publication (about 2,000 records) per Inventory start, which stays small between resets. Each benchmark run starts from a reset, so a 1 GiB segment never fills.
+
+**Durability (FR-007)**: a confirmed record is in the broker's log before `acks=all` returns. A restart or crash of the Kafka process keeps the log, because the written pages belong to the operating system's file cache, which outlives the process. On Windows the broker has no clean-stop signal, so every stop is a forced kill, and broker-restart tests stop and start the process (D14). Losing the host before the file cache is flushed is outside the constitution's broker-restart guarantee. That residual risk is documented, and `KAFKA_FLUSH_EVERY_MESSAGE=true` (`log.flush.interval.messages=1`) removes it if it is chosen at checkpoint CP3. Unconfirmed records are never lost, because each one stays unpublished in its producer's outbox (D5).
 
 **Rationale**:
 - **Ordering**: partitioning by key gives exactly the per-transaction ordering the Saga needs while consumers work in parallel (FR-012).
-- **Catalog**: a compacted topic lets a new or reset consumer rebuild the full catalog by reading from the beginning, with no request event and no synchronous call (FR-018, D9).
+- **Catalog**: a replayable log lets a new or reset consumer rebuild the full catalog by reading from the beginning, with no request event and no synchronous call (FR-018, D9).
 - **Progress**: consumers control their offsets, which matches Analytics' requirement to keep progress in its own database (FR-049), with broker offsets only as an optimization.
-- **Fit**: it is the most widely used event-streaming broker, which suits an assignment about going event-based. The Java client is one Maven dependency, and running it in Docker avoids installing anything on Windows.
+- **Fit**: it is the most widely used event-streaming broker, which suits an assignment about going event-based. The Java client is one Maven dependency, and the broker is one unpacked archive run on the JDK already installed.
 
 **Alternatives considered**:
-- **Kafka on Windows without Docker**: rejected. Kafka does not support Windows, and log-segment deletion and compaction fail there on file locks (the long-standing KAFKA-1194 family of issues), which would break the compacted catalog topic.
-- **RabbitMQ 4 (quorum queues)**: strong durability, with an fsync before each confirm, and built-in dead-lettering. Rejected because it needs Erlang or Docker anyway, and per-key ordering with competing consumers needs a consistent-hash exchange or single-active-consumer queues. It also has no log to replay, so the catalog would need a snapshot-request event and a snapshot responder.
+- **Kafka in Docker** (the first version of this decision): rejected after it was planned, because Docker Desktop needs the hypervisor, which must stay off on this machine.
+- **Kafka with normal retention and compaction on Windows**: rejected; the first segment deletion or compaction would take the broker down.
+- **RabbitMQ 4 (quorum queues)**: strong durability, with an fsync before each confirm, and built-in dead-lettering. Rejected because it needs Erlang (or Docker, which cannot run here), and per-key ordering with competing consumers needs a consistent-hash exchange or single-active-consumer queues. It also has no log to replay, so the catalog would need a snapshot-request event and a snapshot responder.
 - **ActiveMQ Artemis 2.x**: pure Java, so it runs natively on Windows, with dead-letter addresses and message groups for per-key ordering. Rejected because it has no replayable log (the catalog would need last-value queues or request and response events), and a durable send waits for a journal sync on this disk, which adds a commit-sized cost to every hop.
 - **A second broker, or a broker plus a cache**: forbidden by Principle VIII.
 
@@ -248,7 +260,7 @@ Transaction T1 (guarded UPDATE + INSERT attempt + INSERT outbox CheckoutRequeste
 
 **Decision**: one procedure, `db/reset-baseline.ps1`, wrapped by the benchmark harness:
 1. Check that all three services are stopped. The script refuses to run otherwise, because a running service could publish into a fresh topic from a stale outbox.
-2. Run `deploy/kafka/reset-topics.ps1`, which deletes and recreates the four topics through `docker exec … kafka-topics.sh` and then verifies that they are empty. It does not restart the container.
+2. Run `deploy/kafka/reset-topics.ps1`. A topic cannot be deleted on Windows (D1), so it stops the broker, deletes its log directory (every topic, committed offset, and the cluster metadata), restarts it with the same cluster ID, recreates the four topics, and verifies that every end offset is 0 and that no consumer group remains.
 3. Run `db/reset-all.ps1` (005 R13). Transaction's reset empties the replica, outbox, and attempts; Inventory's reset reseeds the catalog with a new `catalog_version` and empties its outbox and operations; Analytics' reset empties events, windows, and `consumer_offset`.
 4. Start Inventory (it publishes the catalog, D9), then Transaction, then Analytics. Wait until the replica is ready, all three consumer groups have partitions assigned, and no outbox row is unpublished.
 
@@ -259,7 +271,7 @@ The result matches FR-059: Transaction holds only the replica, and no stale mess
 **Decision**:
 - **Seams**: business code depends only on the `events` ports `OutboxStore`, `OutboxSignal`, and `EventHandler`, never on the `messaging` package.
 - **In-memory bus**: `tests/support/InMemoryEventBus` implements partitions, consumer groups, offset commits, and fault controls: duplicate, drop before consume, delay, reorder across partitions, redeliver after a "lost" acknowledgement, pause (broker down), and kill a consumer between commit and acknowledgement. Saga, catalog, and analytics fault suites run deterministically on it, together with the existing fault hooks (renamed to cover publish and consume points, see [contracts/checkout-saga.md](contracts/checkout-saga.md#test-only-fault-hooks)).
-- **Live Kafka**: `tests/messaging/` runs against a real broker at `KAFKA_TEST_BOOTSTRAP` (default `127.0.0.1:19092`, with a per-run topic prefix). It covers producer confirmation, ordering per key, offset handling, parking, schema decoding, and broker restarts. A broker restart uses `docker restart` and `docker kill` plus `docker start` on the compose container, and is gated by `KAFKA_TEST_CONTAINER`. With `STRICT_LIVE_GATES=1`, which `run-tests.sh` sets for release runs, a missing broker fails the run instead of skipping it, following the existing `SERVER_BASE_URL` pattern.
+- **Live Kafka**: `tests/messaging/` runs against a real broker at `KAFKA_TEST_BOOTSTRAP` (default `127.0.0.1:19092`, with a per-run topic prefix). It covers producer confirmation, ordering per key, offset handling, parking, schema decoding, and broker restarts. Tests create their prefixed topics through the Kafka `Admin` client and never delete a topic (D1); prefixed topics accumulate until the next baseline reset. A broker restart stops and starts the broker process through `deploy/kafka/stop-broker.ps1` and `start-broker.ps1`, and is gated by `KAFKA_TEST_BROKER_CONTROL=1`. On Windows every stop is a forced kill, so the clean-restart and kill cases of the constitution are the same case, and an outage test keeps the broker stopped for a measured interval before starting it. With `STRICT_LIVE_GATES=1`, which `run-tests.sh` sets for release runs, a missing broker fails the run instead of skipping it, following the existing `SERVER_BASE_URL` pattern.
 - **Architecture tests**: `MicroserviceBoundaryTest` no longer forbids Kafka. It now forbids `io.grpc`, `java.net.http.HttpClient`, `java.net.Socket`, `URL.openConnection`, and peer host or port configuration in service source. `org.apache.kafka` imports are allowed only in `common/messaging` and the services' `messaging` adapter packages. Redis remains forbidden. A new `OutboxOnlyPublishTest` checks that no class outside `OutboxDispatcher` and `ScanEventRelay`'s sink calls the producer. `LayerDependencyTest` swaps `rpc` for `messaging`.
 - **Coverage ledger**: every test of the removed gRPC surface (`tests/rpc/*`, `GrpcTestSupport`, `FakeInventoryGateway`) is recorded in `server/tests/COVERAGE-LEDGER.md` with its event-based replacement and governing requirement before deletion (FR-065).
 
@@ -267,7 +279,7 @@ The result matches FR-059: Transaction holds only the replica, and no stale mess
 
 **Cost model**:
 - **Commits on the critical path per basket**: N + 4, exactly as in 005: Start, N Scans, T1, Inventory's apply, and T3. The outbox INSERTs ride inside T1 and Inventory's transaction (one extra statement each, no extra commit).
-- **Latency added to Complete**: two broker hops, each a produce with `acks=all` to a local container plus a consumer fetch, about 2–5 ms each. Two commit-path round trips become event handoffs.
+- **Latency added to Complete**: two broker hops, each a produce with `acks=all` to the local broker plus a consumer fetch, about 2–5 ms each. Two commit-path round trips become event handoffs.
 - **Off-path commits**: outbox marking, one commit per 20 ms batch per service.
 
 **Settings**:
@@ -277,7 +289,7 @@ The result matches FR-059: Transaction holds only the replica, and no stale mess
 
 **Measurement**:
 - **New `PERF_METRICS` timers**: outbox commit-to-send, send-to-confirm, consume lag (record timestamp to handler start), handler time, Complete's wait time, republishes, parks, and marker batch size.
-- **Harness samples**: consumer lag per group, through `kafka-consumer-groups.sh --describe` in the container.
+- **Harness samples**: consumer lag per group, through `deploy/kafka/status.ps1 -Json`. Each call starts three Kafka tool JVMs and takes about 4 s, so lag is sampled every 10 s while the other samples stay at 2 s.
 
 **Checkpoints** (005 R22 method, with the streamlined policy: ±3% counts as equivalent, one screening pair per relevant workload, three confirmation pairs only at ≥ +5%):
 - **CP0**: feature 005 at `8891c57`, re-measured on this machine.

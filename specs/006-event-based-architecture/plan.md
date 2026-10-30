@@ -8,7 +8,7 @@
 
 Replace every synchronous call between the feature 005 microservices with domain events carried by one Apache Kafka 4.1.0 broker, then remove gRPC. Nothing changes for clients.
 
-- **Broker**: one KRaft node in Docker (D1) with four topics (D4):
+- **Broker**: one KRaft node run natively on Windows (D1, amended from Docker) with four topics (D4):
   - a compacted catalog topic;
   - a checkout topic and an outcome topic, keyed by transaction ID with 16 partitions;
   - a single-partition scan topic.
@@ -34,12 +34,12 @@ Replace every synchronous call between the feature 005 microservices with domain
 - `org.apache.kafka:kafka-clients:4.1.0`, `com.google.protobuf:protobuf-java:3.25.9`, and `org.slf4j:slf4j-simple:2.0.16`, pinned in the Maven `server/contracts` module (D2).
 - JUnit Platform Console 1.11.0.
 - Nginx as the gateway, unchanged.
-- Docker Desktop to run the `apache/kafka:4.1.0` image.
+- The Apache Kafka 4.1.0 binary release, run natively on the JDK (D1). Docker cannot run on the benchmark machine.
 - **Removed**: every gRPC artifact.
 
 **Storage**:
 - One MySQL server (`127.0.0.1:3307`) with three schemas and three users, as in feature 005. New tables: `outbox_event` (Transaction and Inventory), `dead_letter_event` (all three), and `consumer_offset` (Analytics). New columns on `checkout_attempt`, `checkout_operation`, and `catalog_meta` ([data-model.md](data-model.md)).
-- Kafka log storage on the Docker volume `cs6510-kafka-data`. The broker is never the sole record of business state.
+- Kafka log storage in `KAFKA_DATA_DIR` on the host disk. Segments never roll and topics are never deleted, a Windows constraint (D1). The broker is never the sole record of business state.
 
 **Testing**:
 - Existing suites adapted, with the gRPC suites replaced through the coverage ledger.
@@ -92,7 +92,7 @@ Replace every synchronous call between the feature 005 microservices with domain
 | **V. Distributed transactions and Saga coordination** | Choreography, chosen by the spec's clarification and justified in D7. Transaction durably owns the Saga state. Each step's events, local transaction, compensation (reopen) or retry rule (T3 after the pivot) are in [checkout-saga.md](contracts/checkout-saga.md). The progress and the outgoing event commit together. Inventory is idempotent per attempt, with the outcome event recorded in the same transaction. Restoration is reserved, durable, idempotent, and directly tested. Success is reported only after both commits. No two-phase commit across a database and the broker. | PASS |
 | **VI. Checkout and inventory consistency** | 005's stock rules are unchanged: locking SELECT in SKU order, CHECK ≥ 0, unique effective deduction, captured prices. Pending attempts are durable and settle automatically once the broker and Inventory are reachable. Integrity faults (parked outcome or request, unknown attempt) keep the attempt pending with an alarm and never settle it on an assumed outcome. | PASS |
 | **VII. Reliable event delivery and analytics accuracy** | Transactional outboxes for every event: `accepted_scan`, `outbox_event`, and the catalog publication transaction. Relays retry and mark published only after `acks=all` confirmation. Analytics deduplicates by scan identity and keeps `consumer_offset` in its ingestion transaction; broker offsets are only an optimization. Window, Ranking, and Persistence stages are unchanged. Broker or Analytics outages never block Scan. | PASS |
-| **VIII. Performance and operational simplicity** | Exactly one broker product, with the choice, guarantees, persistence, and rejected alternatives in D1. Durable storage with `acks=all`. A residual page-cache risk on host loss is documented, with a measured flush option. No other infrastructure. Docker is used only for the broker, as Principle VIII allows. The broker and every service document build or install, startup, ports, configuration, storage, and topics ([broker-and-deployment.md](contracts/broker-and-deployment.md)). Restarting any one service or the broker is tested. | PASS |
+| **VIII. Performance and operational simplicity** | Exactly one broker product, with the choice, guarantees, persistence, and rejected alternatives in D1. Durable storage with `acks=all`. A residual page-cache risk on host loss is documented, with a measured flush option. No other infrastructure, and no container runtime: the broker is one native JVM. The broker and every service document build or install, startup, ports, configuration, storage, and topics ([broker-and-deployment.md](contracts/broker-and-deployment.md)). Restarting any one service or the broker is tested. | PASS |
 | **IX. Verification and benchmark evidence** | Tests for database isolation, schema compatibility, API compatibility, concurrent checkout invariants, Saga success, insufficient stock (end-to-end compensation), duplicate and redelivered events, crash and restart at each step, broker restart and unavailability, outbox-only publishing, no synchronous calls, analytics loss and duplication, and direct restoration, reported separately. Two genuine reports from a reproducible baseline that includes the broker. A committed diagram with the gateway, services, databases, broker, and topics with their producers and consumers. | PASS |
 | **Architectural constraints** | Incremental evolution of feature 005 (code reuse map below). gRPC interfaces are replaced and then removed. Endpoint ownership is unchanged. The replica is fed by Inventory's events, including its initial load. Per-service resets plus a broker topic reset in one baseline. The 2,000 × 10,000 baseline is preserved. | PASS |
 | **Workflow and quality gates** | Ordering keys, idempotency keys, retry and dead-letter policies, Saga states and recovery, synchronous-endpoint wait and timeout behavior, replica consistency, consumption checkpoints, and visibility delay are defined in D4–D11 and the contracts. Every *Planning Obligations* item is traced below. | PASS |
@@ -117,7 +117,7 @@ Replace every synchronous call between the feature 005 microservices with domain
 ## Phase 0: Research
 
 All decisions, with rationale and alternatives, are in [research.md](research.md):
-- D1: broker, Kafka 4.1.0 in Docker.
+- D1: broker, Kafka 4.1.0 run natively on Windows.
 - D2: build and dependencies.
 - D3: envelope and schema evolution.
 - D4: topics, keys, and partitions.
@@ -195,7 +195,7 @@ Each stage leaves a buildable tree with passing tests. `/speckit-tasks` turns th
 
 0. **Governance and CP0**: remove the constitution's Sync Impact Report and commit v6.0.0. Run CP0 on `8891c57`.
 1. **Broker and build**:
-   - `deploy/kafka/` (compose file, create, reset, and status scripts, README);
+   - `deploy/kafka/` (broker configuration, start, stop, create, reset, and status scripts, README);
    - the event `.proto` files in `server/contracts` alongside the gRPC ones for now;
    - `kafka-clients` in `lib/messaging/`;
    - the Kafka-free `common/events` framework (ports, envelope codec, `OutboxDispatcher`, `ConsumerLoop`, parking) and the `common/messaging` Kafka adapters (producer and consumer factory);
@@ -320,7 +320,7 @@ server/
 
 deploy/
 ├── nginx.conf                      # unchanged
-└── kafka/                          # NEW: compose.yaml, create-topics.ps1, reset-topics.ps1, status.ps1, README.md
+└── kafka/                          # NEW: server.properties, start/stop-broker.ps1, create-topics.ps1, reset-topics.ps1, status.ps1, README.md
 
 db/
 ├── bootstrap.ps1  reset-service.ps1  reset-all.ps1  validate-invariants.ps1   # extended
@@ -345,7 +345,7 @@ load-client/                        # unchanged source
 > No constitution violation exists, so the violation table is empty.
 
 **Non-violation complexity notes**:
-- **Docker for the broker**: Kafka is unsupported on Windows (D1), and Principle VIII explicitly permits Docker where it simplifies deployment. Only the broker runs in a container, and the services stay plain JARs.
+- **Native Kafka on Windows**: Kafka does not officially support Windows, and Docker cannot run on the benchmark machine (D1). The broker runs as a native JVM under Windows file-lock rules: segments never roll, topics are never deleted, and the baseline reset replaces the log directory. The services stay plain JARs.
 - **Outbox dispatcher with immediate send plus sweep**: two publication paths, justified by removing two polling delays from every Complete. The sweep alone is sufficient for correctness, and tests disable the immediate path to prove it.
 - **Responder claim in the settlement registry**: one compare-and-set state per pending attempt, justified by keeping the FR-061 counts exact without adding a commit to every successful Complete. The registry stays process-local, and durable state decides every outcome.
 - **The dead-letter table instead of dead-letter topics**: fewer topics, durable across broker resets, and queryable with each service's own credentials.

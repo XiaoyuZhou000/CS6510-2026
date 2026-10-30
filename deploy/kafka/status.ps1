@@ -4,11 +4,12 @@
     offsets, and the lag of the three consumer groups.
 
 .DESCRIPTION
-    Reads kafka-topics.sh, kafka-get-offsets.sh, and kafka-consumer-groups.sh --describe inside the
-    cs6510-kafka container. A group that does not exist yet is reported as absent, not as an error.
-    With -Json one JSON document is written to stdout for the benchmark harness:
-      { reachable, topics: [{ name, partitions, endOffsets: [..], totalEndOffset }],
-        groups: [{ group, state, lag, uncommitted }] }
+    Uses three Kafka tool runs (topics, end offsets, and consumer groups --all-groups). A group that
+    does not exist yet is reported as absent, not as an error. With -Json one JSON document is
+    written to stdout for the benchmark harness:
+      { reachable, topics: [{ name, exists, partitions, endOffsets: [..], totalEndOffset }],
+        groups: [{ group, state, lag, uncommitted,
+                   partitions: [{ topic, partition, currentOffset, endOffset, lag }] }] }
     An unreachable broker gives reachable=false and exit code 1.
 
 .EXAMPLE
@@ -17,33 +18,42 @@
 #>
 param(
     [string]$TopicPrefix = '',
+    [string]$KafkaHome,
     [switch]$Json
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'kafka-tools.ps1')
+$KafkaHome = Resolve-KafkaHome $KafkaHome
 
 $reachable = $false
-try { $reachable = Test-KafkaBroker } catch { $reachable = $false }
+try { $reachable = Test-KafkaBroker -KafkaHome $KafkaHome } catch { $reachable = $false }
 
 $topics = @()
 $groups = @()
 if ($reachable) {
+    $described = Get-KafkaTopics -KafkaHome $KafkaHome
+    $ends = Get-KafkaEndOffsets -KafkaHome $KafkaHome
     foreach ($spec in (Get-KafkaTopicSpecs -Prefix $TopicPrefix)) {
-        $description = Get-KafkaTopicDescription -Name $spec.Name
+        $description = $described[$spec.Name]
         if ($null -eq $description) {
             $topics += [pscustomobject]@{ name = $spec.Name; exists = $false; partitions = 0; endOffsets = @(); totalEndOffset = 0 }
             continue
         }
-        $offsets = @(Get-KafkaEndOffsets -Topic $spec.Name | ForEach-Object { $_.Offset })
+        $offsets = @($ends[$spec.Name] | ForEach-Object { $_.Offset })
         $sum = [long]0
         foreach ($offset in $offsets) { $sum += $offset }
         $topics += [pscustomobject]@{ name = $spec.Name; exists = $true; partitions = $description.Partitions
             endOffsets = $offsets; totalEndOffset = $sum }
     }
+    $lags = Get-KafkaGroupLags -KafkaHome $KafkaHome
     foreach ($group in (Get-KafkaGroups)) {
-        $lag = Get-KafkaGroupLag -Group $group
-        $groups += [pscustomobject]@{ group = $group; state = $lag.State; lag = $lag.Lag; uncommitted = $lag.Uncommitted }
+        $lag = $lags[$group]
+        $partitions = @($lag.Partitions | ForEach-Object {
+            [pscustomobject]@{ topic = $_.Topic; partition = $_.Partition; currentOffset = $_.CurrentOffset
+                endOffset = $_.EndOffset; lag = $_.Lag } })
+        $groups += [pscustomobject]@{ group = $group; state = $lag.State; lag = $lag.Lag; uncommitted = $lag.Uncommitted
+            partitions = $partitions }
     }
 }
 
@@ -51,9 +61,10 @@ if ($Json) {
     [pscustomobject]@{ reachable = $reachable; topics = $topics; groups = $groups } | ConvertTo-Json -Depth 5 -Compress
 } else {
     if (-not $reachable) {
-        Write-Host 'broker: unreachable (container cs6510-kafka, host listener 127.0.0.1:19092)'
+        Write-Host "broker: unreachable on $($script:KafkaBootstrap)"
     } else {
-        Write-Host 'broker: reachable (container cs6510-kafka, host listener 127.0.0.1:19092)'
+        $process = Get-KafkaBrokerProcess
+        Write-Host "broker: reachable on $($script:KafkaBootstrap) (pid $($process.Id))"
         foreach ($topic in $topics) {
             if (-not $topic.exists) { Write-Host ("topic {0}: missing" -f $topic.name); continue }
             Write-Host ("topic {0}: {1} partitions, end offsets [{2}], total {3}" -f $topic.name, $topic.partitions,

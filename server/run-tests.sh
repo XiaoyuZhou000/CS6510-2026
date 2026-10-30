@@ -17,11 +17,15 @@ esac
 # Tests use JVM properties; take defaults from the same environment as the server.
 # Explicit -D arguments supplied by the caller override these defaults.
 JVM_ARGS=("-DDB_USER=${DB_USER:-root}" "-DDB_PASS=${DB_PASSWORD:-}")
-# Live broker suites (006 D14): the host listener of deploy/kafka/compose.yaml by default, and the
-# container name only when broker restart and kill tests may run.
+# Live broker suites (006 D14): the listener of deploy/kafka/server.properties by default.
+# KAFKA_TEST_BROKER_CONTROL=1 lets broker restart tests stop and start the native broker through
+# deploy/kafka/*.ps1, which need KAFKA_HOME.
 JVM_ARGS+=("-DKAFKA_TEST_BOOTSTRAP=${KAFKA_TEST_BOOTSTRAP:-127.0.0.1:19092}")
-if [ -n "${KAFKA_TEST_CONTAINER:-}" ]; then
-  JVM_ARGS+=("-DKAFKA_TEST_CONTAINER=$KAFKA_TEST_CONTAINER")
+if [ -n "${KAFKA_TEST_BROKER_CONTROL:-}" ]; then
+  JVM_ARGS+=("-DKAFKA_TEST_BROKER_CONTROL=$KAFKA_TEST_BROKER_CONTROL")
+fi
+if [ -n "${KAFKA_HOME:-}" ]; then
+  JVM_ARGS+=("-DKAFKA_HOME=$KAFKA_HOME")
 fi
 if [ -n "${NGINX_BIN:-}" ]; then
   JVM_ARGS+=("-DNGINX_BIN=$NGINX_BIN")

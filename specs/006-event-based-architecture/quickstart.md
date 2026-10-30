@@ -7,15 +7,14 @@ This guide proves the feature end to end. It references the contracts instead of
 ## Prerequisites
 
 - **Tools**: JDK 21, Maven 3.9 or later, MySQL 8.4 on `127.0.0.1:3307` bootstrapped with `db/bootstrap.ps1` (feature 005), and Nginx as in feature 005.
-- **Broker**: Docker Desktop running (WSL 2 backend).
+- **Broker**: the Kafka 4.1.0 binary release (`kafka_2.13-4.1.0.tgz`) unpacked, with `KAFKA_HOME` set to it ([deploy/kafka/README.md](../../deploy/kafka/README.md)). No Docker.
 - **Credentials**: the per-service passwords in `TRANSACTION_DB_PASSWORD`, `INVENTORY_DB_PASSWORD`, and `ANALYTICS_DB_PASSWORD`. They are never passed as arguments.
 - **No feature 005 processes**: none running, and ports 8080–8083 and 19092 free.
 
 ## 1. Start the broker and build
 
 ```bash
-docker compose -f ../deploy/kafka/compose.yaml up -d
-powershell -File ../deploy/kafka/create-topics.ps1
+powershell -File ../deploy/kafka/start-broker.ps1   # starts the broker and creates the topics
 ./build.sh
 ```
 
@@ -50,7 +49,7 @@ Expected: every contract test passes (SC-001), and receipts carry the prices cap
 
 ```bash
 ./build-tests.sh
-KAFKA_TEST_BOOTSTRAP=127.0.0.1:19092 KAFKA_TEST_CONTAINER=cs6510-kafka STRICT_LIVE_GATES=1 ./run-tests.sh
+KAFKA_TEST_BOOTSTRAP=127.0.0.1:19092 KAFKA_TEST_BROKER_CONTROL=1 STRICT_LIVE_GATES=1 ./run-tests.sh
 ```
 
 Expected: every suite passes, including:
@@ -66,8 +65,8 @@ The direct restoration results are reported separately (SC-016).
 | # | Scenario | Steps | Expected outcome |
 |---|---|---|---|
 | A | Saga success and insufficient stock | Complete a two-SKU basket; then complete a basket exceeding the stock of one SKU | 200 with exact stock reduction; then 409 `INSUFFICIENT_STOCK`, no stock change, basket OPEN (US1) |
-| B | Broker outage | `docker compose -f deploy/kafka/compose.yaml stop`; Start, Scan, Lookup, `/items`, low stock, popular items; one Complete; restart Transaction; start the broker | All succeed except Complete, which returns 500 within 10 s; after the broker returns, the attempt settles and every scan is counted once (SC-004) |
-| C | Broker restart under load | Run the 60 s default client; `docker restart cs6510-kafka` at 20 s and `docker kill` plus start at 40 s | Invariants pass after settling; zero lost scans and zero double deductions (SC-005) |
+| B | Broker outage | `deploy/kafka/stop-broker.ps1`; Start, Scan, Lookup, `/items`, low stock, popular items; one Complete; restart Transaction; start the broker (`start-broker.ps1`) | All succeed except Complete, which returns 500 within 10 s; after the broker returns, the attempt settles and every scan is counted once (SC-004) |
+| C | Broker restart under load | Run the 60 s default client; stop and start the broker (`stop-broker.ps1`, `start-broker.ps1 -NoTopics`) at 20 s and again at 40 s, the second time after 10 s down | Invariants pass after settling; zero lost scans and zero double deductions (SC-005) |
 | D | Inventory outage | Stop Inventory; Scan and Complete; restart it | Scans succeed; Completes return 500 and settle after restart (SC-006) |
 | E | Analytics outage | Stop Analytics during a run; restart it | No Scan or Complete errors; windows catch up to the highest boundary (SC-007) |
 | F | Fault hooks | Run `integration/CheckoutEventFaultTest` and `messaging/ConsumerCrashAfterCommitTest` | Every attempt settles once; no restoration is triggered (SC-003) |
