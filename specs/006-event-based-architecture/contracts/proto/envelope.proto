@@ -1,0 +1,28 @@
+// Design baseline for server/contracts/src/main/proto/selfcheckout/events/v1/envelope.proto (D3).
+// Every Kafka record value is one serialized EventEnvelope; the record key equals routing_key.
+syntax = "proto3";
+
+package selfcheckout.events.v1;
+
+option java_package = "selfcheckout.events.v1";
+option java_multiple_files = true;
+
+message EventEnvelope {
+  // Globally unique and reused on every re-send of the same recorded event.
+  // ScanAccepted: "scan:<transaction_id>:<scan_sequence>". Outbox events: a UUID.
+  string event_id = 1;
+  // One of the types in contracts/event-catalog.md, for example "CheckoutRequested".
+  string event_type = 2;
+  // 1 for every type in this feature. Consumers park unsupported versions.
+  int32 schema_version = 3;
+  // Transaction ID, SKU, or "__snapshot__"; equals the Kafka record key.
+  string routing_key = 4;
+  // Producer's clock when the fact was recorded; informational only.
+  int64 occurred_at_ms = 5;
+  // Transaction ID, or catalog version for catalog events.
+  string correlation_id = 6;
+  // "transaction" or "inventory": the type's single owning producer.
+  string producer = 7;
+  // The serialized type-specific message named by event_type.
+  bytes payload = 8;
+}
