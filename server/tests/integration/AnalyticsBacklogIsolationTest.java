@@ -34,7 +34,7 @@ class AnalyticsBacklogIsolationTest {
              AnalyticsTestSchema analyticsSchema = AnalyticsTestSchema.create();
              InProcessInventory inventory = InProcessInventory.over(stock)) {
             transactions.seedReplica(2, stock.seed(2, 2_000));
-            InProcessTransaction checkout = InProcessTransaction.over(transactions).inventory(inventory.gateway()).build();
+            InProcessTransaction checkout = InProcessTransaction.over(transactions).bus(inventory.bus, inventory.names).build();
             SwitchableScanEventSink analyticsLink = new SwitchableScanEventSink();
             ScanEventRelay relay = new ScanEventRelay(new JdbcRelayStore(checkout.pool), analyticsLink,
                     ScanEventRelay.Settings.defaults());

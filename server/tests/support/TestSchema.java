@@ -38,6 +38,7 @@ public abstract class TestSchema implements AutoCloseable {
     private final String ownPassword;
     private final Options options;
     private final List<ConnectionPool> pools = new ArrayList<>();
+    private final List<AutoCloseable> closeFirst = new ArrayList<>();
     private final Set<String> unavailable = new HashSet<>();
     private ConnectionPool defaultPool;
     private boolean closed;
@@ -132,6 +133,14 @@ public abstract class TestSchema implements AutoCloseable {
         return defaultPool;
     }
 
+    /**
+     * Stops {@code resource}, for example an in-process service's dispatcher and consumers, when the schema
+     * closes, before its pools; resources stop in reverse registration order.
+     */
+    public synchronized void closeWith(AutoCloseable resource) {
+        closeFirst.add(0, resource);
+    }
+
     /** Another managed pool over this schema; closed with the schema. */
     public synchronized ConnectionPool newPool(String metricsName, int initialPool, int maxPool,
                                                UnaryOperator<Connection> decorator) throws SQLException {
@@ -207,6 +216,9 @@ public abstract class TestSchema implements AutoCloseable {
         if (closed) return;
         closed = true;
         Exception failure = null;
+        for (AutoCloseable resource : closeFirst) {
+            try { resource.close(); } catch (Exception e) { failure = add(failure, e); }
+        }
         for (ConnectionPool pool : pools) {
             try { pool.close(); } catch (RuntimeException e) { failure = add(failure, e); }
         }

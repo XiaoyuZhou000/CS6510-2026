@@ -4,12 +4,11 @@ import database.ConnectionPool;
 import metrics.LatencyHistogram;
 import metrics.PerfMetrics;
 import org.junit.jupiter.api.Test;
-import support.FakeInventoryGateway;
+import support.FakeInventoryReactor;
 import support.InProcessTransaction;
 import support.TransactionTestSchema;
 import transaction.CheckoutOrchestrator;
 import transaction.CheckoutPendingFailure;
-import transaction.InventoryGateway;
 import transaction.TransactionFailure;
 
 import java.sql.PreparedStatement;
@@ -23,10 +22,11 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * A request in a bounded wait holds no connection, row lock, or transaction (FR-033, FR-035, R7): between
+ * A request in a bounded wait holds no connection, row lock, or transaction (FR-040, FR-042, R7): between
  * its database checks the pool is at its baseline and the transaction row can be locked at once; the
  * checks are at most one per {@code CHECKOUT_WAIT_BACKSTOP_MS} plus one at the bound, none before the
- * settlement for an attempt owned in the same process, and each holds its connection for one read.
+ * settlement for an attempt owned in the same process, and each holds its connection for one read. The
+ * owner's outcome event is held back by a blocking {@link FakeInventoryReactor} (006 D7).
  */
 class HeldConnectionDuringWaitTest {
     private static final String DB_CHECKS = "transaction.wait.dbChecks";
@@ -35,19 +35,17 @@ class HeldConnectionDuringWaitTest {
     void aWaiterInAnotherInstanceHoldsNothingBetweenItsBoundedChecks() throws Exception {
         CountDownLatch inside = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        FakeInventoryGateway inventory = FakeInventoryGateway.applying().thenAnswer(call -> {
-            inside.countDown();
-            assertTrue(release.await(30, TimeUnit.SECONDS), "the test never released Inventory");
-            return new InventoryGateway.Applied(false);
-        });
         try (TransactionTestSchema schema = TransactionTestSchema.create()) {
             schema.seedReplica(5, UUID.randomUUID().toString());
-            InProcessTransaction owner = InProcessTransaction.over(schema).pool(2, 4).inventory(inventory).build();
+            InProcessTransaction owner = InProcessTransaction.over(schema).pool(2, 4).build();
+            FakeInventoryReactor inventory = blocking(owner, inside, release);
             String metrics = "test.wait." + UUID.randomUUID().toString().substring(0, 8);
             ConnectionPool waiterPool = schema.newPool(metrics, 2, 4, null);
             Duration budget = Duration.ofMillis(3_500);
             InProcessTransaction waiter = InProcessTransaction.over(schema).pool(waiterPool)
-                    .settings(CheckoutOrchestrator.Settings.defaults().withResponseBudget(budget)).build();
+                    .settings(CheckoutOrchestrator.Settings.defaults().withResponseBudget(budget))
+                    // Its dispatcher sweep would borrow from the measured pool; this instance only scans.
+                    .messagingStopped().build();
             String id = owner.start();
             owner.scan(id, "SKU-000001");
             int baseline = waiterPool.occupancy().active();
@@ -101,6 +99,7 @@ class HeldConnectionDuringWaitTest {
             }
             complete.get(30, TimeUnit.SECONDS);
             assertEquals(1, schema.scans(id).size());
+            inventory.close();
         }
     }
 
@@ -108,14 +107,10 @@ class HeldConnectionDuringWaitTest {
     void aWaiterInTheOwningProcessMakesNoCheckBeforeTheSettlementSignal() throws Exception {
         CountDownLatch inside = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        FakeInventoryGateway inventory = FakeInventoryGateway.applying().thenAnswer(call -> {
-            inside.countDown();
-            assertTrue(release.await(30, TimeUnit.SECONDS), "the test never released Inventory");
-            return new InventoryGateway.Applied(false);
-        });
         try (TransactionTestSchema schema = TransactionTestSchema.create()) {
             schema.seedReplica(5, UUID.randomUUID().toString());
-            InProcessTransaction service = InProcessTransaction.over(schema).pool(2, 4).inventory(inventory).build();
+            InProcessTransaction service = InProcessTransaction.over(schema).pool(2, 4).build();
+            FakeInventoryReactor inventory = blocking(service, inside, release);
             String id = service.start();
             service.scan(id, "SKU-000001");
             int baseline = service.pool.occupancy().active();
@@ -135,7 +130,14 @@ class HeldConnectionDuringWaitTest {
                 });
                 awaitWaiting(service);
                 for (int i = 0; i < 12; i++) {
-                    assertEquals(baseline, service.pool.occupancy().active(), "nothing is held during the wait");
+                    int active = service.pool.occupancy().active();
+                    if (active != baseline) {
+                        // A sample can land in a brief borrow of the dispatcher's sweep or of the owner's
+                        // own backstop read; a connection held through the wait would still be held later.
+                        Thread.sleep(100);
+                        active = service.pool.occupancy().active();
+                    }
+                    assertEquals(baseline, active, "nothing is held during the wait");
                     assertRowLockable(schema, id);
                     Thread.sleep(200);
                 }
@@ -147,7 +149,22 @@ class HeldConnectionDuringWaitTest {
             complete.get(30, TimeUnit.SECONDS);
             assertEquals("NOT_OPEN", scan.get(10, TimeUnit.SECONDS));
             assertEquals(checks, PerfMetrics.counterValue(DB_CHECKS), "woken by the signal, not a check");
+            inventory.close();
         }
+    }
+
+    /** Holds the first request's outcome until {@code release}, after signalling {@code inside}. */
+    private static FakeInventoryReactor blocking(InProcessTransaction transaction, CountDownLatch inside,
+                                                 CountDownLatch release) {
+        return transaction.reactor().thenAnswer(call -> {
+            inside.countDown();
+            try {
+                assertTrue(release.await(30, TimeUnit.SECONDS), "the test never released Inventory");
+            } catch (InterruptedException interrupted) {
+                throw new AssertionError(interrupted);
+            }
+            return FakeInventoryReactor.Reply.deduct();
+        }).start();
     }
 
     private static void assertRowLockable(TransactionTestSchema schema, String id) throws Exception {

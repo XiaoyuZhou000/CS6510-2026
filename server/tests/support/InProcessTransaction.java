@@ -3,15 +3,25 @@ package support;
 import database.CheckoutAttemptStore;
 import database.ConnectionPool;
 import database.JdbcCheckoutAttemptStore;
+import database.JdbcDeadLetterStore;
+import database.JdbcOutboxStore;
 import database.JdbcProductReplicaStore;
 import database.JdbcScanStore;
 import database.JdbcTransactionStore;
 import database.ProductReplicaStore;
 import database.ScanStore;
 import database.TransactionStore;
+import events.ConsumerLoop;
+import events.OutboxDispatcher;
+import events.OutboxSignal;
+import events.RecordSender;
+import events.RecordStream;
+import events.TopicNames;
+import messaging.CheckoutOutcomeConsumer;
+import transaction.CheckoutEvents;
 import transaction.CheckoutOrchestrator;
+import transaction.CheckoutOutcomeHandler;
 import transaction.CheckoutRecoveryWorker;
-import transaction.InventoryGateway;
 import transaction.ProductCatalogReplica;
 import transaction.RecoverySchedule;
 import transaction.SettlementRegistry;
@@ -23,18 +33,27 @@ import transaction.TransactionStateCache;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Clock;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
 /**
  * One in-process Transaction Service over a {@link TransactionTestSchema}, wired like
- * {@code TransactionMain} but without HTTP, for the performance, cache, and recovery tests (R19, R22).
- * The schema's product replica must be seeded first; it is loaded from the durable store, as at startup.
- * Complete calls {@link Builder#inventory}, which by default fails the test. The recovery worker is
- * built over the same schedule and registry but runs only after {@link #startRecovery()}, or when a
- * test drives it directly.
+ * {@code TransactionMain} but without HTTP, for the performance, cache, and recovery tests (R19, R22; 006
+ * T059). The schema's product replica must be seeded first; it is loaded from the durable store, as at startup.
+ *
+ * <p>Checkout runs over events: the orchestrator records {@code CheckoutRequested} in this schema's
+ * {@code outbox_event}, an {@link OutboxDispatcher} sends it, and the {@code transaction-checkout-outcome}
+ * {@link ConsumerLoop} feeds {@link CheckoutOutcomeHandler}. The transport is an {@link InMemoryEventBus} by
+ * default (its own, or one shared with {@link Builder#bus}), or the live broker with a per-run topic prefix
+ * ({@link Builder#liveKafka}). Nothing answers checkout requests unless the test starts an Inventory on the
+ * same transport, for example a {@link FakeInventoryReactor}. The recovery worker runs only after
+ * {@link #startRecovery()}, or when a test drives it directly.</p>
  */
-public final class InProcessTransaction {
+public final class InProcessTransaction implements AutoCloseable {
     public final ConnectionPool pool;
     public final TransactionStore transactions;
     public final ScanStore scans;
@@ -44,9 +63,21 @@ public final class InProcessTransaction {
     public final TransactionStateCache cache;
     public final SettlementRegistry registry;
     public final RecoverySchedule schedule;
+    public final TopicNames names;
+    /** Null when the transport is the live broker. */
+    public final InMemoryEventBus bus;
+    public final JdbcOutboxStore outbox;
+    public final JdbcDeadLetterStore deadLetters;
+    public final OutboxDispatcher dispatcher;
     public final CheckoutOrchestrator checkout;
+    public final CheckoutOutcomeHandler outcomes;
+    public final ConsumerLoop outcomeConsumer;
     public final TransactionService service;
     public final CheckoutRecoveryWorker recovery;
+    private final RecordSender sender;
+    private final boolean ownsSender;
+    private boolean messagingStarted;
+    private boolean closed;
 
     private InProcessTransaction(Builder builder) throws SQLException {
         pool = builder.pool != null ? builder.pool : builder.schema.newPool(
@@ -65,11 +96,47 @@ public final class InProcessTransaction {
         cache = new TransactionStateCache(locks, builder.cacheEntries);
         registry = new SettlementRegistry(locks);
         schedule = new RecoverySchedule();
-        checkout = new CheckoutOrchestrator(transactions, attempts, builder.inventory, cache, registry, schedule,
-                builder.settings, builder.timing);
+
+        Supplier<RecordStream> streams;
+        if (builder.live) {
+            names = builder.names != null ? builder.names : KafkaTestSupport.runTopics();
+            KafkaTestSupport.createCatalogTopics(names);
+            bus = null;
+            sender = KafkaTestSupport.sender("test-transaction-checkout", 0);
+            ownsSender = true;
+            streams = KafkaTestSupport.streams("test-transaction-outcome",
+                    names.group(TopicNames.TRANSACTION_CHECKOUT_OUTCOME_GROUP));
+        } else {
+            names = builder.names != null ? builder.names : TopicNames.unprefixed();
+            bus = builder.bus != null ? builder.bus : InMemoryEventBus.withCatalogTopics(names, builder.seed);
+            sender = bus;
+            ownsSender = false;
+            streams = bus::stream;
+        }
+        outbox = new JdbcOutboxStore(pool, "transaction.outbox");
+        deadLetters = new JdbcDeadLetterStore(pool, "transaction.deadLetter");
+        dispatcher = new OutboxDispatcher("transaction", outbox, Map.of(names.checkout(), sender),
+                List.of(names.checkout()), builder.outboxSettings, Clock.systemUTC());
+        OutboxSignal signal = builder.signal != null ? builder.signal : dispatcher;
+        checkout = new CheckoutOrchestrator(transactions, attempts, new CheckoutEvents(names), signal, cache, registry,
+                schedule, builder.settings, builder.timing);
+        outcomes = new CheckoutOutcomeHandler(attempts, cache, registry, builder.timing);
+        outcomeConsumer = CheckoutOutcomeConsumer.create(names, streams, outcomes, deadLetters, builder.consumerSettings);
         service = new TransactionService(transactions, scans, checkout, replica, locks, cache);
-        recovery = new CheckoutRecoveryWorker(attempts, builder.inventory, cache, registry, schedule,
-                builder.recoverySettings, Clock.systemUTC());
+        recovery = new CheckoutRecoveryWorker(attempts, signal, cache, registry, schedule, builder.recoverySettings,
+                Clock.systemUTC());
+        builder.schema.closeWith(this);
+        if (builder.startMessaging) startMessaging();
+    }
+
+    /** Starts the dispatcher and the outcome consumer, as {@code TransactionMain} does. */
+    public synchronized InProcessTransaction startMessaging() {
+        if (!messagingStarted) {
+            dispatcher.start();
+            outcomeConsumer.start();
+            messagingStarted = true;
+        }
+        return this;
     }
 
     /** Starts the recovery worker thread, as {@code TransactionMain} does after its HTTP server. */
@@ -81,6 +148,20 @@ public final class InProcessTransaction {
     /** Stops the recovery worker, if it runs. */
     public void stopRecovery() {
         recovery.close();
+    }
+
+    /** Stops the recovery worker, the consumer, and the dispatcher; the pool belongs to the schema. */
+    @Override
+    public synchronized void close() {
+        if (closed) return;
+        closed = true;
+        recovery.close();
+        if (messagingStarted) {
+            outcomeConsumer.stop(Duration.ofSeconds(5));
+            dispatcher.stop(Duration.ofSeconds(5));
+            messagingStarted = false;
+        }
+        if (ownsSender) sender.close();
     }
 
     public static Builder over(TransactionTestSchema schema) {
@@ -99,6 +180,12 @@ public final class InProcessTransaction {
         return service.complete(transactionId);
     }
 
+    /** A {@link FakeInventoryReactor} on this instance's bus; the caller starts and closes it. */
+    public FakeInventoryReactor reactor() {
+        if (bus == null) throw new IllegalStateException("A live-broker instance has no in-memory bus");
+        return FakeInventoryReactor.deducting(bus, names);
+    }
+
     public static final class Builder {
         private final TransactionTestSchema schema;
         private ConnectionPool pool;
@@ -110,10 +197,17 @@ public final class InProcessTransaction {
         private UnaryOperator<TransactionStore> wrapTransactions = UnaryOperator.identity();
         private UnaryOperator<ScanStore> wrapScans = UnaryOperator.identity();
         private UnaryOperator<CheckoutAttemptStore> wrapAttempts = UnaryOperator.identity();
-        private InventoryGateway inventory = FakeInventoryGateway.failing();
         private CheckoutOrchestrator.Settings settings = CheckoutOrchestrator.Settings.defaults();
         private CheckoutOrchestrator.Timing timing = CheckoutOrchestrator.Timing.SYSTEM;
         private CheckoutRecoveryWorker.Settings recoverySettings = CheckoutRecoveryWorker.Settings.defaults();
+        private OutboxDispatcher.Settings outboxSettings = OutboxDispatcher.Settings.defaults();
+        private ConsumerLoop.Settings consumerSettings = ConsumerLoop.Settings.defaults().withThreads(2);
+        private InMemoryEventBus bus;
+        private TopicNames names;
+        private long seed = 6510;
+        private boolean live;
+        private boolean startMessaging = true;
+        private OutboxSignal signal;
 
         private Builder(TransactionTestSchema schema) {
             this.schema = schema;
@@ -129,11 +223,28 @@ public final class InProcessTransaction {
         public Builder wrapTransactions(UnaryOperator<TransactionStore> wrap) { this.wrapTransactions = wrap; return this; }
         public Builder wrapScans(UnaryOperator<ScanStore> wrap) { this.wrapScans = wrap; return this; }
         public Builder wrapAttempts(UnaryOperator<CheckoutAttemptStore> wrap) { this.wrapAttempts = wrap; return this; }
-        /** The Inventory that Complete calls, for example {@link InProcessInventory#gateway()}. */
-        public Builder inventory(InventoryGateway gateway) { this.inventory = gateway; return this; }
         public Builder settings(CheckoutOrchestrator.Settings checkoutSettings) { this.settings = checkoutSettings; return this; }
         public Builder timing(CheckoutOrchestrator.Timing checkoutTiming) { this.timing = checkoutTiming; return this; }
         public Builder recovery(CheckoutRecoveryWorker.Settings settings) { this.recoverySettings = settings; return this; }
+        public Builder outbox(OutboxDispatcher.Settings settings) { this.outboxSettings = settings; return this; }
+        public Builder consumer(ConsumerLoop.Settings settings) { this.consumerSettings = settings; return this; }
+        /** Shares a bus, for example with an Inventory or a second Transaction instance (same outcome group). */
+        public Builder bus(InMemoryEventBus shared, TopicNames topicNames) {
+            this.bus = shared;
+            this.names = topicNames;
+            return this;
+        }
+        public Builder seed(long busSeed) { this.seed = busSeed; return this; }
+        /** The live broker at {@code KAFKA_TEST_BOOTSTRAP}, with {@code topicNames} or a fresh per-run prefix. */
+        public Builder liveKafka(TopicNames topicNames) {
+            this.live = true;
+            this.names = topicNames;
+            return this;
+        }
+        /** Leaves the dispatcher and consumer stopped until {@link InProcessTransaction#startMessaging()}. */
+        public Builder messagingStopped() { this.startMessaging = false; return this; }
+        /** Replaces the dispatcher as the orchestrator's and the worker's signal, for unit-level checks. */
+        public Builder signal(OutboxSignal replacement) { this.signal = replacement; return this; }
 
         public InProcessTransaction build() throws SQLException {
             return new InProcessTransaction(this);

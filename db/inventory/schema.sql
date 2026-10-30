@@ -67,6 +67,11 @@ CREATE TABLE checkout_operation (
         GENERATED ALWAYS AS (IF(state = 'APPLIED', transaction_id, NULL)) STORED,
     processed_at           TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     restored_at            TIMESTAMP(3) NULL,
+    -- The outcome event recorded in the same transaction as this row (006 D8): StockDeducted,
+    -- StockRejected, or, for a BLOCKED tombstone, the restoration's RestorationNotNeeded.
+    outcome_event_id       CHAR(36)     NOT NULL,
+    -- The StockRestored or RestorationNotNeeded event of the reserved restoration.
+    restoration_event_id   CHAR(36)     NULL,
     PRIMARY KEY (transaction_id, attempt_number),
     UNIQUE KEY uq_checkout_operation_applied (applied_transaction_id),
     CONSTRAINT chk_checkout_operation_attempt CHECK (attempt_number >= 1),

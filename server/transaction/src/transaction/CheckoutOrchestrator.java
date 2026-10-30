@@ -3,14 +3,17 @@ package transaction;
 import api.json.Json;
 import database.CheckoutAttemptStore;
 import database.CheckoutAttemptStore.AttemptKey;
+import database.CheckoutAttemptStore.AttemptRecord;
 import database.CheckoutAttemptStore.ClientOutcome;
 import database.CheckoutAttemptStore.RejectionReason;
 import database.CheckoutAttemptStore.WriteResult;
 import database.StoreFailure;
 import database.TransactionStore;
+import events.OutboxRow;
+import events.OutboxSignal;
+import faults.FaultHooks;
 import metrics.LatencyHistogram;
 import metrics.PerfMetrics;
-import faults.FaultHooks;
 import time.ResponseBudget;
 import transaction.SettlementRegistry.Settlement;
 import transaction.TransactionOperations.ReceiptLineView;
@@ -22,6 +25,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -33,45 +37,45 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Orchestrates {@code POST /transactions/{id}/complete} as a Saga with forward recovery
- * (R5, R6, R9, R19; contracts/checkout-saga.md):
+ * Runs {@code POST /transactions/{id}/complete} as the request side of the choreographed checkout Saga
+ * (D7; contracts/checkout-saga.md):
  *
  * <ol>
  *   <li><b>Pre-checks and T1</b>, under the transaction's stripe: 404, then 409 TRANSACTION_NOT_OPEN, then a
- *       pending attempt, then 409 EMPTY_BASKET, each confirmed against the database; then the guarded
- *       begin of attempt {@code n}. The stripe is released before Inventory is called.</li>
- *   <li><b>T2</b>, {@code ApplyCheckout} under {@code (transaction_id, n)}, holding no lock, connection,
- *       or transaction. Uncertain statuses repeat the call with the same key after 50, 100, 200, and
- *       then every 400 ms while the response budget lasts.</li>
- *   <li><b>T3</b> on APPLIED, or <b>reopen</b> on a definitive rejection, under the stripe again; the
- *       receipt comes from the cached snapshot with no read.</li>
+ *       pending attempt, then 409 EMPTY_BASKET, each confirmed against the database; then the guarded begin
+ *       of attempt {@code n}, which also records its {@code CheckoutRequested} outbox row (FR-010). The
+ *       request then registers as the attempt's responder and releases the stripe.</li>
+ *   <li><b>Wait</b>: after the commit it hits {@code checkout.afterBegin}, signals the dispatcher, and waits
+ *       on the attempt's settlement future for the rest of the {@code CHECKOUT_RESPONSE_BUDGET_MS} (8,000)
+ *       budget, holding no lock, connection, or transaction (FR-040). The request never calls the broker or
+ *       Inventory; {@link CheckoutOutcomeHandler} settles the attempt when Inventory's outcome arrives.</li>
+ *   <li><b>Answer</b>: a settlement the handler claimed gives the 200 receipt from the cached snapshot and the
+ *       supplied completion time, 409 INSUFFICIENT_STOCK naming the SKU, or 500 for INVALID_REQUEST and
+ *       STOCK_RESTORED. Once per {@code CHECKOUT_WAIT_BACKSTOP_MS} (1,000) the request reads its attempt, so a
+ *       settlement made by another Transaction process is answered too (D11).</li>
  * </ol>
  *
- * When the budget runs out with the attempt still pending, the request commits
- * {@code client_outcome = PENDING_ERROR}, queues the attempt in {@link RecoverySchedule}, and answers 500
- * through {@link CheckoutPendingFailure}. A 500 is never a cancellation (FR-017).
+ * When the budget ends first and the request wins the claim, it commits {@code client_outcome =
+ * PENDING_ERROR} with {@code next_retry_at = now}, queues the attempt in {@link RecoverySchedule}, and
+ * answers 500 through {@link CheckoutPendingFailure}. A 500 is never a cancellation (FR-024).
  *
  * <p>A Scan or Complete that finds another attempt pending waits for its settlement within its own budget
- * ({@link #waitFor}, {@link #awaitSettlement}; FR-035, R7), then restarts from the beginning. Every process-local
- * structure here is an optimization: the database guards and Inventory's idempotency decide every
- * outcome, also when several instances or the recovery worker race (Implementation Rule 3).</p>
+ * ({@link #waitFor}, {@link #awaitSettlement}; FR-042), then restarts from the beginning. Every process-local
+ * structure here is an optimization: the database guards and Inventory's idempotency decide every outcome
+ * (Implementation Rule 1).</p>
  */
 public final class CheckoutOrchestrator {
     public static final Duration DEFAULT_RESPONSE_BUDGET = Duration.ofMillis(8_000);
-    public static final Duration DEFAULT_RPC_DEADLINE = Duration.ofMillis(2_000);
     public static final Duration DEFAULT_WAIT_BACKSTOP = Duration.ofMillis(1_000);
-    public static final List<Duration> DEFAULT_RETRY_DELAYS = List.of(Duration.ofMillis(50), Duration.ofMillis(100),
-            Duration.ofMillis(200), Duration.ofMillis(400));
+    public static final Duration DEFAULT_REPUBLISH_AFTER = Duration.ofMillis(2_000);
     /** Reloads after T1 guard misses before a Complete gives up with a 500. */
     private static final int MAX_GUARD_RELOADS = 3;
     private static final LatencyHistogram T1 = PerfMetrics.timer("transaction.complete.t1");
-    private static final LatencyHistogram T3 = PerfMetrics.timer("transaction.complete.t3");
-    private static final LatencyHistogram REOPEN = PerfMetrics.timer("transaction.complete.reopen");
+    private static final LatencyHistogram OUTCOME_WAIT = PerfMetrics.timer("transaction.complete.outcomeWait");
     private static final LongAdder BUDGET_EXPIRED = PerfMetrics.counter("transaction.complete.budgetExpired");
     private static final LongAdder AMBIGUOUS = PerfMetrics.counter("transaction.complete.ambiguousCommit");
-    private static final LongAdder APPLY_RETRIES = PerfMetrics.counter("transaction.complete.applyRetries");
-    private static final LongAdder ALARMS = PerfMetrics.counter("transaction.complete.integrityAlarms");
     private static final LongAdder FOREIGN = PerfMetrics.counter("transaction.complete.foreignSettlements");
+    private static final LongAdder LATE_ANSWERS = PerfMetrics.counter("transaction.complete.answeredAfterBudget");
     private static final LatencyHistogram WAIT = PerfMetrics.timer("transaction.wait");
     private static final LongAdder WAIT_SIGNALLED = PerfMetrics.counter("transaction.wait.signalled");
     private static final LongAdder WAIT_DB_CHECKS = PerfMetrics.counter("transaction.wait.dbChecks");
@@ -79,7 +83,8 @@ public final class CheckoutOrchestrator {
 
     private final TransactionStore transactions;
     private final CheckoutAttemptStore attempts;
-    private final InventoryGateway inventory;
+    private final CheckoutEvents events;
+    private final OutboxSignal signal;
     private final TransactionLocks locks;
     private final TransactionStateCache cache;
     private final SettlementRegistry registry;
@@ -87,18 +92,19 @@ public final class CheckoutOrchestrator {
     private final Settings settings;
     private final Timing timing;
 
-    public CheckoutOrchestrator(TransactionStore transactions, CheckoutAttemptStore attempts, InventoryGateway inventory,
-                                TransactionStateCache cache, SettlementRegistry registry, RecoverySchedule schedule,
-                                Settings settings) {
-        this(transactions, attempts, inventory, cache, registry, schedule, settings, Timing.SYSTEM);
+    public CheckoutOrchestrator(TransactionStore transactions, CheckoutAttemptStore attempts, CheckoutEvents events,
+                                OutboxSignal signal, TransactionStateCache cache, SettlementRegistry registry,
+                                RecoverySchedule schedule, Settings settings) {
+        this(transactions, attempts, events, signal, cache, registry, schedule, settings, Timing.SYSTEM);
     }
 
-    public CheckoutOrchestrator(TransactionStore transactions, CheckoutAttemptStore attempts, InventoryGateway inventory,
-                                TransactionStateCache cache, SettlementRegistry registry, RecoverySchedule schedule,
-                                Settings settings, Timing timing) {
+    public CheckoutOrchestrator(TransactionStore transactions, CheckoutAttemptStore attempts, CheckoutEvents events,
+                                OutboxSignal signal, TransactionStateCache cache, SettlementRegistry registry,
+                                RecoverySchedule schedule, Settings settings, Timing timing) {
         this.transactions = Objects.requireNonNull(transactions, "transactions");
         this.attempts = Objects.requireNonNull(attempts, "attempts");
-        this.inventory = Objects.requireNonNull(inventory, "inventory");
+        this.events = Objects.requireNonNull(events, "events");
+        this.signal = Objects.requireNonNull(signal, "signal");
         this.cache = Objects.requireNonNull(cache, "cache");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.schedule = Objects.requireNonNull(schedule, "schedule");
@@ -109,44 +115,36 @@ public final class CheckoutOrchestrator {
     }
 
     /**
-     * The response budget, the per-call Inventory deadline, the in-request retry delays (R6), and the
-     * database backstop of a bounded wait (R7).
+     * The response budget, the database backstop of every wait (R7, D11), and the first republish delay that
+     * T1 stores as {@code next_retry_at} (D7).
      */
-    public record Settings(Duration responseBudget, Duration rpcDeadline, List<Duration> retryDelays,
-                           Duration waitBackstop) {
+    public record Settings(Duration responseBudget, Duration waitBackstop, Duration republishAfter) {
         public Settings {
             requirePositive(responseBudget, "responseBudget");
-            requirePositive(rpcDeadline, "rpcDeadline");
-            retryDelays = List.copyOf(retryDelays);
-            if (retryDelays.isEmpty()) throw new IllegalArgumentException("retryDelays must not be empty");
-            retryDelays.forEach(delay -> requirePositive(delay, "retryDelays"));
             requirePositive(waitBackstop, "waitBackstop");
-        }
-
-        public Settings(Duration responseBudget, Duration rpcDeadline, List<Duration> retryDelays) {
-            this(responseBudget, rpcDeadline, retryDelays, DEFAULT_WAIT_BACKSTOP);
+            requirePositive(republishAfter, "republishAfter");
         }
 
         public static Settings defaults() {
-            return new Settings(DEFAULT_RESPONSE_BUDGET, DEFAULT_RPC_DEADLINE, DEFAULT_RETRY_DELAYS);
+            return new Settings(DEFAULT_RESPONSE_BUDGET, DEFAULT_WAIT_BACKSTOP, DEFAULT_REPUBLISH_AFTER);
         }
 
         /**
-         * {@code CHECKOUT_RESPONSE_BUDGET_MS} (8,000), {@code INVENTORY_RPC_DEADLINE_MS} (2,000), and
-         * {@code CHECKOUT_WAIT_BACKSTOP_MS} (1,000).
+         * {@code CHECKOUT_RESPONSE_BUDGET_MS} (8,000), {@code CHECKOUT_WAIT_BACKSTOP_MS} (1,000), and
+         * {@code CHECKOUT_REPUBLISH_AFTER_MS} (2,000).
          */
         public static Settings fromEnvironment(Map<String, String> environment) {
             return new Settings(millis(environment, "CHECKOUT_RESPONSE_BUDGET_MS", DEFAULT_RESPONSE_BUDGET),
-                    millis(environment, "INVENTORY_RPC_DEADLINE_MS", DEFAULT_RPC_DEADLINE), DEFAULT_RETRY_DELAYS,
-                    millis(environment, "CHECKOUT_WAIT_BACKSTOP_MS", DEFAULT_WAIT_BACKSTOP));
+                    millis(environment, "CHECKOUT_WAIT_BACKSTOP_MS", DEFAULT_WAIT_BACKSTOP),
+                    millis(environment, "CHECKOUT_REPUBLISH_AFTER_MS", DEFAULT_REPUBLISH_AFTER));
         }
 
         public Settings withResponseBudget(Duration budget) {
-            return new Settings(budget, rpcDeadline, retryDelays, waitBackstop);
+            return new Settings(budget, waitBackstop, republishAfter);
         }
 
         public Settings withWaitBackstop(Duration backstop) {
-            return new Settings(responseBudget, rpcDeadline, retryDelays, backstop);
+            return new Settings(responseBudget, backstop, republishAfter);
         }
 
         static Duration millis(Map<String, String> environment, String key, Duration fallback) {
@@ -226,15 +224,16 @@ public final class CheckoutOrchestrator {
             Begun begun = start.begun();
             try {
                 FaultHooks.hit("checkout.afterBegin");
-                return settle(begun, budget);
+                signal.signal(List.of(begun.requestEventId()));
+                return awaitOutcome(begun, budget);
             } finally {
                 registry.release(begun.key());
             }
         }
     }
 
-    /** A committed T1: the attempt, the basket snapshot it froze, and the lines sent to Inventory. */
-    private record Begun(AttemptKey key, State state, List<InventoryGateway.CheckoutLine> lines) { }
+    /** A committed T1: the attempt, the basket snapshot it froze, its request event, and its future. */
+    private record Begun(AttemptKey key, State state, String requestEventId, CompletableFuture<Settlement> future) { }
 
     /** Either a committed T1, or another attempt this request must wait for first. */
     private record Start(Begun begun, PendingWait pending) { }
@@ -261,7 +260,7 @@ public final class CheckoutOrchestrator {
     }
 
     /**
-     * Bounded waiting (FR-035, R7): waits within the request's remaining budget for the attempt to
+     * Bounded waiting (FR-042, R7): waits within the request's remaining budget for the attempt to
      * settle, holding no lock or connection. A settlement in this process completes the future at once.
      * Without a signal, the database is read once per {@code waitBackstop} to catch settlements made
      * elsewhere, except while a live request of this process owns the attempt and will signal, and once
@@ -289,14 +288,15 @@ public final class CheckoutOrchestrator {
                         Thread.currentThread().interrupt();
                         throw new CheckoutPendingFailure(key.transactionId());
                     }
-                    if (settlement != null) {
+                    if (settlement != null && settlement.kind() != SettlementRegistry.Kind.FAILED) {
                         WAIT_SIGNALLED.increment();
                         return;
                     }
+                    if (settlement != null) wait = refreshed(wait);
                     if (!budget.expired() && registry.owned(key)) continue;
                 }
                 WAIT_DB_CHECKS.increment();
-                Optional<CheckoutAttemptStore.AttemptRecord> attempt = attempts.findAttempt(key);
+                Optional<AttemptRecord> attempt = attempts.findAttempt(key);
                 if (attempt.isEmpty() || attempt.get().state() != CheckoutAttemptStore.State.PENDING) {
                     settledElsewhere(key, attempt);
                     return;
@@ -311,14 +311,30 @@ public final class CheckoutOrchestrator {
         }
     }
 
+    /** A FAILED settlement left the attempt pending: wait on a fresh future, taken under the stripe. */
+    private PendingWait refreshed(PendingWait wait) {
+        try (var held = locks.acquire(wait.key().transactionId())) {
+            return new PendingWait(wait.key(), registry.futureFor(wait.key()));
+        }
+    }
+
     /** A database check found the attempt settled: wake this process's other waiters and drop the future. */
-    private void settledElsewhere(AttemptKey key, Optional<CheckoutAttemptStore.AttemptRecord> attempt) {
-        Settlement settlement = attempt.isPresent() && attempt.get().state() == CheckoutAttemptStore.State.COMPLETED
-                ? Settlement.COMPLETED : Settlement.REOPENED;
+    private Settlement settledElsewhere(AttemptKey key, Optional<AttemptRecord> attempt) {
+        Settlement settlement = settlementOf(attempt);
         try (var held = locks.acquire(key.transactionId())) {
             cache.invalidate(key.transactionId());
-            registry.settled(key, settlement);
+            registry.complete(key, settlement);
         }
+        return settlement;
+    }
+
+    private static Settlement settlementOf(Optional<AttemptRecord> attempt) {
+        if (attempt.isEmpty()) return Settlement.reopened(null, null, true);
+        AttemptRecord settled = attempt.get();
+        boolean recorded = settled.clientOutcome() != ClientOutcome.NONE;
+        return settled.state() == CheckoutAttemptStore.State.COMPLETED
+                ? Settlement.completed(settled.settledAt(), recorded)
+                : Settlement.reopened(settled.rejectionReason(), settled.rejectedSku(), recorded);
     }
 
     /** {@code restartBudget} is set after a wait: with nothing left of it, no new attempt is begun. */
@@ -344,14 +360,15 @@ public final class CheckoutOrchestrator {
                 if (restartBudget != null && restartBudget.expired()) throw new CheckoutPendingFailure(id);
                 State state = found.orElseThrow();
                 AttemptKey key = new AttemptKey(id, state.attemptCount() + 1);
-                List<InventoryGateway.CheckoutLine> lines = lines(state);
+                List<CheckoutEvents.Line> lines = lines(state);
                 Instant createdAt = timing.now();
+                OutboxRow request = events.request(key, lines, createdAt);
                 WriteResult result;
                 try {
                     result = attempts.begin(new CheckoutAttemptStore.Begin(key, state.itemCount(), state.totalAmount(),
-                            canonical(lines), createdAt, createdAt.plus(settings.responseBudget())));
+                            canonical(lines), createdAt, createdAt.plus(settings.republishAfter()), request));
                 } catch (RuntimeException failure) {
-                    // The attempt may exist: reload before any further mutation, and let recovery settle or drop it.
+                    // The attempt may exist: reload before any further mutation, and let recovery republish or drop it.
                     cache.invalidate(id);
                     if (failure instanceof StoreFailure store && store.commitOutcomeUnknown()) {
                         AMBIGUOUS.increment();
@@ -361,8 +378,8 @@ public final class CheckoutOrchestrator {
                 }
                 if (result == WriteResult.OK) {
                     cache.put(state.withActiveAttempt(key.attemptNumber()));
-                    registry.own(key);
-                    return new Start(new Begun(key, state, lines), null);
+                    CompletableFuture<Settlement> future = registry.register(key);
+                    return new Start(new Begun(key, state, request.eventId(), future), null);
                 }
                 cache.recordGuardMiss();
                 cache.invalidate(id);
@@ -376,7 +393,7 @@ public final class CheckoutOrchestrator {
         }
     }
 
-    /** The established precedence (FR-025, FR-035); null when T1 may proceed. */
+    /** The established precedence (FR-032, FR-042); null when T1 may proceed. */
     private static RuntimeException rejection(String id, Optional<State> found) {
         if (found.isEmpty()) return new TransactionFailure(TransactionFailure.Code.NOT_FOUND, "Transaction not found: " + id);
         State state = found.get();
@@ -388,139 +405,79 @@ public final class CheckoutOrchestrator {
         return null;
     }
 
-    private ReceiptView settle(Begun begun, ResponseBudget budget) {
+    /**
+     * Waits for the attempt's own settlement, holding nothing. The database is read once per backstop for a
+     * settlement made by another process. At the budget's end the request claims TIMED_OUT and hands the
+     * attempt over; if the handler claimed first, the request answers from its settlement however late.
+     */
+    private ReceiptView awaitOutcome(Begun begun, ResponseBudget budget) {
         AttemptKey key = begun.key();
-        for (int retry = 0; ; retry++) {
-            Duration deadline = budget.nextDeadline(settings.rpcDeadline());
-            if (deadline.isZero()) throw handOver(key);
-            InventoryGateway.ApplyResult result;
-            try {
-                FaultHooks.hit("checkout.beforeApply");
-                result = inventory.applyCheckout(key, begun.lines(), deadline);
-            } catch (RuntimeException unexpected) {
-                result = new InventoryGateway.Uncertain(unexpected.getClass().getSimpleName());
+        long started = System.nanoTime();
+        try {
+            while (true) {
+                Duration slice = budget.nextDeadline(settings.waitBackstop());
+                if (!slice.isZero()) {
+                    Settlement settlement = await(begun.future(), slice);
+                    if (settlement != null) return answer(begun, settlement);
+                    if (!budget.expired()) {
+                        Settlement elsewhere = settledByAnotherProcess(begun);
+                        if (elsewhere != null) return answer(begun, elsewhere);
+                        continue;
+                    }
+                }
+                if (registry.claimTimeout(key)) throw handOver(key);
+                // The handler claimed the response first; it answers even after the budget (D7).
+                Settlement late = await(begun.future(), settings.responseBudget());
+                if (late == null) throw new CheckoutPendingFailure(key.transactionId());
+                LATE_ANSWERS.increment();
+                return answer(begun, late);
             }
-            FaultHooks.hit("checkout.afterApplyReply");
-            switch (result) {
-                case InventoryGateway.Applied applied -> {
-                    return recordCompletion(begun, budget);
-                }
-                case InventoryGateway.Rejected rejected -> {
-                    return reopen(begun, rejected.reason() == InventoryGateway.RejectionReason.INSUFFICIENT_STOCK
-                            ? RejectionReason.INSUFFICIENT_STOCK : RejectionReason.INVALID_REQUEST, rejected.sku(), budget);
-                }
-                case InventoryGateway.StockRestored restored -> {
-                    return reopen(begun, RejectionReason.STOCK_RESTORED, null, budget);
-                }
-                case InventoryGateway.PayloadMismatch mismatch -> throw alarm(key, "FAILED_PRECONDITION", mismatch.detail());
-                case InventoryGateway.InvalidRequest invalid -> throw alarm(key, "INVALID_ARGUMENT", invalid.detail());
-                case InventoryGateway.Uncertain uncertain -> {
-                    if (!pause(budget, retry)) throw handOver(key);
-                    APPLY_RETRIES.increment();
-                }
-            }
-        }
-    }
-
-    /** T3: retried within the budget until it commits; it has no compensation (constitution v5.1.0, Principle V). */
-    private ReceiptView recordCompletion(Begun begun, ResponseBudget budget) {
-        AttemptKey key = begun.key();
-        String id = key.transactionId();
-        Instant completedAt = completionTime(begun.state());
-        for (int retry = 0; ; retry++) {
-            long started = System.nanoTime();
-            boolean recorded = false;
-            try (var held = locks.acquire(id)) {
-                WriteResult result = null;
-                try {
-                    result = attempts.complete(key, completedAt, true);
-                } catch (RuntimeException failure) {
-                    cache.invalidate(id);
-                    if (failure instanceof StoreFailure store && store.commitOutcomeUnknown()) AMBIGUOUS.increment();
-                }
-                if (result == WriteResult.OK) {
-                    cache.evict(id);
-                    registry.settled(key, Settlement.COMPLETED);
-                    recorded = true;
-                }
-                if (result == WriteResult.GUARD_MISS) {
-                    cache.recordGuardMiss();
-                    cache.invalidate(id);
-                    return answerFromSettlement(begun);
-                }
-            } finally {
-                T3.record(System.nanoTime() - started);
-            }
-            if (recorded) {
-                FaultHooks.hit("checkout.afterRecordCompletion");
-                return receipt(begun.state(), completedAt);
-            }
-            if (!pause(budget, retry)) throw handOver(key);
-        }
-    }
-
-    /** Compensates T1 after a definitive rejection; the basket is OPEN again, unchanged. */
-    private ReceiptView reopen(Begun begun, RejectionReason reason, String rejectedSku, ResponseBudget budget) {
-        AttemptKey key = begun.key();
-        String id = key.transactionId();
-        Instant settledAt = timing.now();
-        for (int retry = 0; ; retry++) {
-            long started = System.nanoTime();
-            try (var held = locks.acquire(id)) {
-                WriteResult result = null;
-                try {
-                    result = attempts.reopen(key, reason, rejectedSku, settledAt, true);
-                } catch (RuntimeException failure) {
-                    cache.invalidate(id);
-                    if (failure instanceof StoreFailure store && store.commitOutcomeUnknown()) AMBIGUOUS.increment();
-                }
-                if (result == WriteResult.OK) {
-                    cache.put(begun.state().withActiveAttempt(key.attemptNumber()).reopened());
-                    registry.settled(key, Settlement.REOPENED);
-                    throw refusal(id, reason, rejectedSku);
-                }
-                if (result == WriteResult.GUARD_MISS) {
-                    cache.recordGuardMiss();
-                    cache.invalidate(id);
-                    return answerFromSettlement(begun);
-                }
-            } finally {
-                REOPEN.record(System.nanoTime() - started);
-            }
-            if (!pause(budget, retry)) throw handOver(key);
+        } finally {
+            OUTCOME_WAIT.record(System.nanoTime() - started);
         }
     }
 
     /**
-     * A T3 or reopen guard missed: the attempt was settled already, by this request's own commit whose
-     * outcome was unknown, or by another actor such as a recovery worker. The request answers from the
-     * settled attempt, first recording its own response when no outcome is recorded yet (R9); if that
-     * write fails, the failure answers 500. The caller holds the stripe.
+     * The backstop read (D11): an attempt settled by another Transaction process. The request claims the
+     * response itself, so this process's handler cannot also claim it, and wakes its other waiters.
      */
-    private ReceiptView answerFromSettlement(Begun begun) {
+    private Settlement settledByAnotherProcess(Begun begun) {
         AttemptKey key = begun.key();
-        CheckoutAttemptStore.AttemptRecord settled = attempts.findAttempt(key).orElseThrow(
-                () -> new IllegalStateException("Attempt " + key + " vanished while it was being settled"));
-        switch (settled.state()) {
+        Optional<AttemptRecord> attempt;
+        try {
+            attempt = attempts.findAttempt(key);
+        } catch (StoreFailure unavailable) {
+            return null;
+        }
+        if (attempt.isEmpty() || attempt.get().state() == CheckoutAttemptStore.State.PENDING) return null;
+        if (!registry.claimForHandler(key)) return null;
+        FOREIGN.increment();
+        return settledElsewhere(key, attempt);
+    }
+
+    private ReceiptView answer(Begun begun, Settlement settlement) {
+        AttemptKey key = begun.key();
+        switch (settlement.kind()) {
             case COMPLETED -> {
-                claim(key, settled.clientOutcome(), ClientOutcome.SUCCESS);
-                registry.settled(key, Settlement.COMPLETED);
-                return receipt(begun.state(), settled.settledAt());
+                if (!settlement.outcomeRecorded()) attempts.recordClientOutcome(key, ClientOutcome.SUCCESS);
+                Instant completedAt = settlement.completedAt() != null ? settlement.completedAt() : timing.now();
+                return receipt(begun.state(), completedAt);
             }
-            case REJECTED -> {
-                claim(key, settled.clientOutcome(), ClientOutcome.REJECTED);
-                registry.settled(key, Settlement.REOPENED);
-                throw refusal(key.transactionId(), settled.rejectionReason(), settled.rejectedSku());
+            case REOPENED -> {
+                if (!settlement.outcomeRecorded()) attempts.recordClientOutcome(key, ClientOutcome.REJECTED);
+                throw refusal(key.transactionId(), settlement.reason(), settlement.rejectedSku());
             }
-            default -> throw new IllegalStateException("Attempt " + key + " is pending but no longer active");
+            default -> throw handOver(key);
         }
     }
 
-    /** Records this request's response when the settler recorded none; an earlier write of our own is kept. */
-    private void claim(AttemptKey key, ClientOutcome recorded, ClientOutcome answer) {
-        if (recorded != ClientOutcome.NONE) return;
-        FOREIGN.increment();
-        attempts.recordClientOutcome(key, answer);
+    private Settlement await(CompletableFuture<Settlement> future, Duration timeout) {
+        try {
+            return timing.await(future, timeout);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
     }
 
     /**
@@ -540,38 +497,12 @@ public final class CheckoutOrchestrator {
         return new CheckoutPendingFailure(key.transactionId());
     }
 
-    /** FAILED_PRECONDITION and INVALID_ARGUMENT are faults, never rejections: the attempt stays pending. */
-    private CheckoutPendingFailure alarm(AttemptKey key, String status, String detail) {
-        ALARMS.increment();
-        System.err.println("[transaction] ERROR Inventory answered " + status + " for attempt " + key + ": " + detail);
-        return handOver(key);
-    }
-
-    /** Sleeps the next retry delay; false when the budget cannot cover the delay plus another try. */
-    private boolean pause(ResponseBudget budget, int retry) {
-        List<Duration> delays = settings.retryDelays();
-        Duration delay = delays.get(Math.min(retry, delays.size() - 1));
-        if (budget.remaining().compareTo(delay) <= 0) return false;
-        try {
-            timing.sleep(delay);
-            return true;
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            return false;
-        }
-    }
-
     private static RuntimeException refusal(String id, RejectionReason reason, String rejectedSku) {
         if (reason == RejectionReason.INSUFFICIENT_STOCK) {
             return new TransactionFailure(TransactionFailure.Code.INSUFFICIENT_STOCK,
                     "Insufficient stock for SKU: " + rejectedSku);
         }
         return new CheckoutRejectedFailure(id, String.valueOf(reason), rejectedSku);
-    }
-
-    private Instant completionTime(State state) {
-        Instant now = timing.now();
-        return state.startedAt() != null && now.isBefore(state.startedAt()) ? state.startedAt() : now;
     }
 
     private static ReceiptView receipt(State state, Instant completedAt) {
@@ -583,27 +514,26 @@ public final class CheckoutOrchestrator {
                 state.startedAt(), completedAt, lines);
     }
 
-    private static List<InventoryGateway.CheckoutLine> lines(State state) {
+    private static List<CheckoutEvents.Line> lines(State state) {
         return state.lines().values().stream()
-                .map(line -> new InventoryGateway.CheckoutLine(line.sku(), line.quantity())).toList();
+                .map(line -> new CheckoutEvents.Line(line.sku(), line.quantity())).toList();
     }
 
     /** The canonical snapshot: {@code [{"sku":"…","quantity":n},…]}, sorted by SKU, no whitespace. */
-    static String canonical(List<InventoryGateway.CheckoutLine> lines) {
+    static String canonical(List<CheckoutEvents.Line> lines) {
         List<String> entries = new ArrayList<>(lines.size());
-        for (InventoryGateway.CheckoutLine line : lines.stream()
-                .sorted(java.util.Comparator.comparing(InventoryGateway.CheckoutLine::sku)).toList()) {
+        for (CheckoutEvents.Line line : lines.stream().sorted(Comparator.comparing(CheckoutEvents.Line::sku)).toList()) {
             entries.add(Json.object("sku", Json.quote(line.sku()), "quantity", Json.number(line.quantity())));
         }
         return Json.array(entries);
     }
 
-    /** Reads a stored canonical snapshot back, for the replays that recovery sends. */
-    static List<InventoryGateway.CheckoutLine> parseCanonical(String canonical) {
-        List<InventoryGateway.CheckoutLine> lines = new ArrayList<>();
+    /** Reads a stored canonical snapshot back. */
+    static List<CheckoutEvents.Line> parseCanonical(String canonical) {
+        List<CheckoutEvents.Line> lines = new ArrayList<>();
         for (Object entry : (List<?>) Json.parse(canonical)) {
             Map<String, Object> line = Json.asObject(entry);
-            lines.add(new InventoryGateway.CheckoutLine(Json.getString(line, "sku"), Json.getInt(line, "quantity")));
+            lines.add(new CheckoutEvents.Line(Json.getString(line, "sku"), Json.getInt(line, "quantity")));
         }
         return lines;
     }

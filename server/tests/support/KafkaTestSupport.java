@@ -110,6 +110,98 @@ public final class KafkaTestSupport {
                 group), group, clientId);
     }
 
+    /**
+     * Waits until {@code group} is stable with exactly {@code members} members and every partition of
+     * {@code topic} assigned, so a test's first event is consumed without waiting for a join, and a crashed
+     * member's partitions have moved to the live ones; fails after {@code timeout}.
+     */
+    public static void awaitGroupAssigned(String group, String topic, int partitions, int members, Duration timeout) {
+        awaitGroupAssigned(group, topic, partitions, members, java.util.Set.of(), timeout);
+    }
+
+    /**
+     * Waits until {@code group} has committed every record of {@code topic}, so a process restarted with a fault
+     * hook never meets a redelivery of an event its predecessor already handled; fails after {@code timeout}.
+     */
+    public static void awaitNoLag(String group, String topic, Duration timeout) {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        String last = "not read";
+        try (Admin admin = admin()) {
+            while (System.nanoTime() < deadline) {
+                try {
+                    var description = admin.describeTopics(List.of(topic)).allTopicNames().get(5, TimeUnit.SECONDS).get(topic);
+                    Map<org.apache.kafka.common.TopicPartition, org.apache.kafka.clients.admin.OffsetSpec> latest =
+                            new java.util.HashMap<>();
+                    for (var partition : description.partitions()) {
+                        latest.put(new org.apache.kafka.common.TopicPartition(topic, partition.partition()),
+                                org.apache.kafka.clients.admin.OffsetSpec.latest());
+                    }
+                    var ends = admin.listOffsets(latest).all().get(5, TimeUnit.SECONDS);
+                    var committed = admin.listConsumerGroupOffsets(group).partitionsToOffsetAndMetadata()
+                            .get(5, TimeUnit.SECONDS);
+                    long lag = 0;
+                    for (var end : ends.entrySet()) {
+                        var offset = committed.get(end.getKey());
+                        lag += end.getValue().offset() - (offset == null ? 0 : offset.offset());
+                    }
+                    last = lag + " records behind";
+                    if (lag == 0) return;
+                } catch (Exception notYet) {
+                    last = notYet.toString();
+                }
+                Thread.sleep(100);
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        fail("Consumer group " + group + " never caught up on " + topic + ": " + last);
+    }
+
+    /** The member IDs of {@code group} now; empty when it has none or cannot be described. */
+    public static java.util.Set<String> memberIds(String group) {
+        try (Admin admin = admin()) {
+            return admin.describeConsumerGroups(List.of(group)).all().get(5, TimeUnit.SECONDS).get(group).members()
+                    .stream().map(member -> member.consumerId()).collect(java.util.stream.Collectors.toSet());
+        } catch (Exception unknown) {
+            return java.util.Set.of();
+        }
+    }
+
+    /**
+     * As above, and none of the members may be one of {@code stale}: a process killed without shutdown hooks,
+     * as Windows stops test processes, stays in its group until its session expires, and a group of only its
+     * members looks just like a stable group of the new process.
+     */
+    public static void awaitGroupAssigned(String group, String topic, int partitions, int members,
+                                          java.util.Set<String> stale, Duration timeout) {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        String last = "not described";
+        try (Admin admin = admin()) {
+            while (System.nanoTime() < deadline) {
+                try {
+                    var description = admin.describeConsumerGroups(List.of(group)).all().get(5, TimeUnit.SECONDS)
+                            .get(group);
+                    long assigned = description.members().stream()
+                            .flatMap(member -> member.assignment().topicPartitions().stream())
+                            .filter(partition -> partition.topic().equals(topic)).count();
+                    last = description.groupState() + " with " + description.members().size() + " members and "
+                            + assigned + " partitions assigned";
+                    boolean fresh = description.members().stream().noneMatch(member -> stale.contains(member.consumerId()));
+                    if (description.groupState() == org.apache.kafka.common.GroupState.STABLE && assigned == partitions
+                            && description.members().size() == members && fresh) {
+                        return;
+                    }
+                } catch (Exception notYet) {
+                    last = notYet.toString();
+                }
+                Thread.sleep(100);
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        fail("Consumer group " + group + " was not assigned all " + partitions + " partitions of " + topic + ": " + last);
+    }
+
     public static boolean brokerControlEnabled() {
         return "1".equals(setting("KAFKA_TEST_BROKER_CONTROL", ""));
     }
@@ -166,7 +258,14 @@ public final class KafkaTestSupport {
 
     private static void create(List<NewTopic> topics) {
         try (Admin admin = admin()) {
-            admin.createTopics(topics).all().get(30, TimeUnit.SECONDS);
+            for (var created : admin.createTopics(topics).values().entrySet()) {
+                try {
+                    created.getValue().get(30, TimeUnit.SECONDS);
+                } catch (java.util.concurrent.ExecutionException failure) {
+                    // Two in-process services of one run create the same prefixed topics; the second is a no-op.
+                    if (!(failure.getCause() instanceof org.apache.kafka.common.errors.TopicExistsException)) throw failure;
+                }
+            }
         } catch (Exception failure) {
             fail("Creating test topics failed: " + failure);
         }

@@ -7,7 +7,7 @@ import database.StoreFailure;
 import database.TransactionStore;
 import org.junit.jupiter.api.Test;
 import support.CountingConnections;
-import support.FakeInventoryGateway;
+import support.FakeInventoryReactor;
 import support.FaultingConnections;
 import support.FaultingConnections.CommitFault;
 import support.InProcessInventory;
@@ -15,7 +15,6 @@ import support.InProcessTransaction;
 import support.InventoryTestSchema;
 import support.TransactionTestSchema;
 import transaction.CheckoutPendingFailure;
-import transaction.InventoryGateway;
 import transaction.TransactionFailure;
 
 import java.time.Duration;
@@ -25,13 +24,15 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * An ambiguous Scan or Complete commit is never acknowledged, and the cache is reconciled from the
  * database before the next mutation, whichever way the commit went (R19 rule 1). An ambiguous T1 also
- * queues a reconcile entry, which the recovery worker settles or drops; an ambiguous T3 is retried and
+ * queues a reconcile entry, which the recovery worker republishes or drops, so the attempt is settled by
+ * its outcome event (006 D7, FR-037); an ambiguous T3 is retried by the outcome handler under the lock and
  * answers from the durable completion.
  */
 class AmbiguousCommitReconcileTest {
@@ -110,17 +111,18 @@ class AmbiguousCommitReconcileTest {
     }
 
     /**
-     * The Complete answers 500 without calling Inventory, the entry is invalidated, a reconcile entry is
-     * queued, and the next Complete reloads before anything else; no second PENDING attempt ever exists.
+     * The Complete answers 500 without signalling its request event, the entry is invalidated, a reconcile
+     * entry is queued, and the next Complete reloads before anything else; no second PENDING attempt ever
+     * exists.
      */
     private static void ambiguousT1(CommitFault fault, boolean durable) throws Exception {
         FaultingConnections faults = new FaultingConnections();
         List<String> events = new CopyOnWriteArrayList<>();
-        FakeInventoryGateway inventory = FakeInventoryGateway.applying();
         try (TransactionTestSchema schema = TransactionTestSchema.create()) {
             schema.seedReplica(10, UUID.randomUUID().toString());
             InProcessTransaction service = InProcessTransaction.over(schema).decorator(faults::wrap)
-                    .wrapTransactions(store -> recordLoads(store, events)).inventory(inventory).build();
+                    .wrapTransactions(store -> recordLoads(store, events)).build();
+            FakeInventoryReactor inventory = service.reactor().start();
             String id = service.start();
             service.scan(id, "SKU-000001");
 
@@ -128,18 +130,21 @@ class AmbiguousCommitReconcileTest {
             StoreFailure failure = assertThrows(StoreFailure.class, () -> service.complete(id));
             assertTrue(failure.commitOutcomeUnknown());
             assertEquals(500, ApiErrorMapper.map(failure).httpStatus());
-            assertEquals(0, inventory.applyCalls(), "Inventory is never called after an ambiguous T1");
+            assertEquals(0, inventory.requests(), "no request event is signalled after an ambiguous T1");
             try (var held = service.locks.acquire(id)) {
                 assertFalse(service.cache.contains(id), "the entry was invalidated before the lock was released");
             }
             assertTrue(service.schedule.contains(new CheckoutAttemptStore.AttemptKey(id, 1)),
-                    "a reconcile entry lets recovery settle or drop the attempt");
+                    "a reconcile entry lets recovery republish or drop the attempt");
             assertEquals(durable ? 1 : 0, schema.pendingAttemptCount());
+            assertEquals(durable ? 1 : 0, schema.queryLong("SELECT COUNT(*) FROM outbox_event WHERE aggregate_key = ?",
+                    id + ":1"), "the request row exists exactly when the attempt does");
 
             events.clear();
             if (durable) {
                 // The next Complete finds the committed attempt pending and waits; the worker's reconcile
-                // entry settles it (T147), and the waiter resumes from the settled state.
+                // entry republishes its recorded request, Inventory's outcome settles it, and the waiter
+                // resumes from the settled state.
                 CompletableFuture<String> next = CompletableFuture.supplyAsync(() -> {
                     try {
                         return "OK " + service.complete(id).itemCount();
@@ -150,11 +155,10 @@ class AmbiguousCommitReconcileTest {
                     }
                 });
                 awaitWaiter(service);
-                assertEquals(0, inventory.applyCalls(), "the waiting Complete never calls Inventory itself");
                 assertTrue(service.recovery.runOnce(Duration.ofSeconds(5)), "the reconcile entry is due at once");
                 assertEquals("NOT_OPEN", next.get(10, TimeUnit.SECONDS), "settled COMPLETED: the waiter answers 409");
-                assertEquals(List.of(1), inventory.calls().stream().map(call -> call.key().attemptNumber()).toList(),
-                        "the worker replayed attempt 1 once");
+                assertEquals(List.of(1), inventory.calls().stream().map(call -> call.key().attemptNumber()).distinct()
+                        .toList(), "only attempt 1 was ever requested, by the republish or the outbox sweep");
                 var attempts = schema.attempts(id);
                 assertEquals("COMPLETED", attempts.get(0).state());
                 assertEquals("NONE", attempts.get(0).clientOutcome(), "recovery never sets client_outcome");
@@ -166,7 +170,7 @@ class AmbiguousCommitReconcileTest {
                 var row = schema.transaction(id).orElseThrow();
                 assertEquals(0, row.attemptCount(), "and nothing was written");
                 assertNull(row.activeAttemptNumber());
-                assertEquals(0, inventory.applyCalls());
+                assertEquals(0, inventory.requests());
                 assertEquals(0, service.schedule.size());
                 assertEquals(1, service.complete(id).itemCount(), "the next Complete begins attempt 1 again");
                 assertEquals(List.of(1), inventory.calls().stream().map(call -> call.key().attemptNumber()).toList());
@@ -174,6 +178,7 @@ class AmbiguousCommitReconcileTest {
             assertEquals("load " + id, events.get(0), "the next Complete reloaded before any mutation");
             assertEquals(1, schema.attempts(id).size(), "never a second attempt");
             assertTrue(schema.pendingAttemptCount() <= 1);
+            inventory.close();
         }
     }
 
@@ -194,14 +199,14 @@ class AmbiguousCommitReconcileTest {
                  InProcessInventory inventory = InProcessInventory.over(stock)) {
                 String version = stock.seed(10, 5);
                 schema.seedReplica(10, version);
-                FakeInventoryGateway gateway = FakeInventoryGateway.applying().otherwise(call -> {
-                    InventoryGateway.ApplyResult result = inventory.gateway().applyCheckout(call.key(), call.lines(),
-                            call.deadline());
-                    faults.armForCurrentThread(fault);
-                    return result;
-                });
+                AtomicBoolean armed = new AtomicBoolean();
                 InProcessTransaction service = InProcessTransaction.over(schema).decorator(faults::wrap)
-                        .inventory(gateway).build();
+                        .bus(inventory.bus, inventory.names)
+                        // T3 runs on the outcome consumer: its first commit there fails.
+                        .wrapAttempts(store -> CompleteStatementBudgetTest.tap(store, "complete", () -> {
+                            if (armed.compareAndSet(false, true)) faults.armForCurrentThread(fault);
+                        }, () -> { }))
+                        .build();
                 String id = service.start();
                 service.scan(id, "SKU-000001");
 
@@ -212,7 +217,8 @@ class AmbiguousCommitReconcileTest {
                 assertEquals(1, attempts.size());
                 assertEquals("COMPLETED", attempts.get(0).state(), "one COMPLETED attempt");
                 assertEquals("SUCCESS", attempts.get(0).clientOutcome());
-                assertEquals(1, gateway.applyCalls(), "T3 is retried locally; Inventory is not asked again");
+                assertEquals(1, stock.queryLong("SELECT COUNT(*) FROM checkout_operation WHERE transaction_id = ?", id),
+                        "T3 is retried locally; Inventory is not asked again");
                 assertEquals(4, stock.stock("SKU-000001"), fault.kind() + ": one deduction");
             }
         }

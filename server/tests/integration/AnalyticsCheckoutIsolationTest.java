@@ -43,7 +43,7 @@ class AnalyticsCheckoutIsolationTest {
              InProcessAnalytics analytics = InProcessAnalytics.over(analyticsSchema)) {
             transactions.seedReplica(2, stock.seed(2, 2_000));
             InProcessTransaction checkout = InProcessTransaction.over(transactions).pool(8, 32)
-                    .inventory(inventory.gateway()).build();
+                    .bus(inventory.bus, inventory.names).build();
             ScanEventRelay relay = new ScanEventRelay(new JdbcRelayStore(checkout.pool),
                     new GrpcAnalyticsIngestClient(analytics.channel(), Duration.ofSeconds(5)), ScanEventRelay.Settings.defaults());
             relay.start();

@@ -1,5 +1,6 @@
 package support;
 
+import events.TopicNames;
 import io.grpc.ManagedChannel;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 
@@ -8,11 +9,14 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
  * An Inventory process and a Transaction process, each over its own disposable schema and user (R3),
- * started from the built artifacts for process-level Saga tests. Transaction's product replica is seeded
+ * started from the built artifacts for process-level Saga tests. They exchange checkout events through the
+ * live test broker under a per-deployment topic prefix ({@link #names}), whose topics the deployment
+ * creates; without a reachable broker the calling test is skipped, or fails under {@code STRICT_LIVE_GATES=1}. Transaction's product replica is seeded
  * with Inventory's catalog and version, so no refresh is needed before the first Scan. Either service can
  * be started with fault hooks armed (see {@link FaultInjection}) and restarted without them.
  *
@@ -21,6 +25,8 @@ import java.util.concurrent.TimeUnit;
  * deployment's own Analytics port, which nobody serves until then.</p>
  */
 public final class CheckoutDeployment implements AutoCloseable {
+    /** {@code CHECKOUT_CONSUMER_THREADS} of both services unless a test overrides Transaction's. */
+    private static final int CONSUMER_THREADS = 8;
     public final TransactionTestSchema transactionSchema;
     public final InventoryTestSchema inventorySchema;
     /** Null unless the deployment was started {@link #withAnalytics}. */
@@ -33,6 +39,8 @@ public final class CheckoutDeployment implements AutoCloseable {
     public final ServiceHttp transactionHttp;
     public final ServiceHttp inventoryHttp;
     public final ServiceHttp analyticsHttp;
+    /** This deployment's topics and consumer groups on the live broker. */
+    public final TopicNames names;
     private final Map<String, String> transactionEnvironment;
     private final List<ServiceProcesses.ServiceProcess> extraTransactions = new ArrayList<>();
     private ServiceProcesses.ServiceProcess inventory;
@@ -43,6 +51,9 @@ public final class CheckoutDeployment implements AutoCloseable {
     private CheckoutDeployment(int products, int stock, Map<String, String> transactionEnvironment,
                                String transactionFaults, String inventoryFaults, boolean withAnalytics) throws Exception {
         this.transactionEnvironment = new LinkedHashMap<>(transactionEnvironment);
+        KafkaTestSupport.requireBroker();
+        names = KafkaTestSupport.runTopics();
+        KafkaTestSupport.createCatalogTopics(names);
         transactionSchema = TransactionTestSchema.create(TestSchema.Options.defaults().withOwnUser());
         InventoryTestSchema inventories = null;
         AnalyticsTestSchema analyticsSchemaCreated = null;
@@ -104,22 +115,76 @@ public final class CheckoutDeployment implements AutoCloseable {
 
     /** Starts (or restarts) Inventory, with {@code faults} armed when it is not null. */
     public void startInventory(String faults) throws Exception {
+        if (faults != null) awaitQuiet();
+        Set<String> previous = KafkaTestSupport.memberIds(names.group(TopicNames.INVENTORY_CHECKOUT_GROUP));
         closeQuietly(inventory);
         inventory = ServiceProcesses.service("inventory").database(inventorySchema).httpPort(inventoryHttpPort)
-                .grpcPort(inventoryGrpcPort).faults(faults).start();
+                .grpcPort(inventoryGrpcPort).kafka(names).faults(faults).start();
         inventory.awaitHttp("/items", 200, Duration.ofSeconds(60));
         inventory.awaitPort(inventoryGrpcPort, Duration.ofSeconds(30));
+        KafkaTestSupport.awaitGroupAssigned(names.group(TopicNames.INVENTORY_CHECKOUT_GROUP), names.checkout(),
+                TopicNames.Topic.CHECKOUT.partitions(), CONSUMER_THREADS, previous, Duration.ofSeconds(60));
     }
 
     public void startTransaction() throws Exception {
         startTransaction(null);
     }
 
+    /**
+     * Waits until no checkout event is on its way: both outboxes are published and both consumer groups have
+     * committed every record, twice in a row 1 s apart. A process restarted with a fault hook then meets only
+     * the events of the test's next checkout, never a redelivery or a late re-send of an earlier one.
+     */
+    public void awaitQuiet() throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        int quiet = 0;
+        while (quiet < 2) {
+            if (System.nanoTime() > deadline) throw new AssertionError("The deployment never became quiet" + logs());
+            boolean published = transactionSchema.unpublishedOutboxCount() == 0
+                    && inventorySchema.unpublishedOutboxCount() == 0;
+            if (published) {
+                KafkaTestSupport.awaitNoLag(names.group(TopicNames.INVENTORY_CHECKOUT_GROUP), names.checkout(),
+                        Duration.ofSeconds(30));
+                KafkaTestSupport.awaitNoLag(names.group(TopicNames.TRANSACTION_CHECKOUT_OUTCOME_GROUP),
+                        names.checkoutOutcome(), Duration.ofSeconds(30));
+                quiet++;
+            } else {
+                quiet = 0;
+            }
+            Thread.sleep(1_000);
+        }
+    }
+
     /** Starts (or restarts) Transaction, with {@code faults} armed when it is not null. */
     public void startTransaction(String faults) throws Exception {
+        if (faults != null) awaitQuiet();
+        // Only this process's members are stale when no extra Transaction process holds members of its own.
+        boolean alone = extraTransactions.stream().noneMatch(ServiceProcesses.ServiceProcess::isAlive);
+        Set<String> previous = alone ? KafkaTestSupport.memberIds(names.group(TopicNames.TRANSACTION_CHECKOUT_OUTCOME_GROUP))
+                : Set.of();
         closeQuietly(transaction);
         transaction = transactionBuilder(transactionHttpPort).faults(faults).start();
         transaction.awaitHttp("/transactions/missing", 404, Duration.ofSeconds(60));
+        awaitOutcomeGroup(previous);
+    }
+
+    /**
+     * Waits until Transaction's outcome group consists of exactly the consumers of the live Transaction
+     * processes and holds all 16 partitions, so no partition waits on a crashed member.
+     */
+    public void awaitOutcomeGroup() {
+        awaitOutcomeGroup(Set.of());
+    }
+
+    /** As {@link #awaitOutcomeGroup()}, with none of {@code stale}, the members of a stopped process, left. */
+    private void awaitOutcomeGroup(Set<String> stale) {
+        int live = transaction != null && transaction.isAlive() ? 1 : 0;
+        for (ServiceProcesses.ServiceProcess extra : extraTransactions) if (extra.isAlive()) live++;
+        int threads = Integer.parseInt(transactionEnvironment.getOrDefault("CHECKOUT_CONSUMER_THREADS",
+                Integer.toString(CONSUMER_THREADS)));
+        KafkaTestSupport.awaitGroupAssigned(names.group(TopicNames.TRANSACTION_CHECKOUT_OUTCOME_GROUP),
+                names.checkoutOutcome(), TopicNames.Topic.CHECKOUT_OUTCOME.partitions(), live * threads, stale,
+                Duration.ofSeconds(60));
     }
 
     /**
@@ -130,12 +195,14 @@ public final class CheckoutDeployment implements AutoCloseable {
         ServiceProcesses.ServiceProcess extra = transactionBuilder(httpPort).start();
         extraTransactions.add(extra);
         extra.awaitHttp("/transactions/missing", 404, Duration.ofSeconds(60));
+        awaitOutcomeGroup();
         return extra;
     }
 
     private ServiceProcesses.Builder transactionBuilder(int httpPort) {
         ServiceProcesses.Builder builder = ServiceProcesses.service("transaction").database(transactionSchema)
-                .httpPort(httpPort).grpcTarget("inventory", inventoryGrpcPort).grpcTarget("analytics", analyticsGrpcPort);
+                .httpPort(httpPort).grpcTarget("inventory", inventoryGrpcPort).grpcTarget("analytics", analyticsGrpcPort)
+                .kafka(names);
         transactionEnvironment.forEach(builder::env);
         return builder;
     }
@@ -149,7 +216,7 @@ public final class CheckoutDeployment implements AutoCloseable {
         if (analyticsSchema == null) throw new IllegalStateException("Start the deployment withAnalytics");
         closeQuietly(analytics);
         analytics = ServiceProcesses.service("analytics").database(analyticsSchema).httpPort(analyticsHttpPort)
-                .grpcPort(analyticsGrpcPort).perfMetrics(true).env("PERF_METRICS_INTERVAL_SECONDS", "1")
+                .grpcPort(analyticsGrpcPort).kafka(names).perfMetrics(true).env("PERF_METRICS_INTERVAL_SECONDS", "1")
                 .faults(faults).start();
         analytics.awaitHttp("/analytics/popular-items", 200, Duration.ofSeconds(60));
         analytics.awaitPort(analyticsGrpcPort, Duration.ofSeconds(30));
@@ -199,7 +266,7 @@ public final class CheckoutDeployment implements AutoCloseable {
         return analytics;
     }
 
-    /** A channel to Inventory's gRPC port, for diagnostics such as GetCheckoutOutcome. */
+    /** A channel to Inventory's gRPC port, for the catalog and the reserved restoration until T111. */
     public synchronized ManagedChannel inventoryChannel() {
         if (channel == null) {
             channel = NettyChannelBuilder.forAddress("127.0.0.1", inventoryGrpcPort).usePlaintext().build();

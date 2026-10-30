@@ -43,7 +43,7 @@ public final class TransactionTestSchema extends TestSchema {
                           boolean delivered) { }
 
     public record AttemptRow(int attemptNumber, String state, String rejectionReason, String rejectedSku,
-                             String lines, String clientOutcome, int retryCount) { }
+                             String lines, String clientOutcome, int retryCount, String lastError) { }
 
     public Optional<TransactionRow> transaction(String transactionId) throws SQLException {
         try (PreparedStatement sql = admin().prepareStatement(
@@ -90,13 +90,13 @@ public final class TransactionTestSchema extends TestSchema {
     public List<AttemptRow> attempts(String transactionId) throws SQLException {
         List<AttemptRow> attempts = new ArrayList<>();
         try (PreparedStatement sql = admin().prepareStatement(
-                "SELECT attempt_number, state, rejection_reason, rejected_sku, `lines`, client_outcome, retry_count "
+                "SELECT attempt_number, state, rejection_reason, rejected_sku, `lines`, client_outcome, retry_count, last_error "
                         + "FROM checkout_attempt WHERE transaction_id = ? ORDER BY attempt_number")) {
             sql.setString(1, transactionId);
             try (ResultSet row = sql.executeQuery()) {
                 while (row.next()) {
                     attempts.add(new AttemptRow(row.getInt(1), row.getString(2), row.getString(3), row.getString(4),
-                            row.getString(5), row.getString(6), row.getInt(7)));
+                            row.getString(5), row.getString(6), row.getInt(7), row.getString(8)));
                 }
             }
         }

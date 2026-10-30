@@ -13,8 +13,9 @@ import java.util.Optional;
 
 /**
  * JDBC adapter for {@code checkout_attempt} and the Saga's guarded writes to {@code transaction}
- * (contracts/checkout-saga.md "Steps"). T1, T3, and reopen are two statements and one commit each,
- * with no read; every timestamp is supplied by the service.
+ * (006 contracts/checkout-saga.md "Steps"). T1 is three statements and one commit: the guarded UPDATE,
+ * the attempt INSERT, and the {@code CheckoutRequested} outbox INSERT. T3 and reopen are two statements
+ * and one commit each. None reads; every timestamp is supplied by the service.
  */
 public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
     private static final int LAST_ERROR_LENGTH = 255;
@@ -22,8 +23,8 @@ public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
             + "WHERE transaction_id = ? AND status = 'OPEN' AND active_attempt_number IS NULL AND item_count = ? "
             + "AND attempt_count = ?";
     private static final String BEGIN_INSERT = "INSERT INTO checkout_attempt (transaction_id, attempt_number, state, "
-            + "`lines`, item_count, total_amount, client_outcome, created_at, next_retry_at) "
-            + "VALUES (?, ?, 'PENDING', ?, ?, ?, 'NONE', ?, ?)";
+            + "`lines`, item_count, total_amount, client_outcome, created_at, next_retry_at, request_event_id) "
+            + "VALUES (?, ?, 'PENDING', ?, ?, ?, 'NONE', ?, ?, ?)";
     private static final String COMPLETE_GUARD = "UPDATE `transaction` SET status = 'COMPLETED', completed_at = ?, "
             + "active_attempt_number = NULL WHERE transaction_id = ? AND active_attempt_number = ?";
     private static final String COMPLETE_ATTEMPT = "UPDATE checkout_attempt SET state = 'COMPLETED', settled_at = ?, "
@@ -40,10 +41,13 @@ public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
             + "next_retry_at = ? WHERE transaction_id = ? AND attempt_number = ? AND state = 'PENDING' "
             + "AND client_outcome = 'NONE'";
     private static final String SCHEDULE_RETRY = "UPDATE checkout_attempt SET retry_count = retry_count + 1, "
-            + "next_retry_at = ?, last_error = ? WHERE transaction_id = ? AND attempt_number = ? AND state = 'PENDING'";
+            + "next_retry_at = ?, last_error = IF(last_error LIKE 'INTEGRITY:%', last_error, ?) "
+            + "WHERE transaction_id = ? AND attempt_number = ? AND state = 'PENDING'";
+    private static final String RECORD_ERROR = "UPDATE checkout_attempt SET last_error = ? "
+            + "WHERE transaction_id = ? AND attempt_number = ?";
     private static final String COLUMNS = "SELECT transaction_id, attempt_number, state, rejection_reason, rejected_sku, "
             + "`lines`, item_count, total_amount, client_outcome, created_at, settled_at, retry_count, next_retry_at, "
-            + "last_error FROM checkout_attempt";
+            + "last_error, request_event_id FROM checkout_attempt";
     private static final String FIND = COLUMNS + " WHERE transaction_id = ? AND attempt_number = ?";
     /** The index is forced so the bounded recovery scan never degrades into a full scan of every attempt. */
     private static final String DUE = COLUMNS + " FORCE INDEX (idx_checkout_attempt_due) "
@@ -79,8 +83,10 @@ public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
                 insert.setBigDecimal(5, begin.totalAmount());
                 insert.setTimestamp(6, Timestamp.from(begin.createdAt()));
                 insert.setTimestamp(7, Timestamp.from(begin.nextRetryAt()));
+                insert.setString(8, begin.request().eventId());
                 insert.executeUpdate();
             }
+            JdbcOutboxStore.insertRow(connection, begin.request());
             return WriteResult.OK;
         });
     }
@@ -217,8 +223,7 @@ public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
     public void scheduleRetry(AttemptKey key, Instant nextRetryAt, String lastError) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(nextRetryAt, "nextRetryAt");
-        String error = lastError == null || lastError.length() <= LAST_ERROR_LENGTH ? lastError
-                : lastError.substring(0, LAST_ERROR_LENGTH);
+        String error = truncate(lastError);
         JdbcUnitOfWork.inTransaction(pool, "transaction.store.scheduleRetry", connection -> {
             try (PreparedStatement update = connection.prepareStatement(SCHEDULE_RETRY)) {
                 update.setTimestamp(1, Timestamp.from(nextRetryAt));
@@ -231,6 +236,25 @@ public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
         });
     }
 
+    @Override
+    public boolean recordError(AttemptKey key, String lastError) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(lastError, "lastError");
+        String error = truncate(lastError);
+        return JdbcUnitOfWork.inTransaction(pool, "transaction.store.recordError", connection -> {
+            try (PreparedStatement update = connection.prepareStatement(RECORD_ERROR)) {
+                update.setString(1, error);
+                update.setString(2, key.transactionId());
+                update.setInt(3, key.attemptNumber());
+                return update.executeUpdate() == 1;
+            }
+        });
+    }
+
+    private static String truncate(String error) {
+        return error == null || error.length() <= LAST_ERROR_LENGTH ? error : error.substring(0, LAST_ERROR_LENGTH);
+    }
+
     private static AttemptRecord record(ResultSet row) throws SQLException {
         String reason = row.getString("rejection_reason");
         return new AttemptRecord(new AttemptKey(row.getString("transaction_id"), row.getInt("attempt_number")),
@@ -238,7 +262,8 @@ public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
                 row.getString("rejected_sku"), row.getString("lines"), row.getInt("item_count"),
                 row.getBigDecimal("total_amount"), ClientOutcome.valueOf(row.getString("client_outcome")),
                 instant(row.getTimestamp("created_at")), instant(row.getTimestamp("settled_at")),
-                row.getInt("retry_count"), instant(row.getTimestamp("next_retry_at")), row.getString("last_error"));
+                row.getInt("retry_count"), instant(row.getTimestamp("next_retry_at")), row.getString("last_error"),
+                row.getString("request_event_id"));
     }
 
     private static Instant instant(Timestamp timestamp) {

@@ -3,8 +3,7 @@ package transaction;
 import database.CheckoutAttemptStore;
 import database.CheckoutAttemptStore.AttemptKey;
 import database.CheckoutAttemptStore.AttemptRecord;
-import database.CheckoutAttemptStore.RejectionReason;
-import database.CheckoutAttemptStore.WriteResult;
+import events.OutboxSignal;
 import metrics.PerfMetrics;
 import transaction.SettlementRegistry.Settlement;
 
@@ -19,8 +18,8 @@ import java.util.Optional;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Forward recovery of pending checkout attempts (FR-030, FR-031, R7; contracts/checkout-saga.md "Recovery
- * worker"). One thread takes due keys from the in-memory {@link RecoverySchedule}; it never polls the
+ * Republishes pending checkout attempts (FR-037, FR-038, D7; contracts/checkout-saga.md "Republish and
+ * recovery"). One thread takes due keys from the in-memory {@link RecoverySchedule}; it never polls the
  * database on a short interval.
  *
  * <ul>
@@ -30,37 +29,44 @@ import java.util.concurrent.atomic.LongAdder;
  *       due attempts, repeated only while pages are full, enqueuing attempts that no live request owns
  *       and that are not scheduled. It catches anything the schedule missed, such as another process's
  *       handover.</li>
- *   <li><b>Settlement</b>: the attempt is read by key first; an absent or settled attempt is dropped and
- *       any local waiter is woken. Otherwise {@code ApplyCheckout} is replayed with the stored lines under
- *       the same key, and T3 or reopen runs under the transaction's stripe, which then updates the cache
- *       and wakes waiters. Uncertain outcomes back off from 100 ms to a 5 s cap, durably and in memory,
- *       with no retry limit.</li>
+ *   <li><b>Republish</b>: the attempt is read by key first; an absent or settled attempt is dropped and any
+ *       local waiter is woken. Otherwise its recorded {@code CheckoutRequested} is re-sent through
+ *       {@link OutboxSignal#resend} with the same {@code event_id} and bytes, and the next republish is due
+ *       after {@code CHECKOUT_REPUBLISH_AFTER_MS} (2,000) doubling to {@code CHECKOUT_REPUBLISH_MAX_MS}
+ *       (5,000), with no limit; {@code retry_count} grows and {@code last_error} becomes
+ *       {@code REPUBLISHED}, or {@code PUBLISH_FAILED} when the re-send could not be queued.</li>
+ *   <li><b>Stuck alarm</b>: an attempt still PENDING {@code CHECKOUT_STUCK_ALARM_SECONDS} (60) after it began
+ *       records {@code last_error = STUCK} instead, without any change of state, and is logged with its age
+ *       once per status interval.</li>
  * </ul>
  *
- * <p>The schedule and the registry cover only this process: another instance may replay the same
- * attempt, and Inventory's idempotency and the guarded writes keep it to one effect (Implementation
- * Rule 3). The worker never sets {@code client_outcome}: an attempt with no recorded response keeps
- * {@code NONE} (FR-054).</p>
+ * <p>The worker never settles an attempt: only an outcome event does ({@link CheckoutOutcomeHandler}). It
+ * never sets {@code client_outcome}. The schedule and the registry cover only this process; another
+ * instance may republish the same attempt, and Inventory's idempotency keeps it to one effect.</p>
  */
 public final class CheckoutRecoveryWorker implements AutoCloseable {
     public static final Duration DEFAULT_SCAN_INTERVAL = Duration.ofSeconds(30);
-    public static final Duration BACKOFF_BASE = Duration.ofMillis(100);
-    public static final Duration BACKOFF_CAP = Duration.ofSeconds(5);
+    public static final Duration DEFAULT_REPUBLISH_MAX = Duration.ofMillis(5_000);
+    public static final Duration DEFAULT_STUCK_ALARM = Duration.ofSeconds(60);
+    public static final Duration DEFAULT_ALARM_INTERVAL = Duration.ofSeconds(30);
+    public static final String REPUBLISHED = "REPUBLISHED";
+    public static final String PUBLISH_FAILED = "PUBLISH_FAILED";
+    public static final String STUCK = "STUCK";
     /** The delay before reading an attempt again after its own read failed. */
     private static final Duration READ_RETRY = Duration.ofSeconds(1);
     /** A due bound later than any stored {@code next_retry_at}, within the TIMESTAMP range. */
     private static final Instant STARTUP_HORIZON = Instant.parse("2038-01-01T00:00:00Z");
     private static final LongAdder PENDING = PerfMetrics.counter("transaction.recovery.pending");
-    private static final LongAdder SETTLED = PerfMetrics.counter("transaction.recovery.settled");
-    private static final LongAdder ALARMS = PerfMetrics.counter("transaction.recovery.alarms");
+    private static final LongAdder REPUBLISHES = PerfMetrics.counter("transaction.recovery.republished");
+    private static final LongAdder PUBLISH_FAILURES = PerfMetrics.counter("transaction.recovery.publishFailed");
+    private static final LongAdder STUCK_ALARMS = PerfMetrics.counter("transaction.recovery.stuckAlarms");
     private static final LongAdder SCAN_QUERIES = PerfMetrics.counter("transaction.recovery.scanQueries");
     private static final LongAdder SCAN_ROWS = PerfMetrics.counter("transaction.recovery.scanRows");
     private static final LongAdder SCHEDULED = PerfMetrics.counter("transaction.recovery.scheduled");
-    private static final LongAdder RETRIES = PerfMetrics.counter("transaction.recovery.retries");
     private static final LongAdder DROPPED = PerfMetrics.counter("transaction.recovery.dropped");
 
     private final CheckoutAttemptStore attempts;
-    private final InventoryGateway inventory;
+    private final OutboxSignal signal;
     private final TransactionStateCache cache;
     private final TransactionLocks locks;
     private final SettlementRegistry registry;
@@ -70,10 +76,10 @@ public final class CheckoutRecoveryWorker implements AutoCloseable {
     private volatile Thread thread;
     private volatile boolean running;
 
-    public CheckoutRecoveryWorker(CheckoutAttemptStore attempts, InventoryGateway inventory, TransactionStateCache cache,
+    public CheckoutRecoveryWorker(CheckoutAttemptStore attempts, OutboxSignal signal, TransactionStateCache cache,
                                   SettlementRegistry registry, RecoverySchedule schedule, Settings settings, Clock clock) {
         this.attempts = Objects.requireNonNull(attempts, "attempts");
-        this.inventory = Objects.requireNonNull(inventory, "inventory");
+        this.signal = Objects.requireNonNull(signal, "signal");
         this.cache = Objects.requireNonNull(cache, "cache");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.schedule = Objects.requireNonNull(schedule, "schedule");
@@ -83,30 +89,48 @@ public final class CheckoutRecoveryWorker implements AutoCloseable {
         if (registry.locks() != locks) throw new IllegalArgumentException("The registry must check the cache's locks");
     }
 
-    /** The safety-scan interval, the per-call Inventory deadline, and the scan page size. */
-    public record Settings(Duration scanInterval, Duration rpcDeadline, int pageSize) {
+    /**
+     * The safety-scan interval, the republish backoff from {@code republishAfter} to {@code republishMax},
+     * the age at which a pending attempt is stuck, how often a stuck attempt is logged again, and the scan
+     * page size.
+     */
+    public record Settings(Duration scanInterval, Duration republishAfter, Duration republishMax, Duration stuckAfter,
+                           Duration alarmInterval, int pageSize) {
         public Settings {
-            if (scanInterval == null || scanInterval.isZero() || scanInterval.isNegative()) {
-                throw new IllegalArgumentException("scanInterval must be positive");
+            for (Duration value : new Duration[] {scanInterval, republishAfter, republishMax, stuckAfter, alarmInterval}) {
+                if (value == null || value.isZero() || value.isNegative()) {
+                    throw new IllegalArgumentException("recovery durations must be positive");
+                }
             }
-            if (rpcDeadline == null || rpcDeadline.isZero() || rpcDeadline.isNegative()) {
-                throw new IllegalArgumentException("rpcDeadline must be positive");
-            }
+            if (republishMax.compareTo(republishAfter) < 0) throw new IllegalArgumentException("republishMax < republishAfter");
             if (pageSize < 1) throw new IllegalArgumentException("pageSize must be positive");
         }
 
         public static Settings defaults() {
-            return new Settings(DEFAULT_SCAN_INTERVAL, CheckoutOrchestrator.DEFAULT_RPC_DEADLINE,
-                    CheckoutAttemptStore.DEFAULT_PAGE_SIZE);
+            return new Settings(DEFAULT_SCAN_INTERVAL, CheckoutOrchestrator.DEFAULT_REPUBLISH_AFTER, DEFAULT_REPUBLISH_MAX,
+                    DEFAULT_STUCK_ALARM, DEFAULT_ALARM_INTERVAL, CheckoutAttemptStore.DEFAULT_PAGE_SIZE);
         }
 
-        /** {@code CHECKOUT_RECOVERY_SCAN_SECONDS} (30) and {@code INVENTORY_RPC_DEADLINE_MS} (2,000). */
+        /**
+         * {@code CHECKOUT_RECOVERY_SCAN_SECONDS} (30), {@code CHECKOUT_REPUBLISH_AFTER_MS} (2,000),
+         * {@code CHECKOUT_REPUBLISH_MAX_MS} (5,000), and {@code CHECKOUT_STUCK_ALARM_SECONDS} (60).
+         */
         public static Settings fromEnvironment(Map<String, String> environment) {
-            String seconds = environment.get("CHECKOUT_RECOVERY_SCAN_SECONDS");
-            Duration interval = seconds == null || seconds.isBlank() ? DEFAULT_SCAN_INTERVAL
-                    : Duration.ofSeconds(Long.parseLong(seconds.trim()));
-            return new Settings(interval, CheckoutOrchestrator.Settings.millis(environment, "INVENTORY_RPC_DEADLINE_MS",
-                    CheckoutOrchestrator.DEFAULT_RPC_DEADLINE), CheckoutAttemptStore.DEFAULT_PAGE_SIZE);
+            return new Settings(seconds(environment, "CHECKOUT_RECOVERY_SCAN_SECONDS", DEFAULT_SCAN_INTERVAL),
+                    CheckoutOrchestrator.Settings.millis(environment, "CHECKOUT_REPUBLISH_AFTER_MS",
+                            CheckoutOrchestrator.DEFAULT_REPUBLISH_AFTER),
+                    CheckoutOrchestrator.Settings.millis(environment, "CHECKOUT_REPUBLISH_MAX_MS", DEFAULT_REPUBLISH_MAX),
+                    seconds(environment, "CHECKOUT_STUCK_ALARM_SECONDS", DEFAULT_STUCK_ALARM),
+                    DEFAULT_ALARM_INTERVAL, CheckoutAttemptStore.DEFAULT_PAGE_SIZE);
+        }
+
+        public Settings withStuckAfter(Duration stuck) {
+            return new Settings(scanInterval, republishAfter, republishMax, stuck, alarmInterval, pageSize);
+        }
+
+        private static Duration seconds(Map<String, String> environment, String key, Duration fallback) {
+            String value = environment.get(key);
+            return value == null || value.isBlank() ? fallback : Duration.ofSeconds(Long.parseLong(value.trim()));
         }
     }
 
@@ -207,7 +231,7 @@ public final class CheckoutRecoveryWorker implements AutoCloseable {
         return page;
     }
 
-    /** Settles one attempt, or schedules its next try; never throws for a store or Inventory failure. */
+    /** Republishes one pending attempt and schedules the next republish; never throws for a store failure. */
     public void recover(AttemptKey key) {
         Objects.requireNonNull(key, "key");
         Optional<AttemptRecord> found;
@@ -219,145 +243,73 @@ public final class CheckoutRecoveryWorker implements AutoCloseable {
             return;
         }
         if (found.isEmpty()) {
-            // A reconcile entry for a T1 whose commit never happened: nothing to settle and nothing to write.
+            // A reconcile entry for a T1 whose commit never happened: nothing to republish and nothing to write.
             DROPPED.increment();
             return;
         }
         AttemptRecord attempt = found.get();
         if (attempt.state() != CheckoutAttemptStore.State.PENDING) {
             DROPPED.increment();
-            wake(key, settlementOf(attempt));
+            wake(key, attempt);
             return;
         }
         PENDING.increment();
-        InventoryGateway.ApplyResult result;
+        String lastError;
         try {
-            result = inventory.applyCheckout(key, CheckoutOrchestrator.parseCanonical(attempt.lines()),
-                    settings.rpcDeadline());
-        } catch (RuntimeException unexpected) {
-            result = new InventoryGateway.Uncertain(unexpected.getClass().getSimpleName());
-        }
-        switch (result) {
-            case InventoryGateway.Applied applied -> complete(attempt);
-            case InventoryGateway.Rejected rejected -> reopen(attempt,
-                    rejected.reason() == InventoryGateway.RejectionReason.INSUFFICIENT_STOCK
-                            ? RejectionReason.INSUFFICIENT_STOCK : RejectionReason.INVALID_REQUEST, rejected.sku());
-            case InventoryGateway.StockRestored restored -> reopen(attempt, RejectionReason.STOCK_RESTORED, null);
-            case InventoryGateway.PayloadMismatch mismatch -> alarm(attempt, "FAILED_PRECONDITION", mismatch.detail());
-            case InventoryGateway.InvalidRequest invalid -> alarm(attempt, "INVALID_ARGUMENT", invalid.detail());
-            case InventoryGateway.Uncertain uncertain -> retryLater(attempt, uncertain.status());
-        }
-    }
-
-    /** T3 for an attempt Inventory applied; a guard miss means another actor settled it first. */
-    private void complete(AttemptRecord attempt) {
-        AttemptKey key = attempt.key();
-        String id = key.transactionId();
-        try (var held = locks.acquire(id)) {
-            WriteResult result;
-            try {
-                result = attempts.complete(key, now(), false);
-            } catch (RuntimeException failure) {
-                cache.invalidate(id);
-                retryLater(attempt, "T3 failed: " + failure.getMessage());
-                return;
-            }
-            if (result == WriteResult.OK) {
-                cache.evict(id);
-                registry.settled(key, Settlement.COMPLETED);
-                SETTLED.increment();
-                return;
-            }
-            cache.invalidate(id);
-            settledByAnother(attempt);
-        }
-    }
-
-    /** Reopens the basket after a definitive rejection; the next request reloads the OPEN state. */
-    private void reopen(AttemptRecord attempt, RejectionReason reason, String rejectedSku) {
-        AttemptKey key = attempt.key();
-        String id = key.transactionId();
-        try (var held = locks.acquire(id)) {
-            WriteResult result;
-            try {
-                result = attempts.reopen(key, reason, rejectedSku, now(), false);
-            } catch (RuntimeException failure) {
-                cache.invalidate(id);
-                retryLater(attempt, "reopen failed: " + failure.getMessage());
-                return;
-            }
-            cache.invalidate(id);
-            if (result == WriteResult.OK) {
-                registry.settled(key, Settlement.REOPENED);
-                SETTLED.increment();
-                return;
-            }
-            settledByAnother(attempt);
-        }
-    }
-
-    /** The caller holds the stripe; reads the settled state and wakes this process's waiters. */
-    private void settledByAnother(AttemptRecord attempt) {
-        AttemptKey key = attempt.key();
-        Optional<AttemptRecord> settled;
-        try {
-            settled = attempts.findAttempt(key);
+            signal.resend(attempt.requestEventId());
+            REPUBLISHES.increment();
+            lastError = REPUBLISHED;
         } catch (RuntimeException failure) {
-            retryLater(attempt, "settled-state read failed: " + failure.getMessage());
-            return;
+            PUBLISH_FAILURES.increment();
+            System.err.println("[transaction] Could not republish attempt " + key + ": " + failure);
+            lastError = PUBLISH_FAILED;
         }
-        if (settled.isPresent() && settled.get().state() == CheckoutAttemptStore.State.PENDING) {
-            alarm(attempt, "INTEGRITY", "the attempt is pending but no longer active");
-            return;
-        }
-        DROPPED.increment();
-        registry.settled(key, settled.map(CheckoutRecoveryWorker::settlementOf).orElse(Settlement.REOPENED));
-    }
-
-    private void wake(AttemptKey key, Settlement settlement) {
-        try (var held = locks.acquire(key.transactionId())) {
-            cache.invalidate(key.transactionId());
-            registry.settled(key, settlement);
-        }
-    }
-
-    /** Uncertain: one more durable retry at {@code min(5 s, 100 ms x 2^retry_count)}, and in memory. */
-    private void retryLater(AttemptRecord attempt, String error) {
-        RETRIES.increment();
-        Instant due = now().plus(backoff(attempt.retryCount()));
+        Instant now = now();
+        if (stuck(attempt, now)) lastError = STUCK;
+        Instant due = now.plus(backoff(attempt.retryCount()));
         try {
-            attempts.scheduleRetry(attempt.key(), due, error);
+            attempts.scheduleRetry(key, due, lastError);
         } catch (RuntimeException failure) {
-            System.err.println("[transaction] Recovery could not record a retry for " + attempt.key() + ": " + failure);
+            System.err.println("[transaction] Recovery could not record a republish for " + key + ": " + failure);
         } finally {
-            schedule.enqueue(attempt.key(), due);
+            schedule.enqueue(key, due);
         }
     }
 
     /**
-     * FAILED_PRECONDITION and INVALID_ARGUMENT are faults, never rejections: the attempt stays pending and
-     * is retried at the safety scan's cadence, so the alarm repeats without flooding the log (FR-039).
+     * True from {@code CHECKOUT_STUCK_ALARM_SECONDS} after the attempt began. It is logged when it first becomes
+     * stuck, and then once per alarm interval: every {@code alarmInterval / republishMax} republishes, the
+     * capped cadence of a stuck attempt, so the worker keeps no per-attempt state.
      */
-    private void alarm(AttemptRecord attempt, String status, String detail) {
-        ALARMS.increment();
-        System.err.println("[checkout-alarm] ERROR Inventory answered " + status + " for attempt " + attempt.key()
-                + ": " + detail);
-        try {
-            attempts.scheduleRetry(attempt.key(), now().plus(settings.scanInterval()), status + ": " + detail);
-        } catch (RuntimeException failure) {
-            System.err.println("[transaction] Recovery could not record the alarm for " + attempt.key() + ": " + failure);
+    private boolean stuck(AttemptRecord attempt, Instant now) {
+        if (attempt.createdAt() == null) return false;
+        Duration age = Duration.between(attempt.createdAt(), now);
+        if (age.compareTo(settings.stuckAfter()) < 0) return false;
+        long every = Math.max(1, settings.alarmInterval().toMillis() / settings.republishMax().toMillis());
+        if (!STUCK.equals(attempt.lastError()) || attempt.retryCount() % every == 0) {
+            STUCK_ALARMS.increment();
+            System.err.println("[checkout-alarm] ERROR attempt " + attempt.key() + " has been pending for "
+                    + age.toSeconds() + " s" + (attempt.lastError() == null ? "" : " (" + attempt.lastError() + ")"));
         }
+        return true;
     }
 
-    /** {@code min(5 s, 100 ms x 2^retryCount)}. */
-    public static Duration backoff(int retryCount) {
+    /** The republish delay after {@code retryCount} republishes: {@code republishAfter x 2^retryCount}, capped. */
+    public Duration backoff(int retryCount) {
         int shift = Math.min(Math.max(retryCount, 0), 16);
-        Duration delay = BACKOFF_BASE.multipliedBy(1L << shift);
-        return delay.compareTo(BACKOFF_CAP) < 0 ? delay : BACKOFF_CAP;
+        Duration delay = settings.republishAfter().multipliedBy(1L << shift);
+        return delay.compareTo(settings.republishMax()) < 0 ? delay : settings.republishMax();
     }
 
-    private static Settlement settlementOf(AttemptRecord attempt) {
-        return attempt.state() == CheckoutAttemptStore.State.COMPLETED ? Settlement.COMPLETED : Settlement.REOPENED;
+    private void wake(AttemptKey key, AttemptRecord attempt) {
+        boolean recorded = attempt.clientOutcome() != CheckoutAttemptStore.ClientOutcome.NONE;
+        Settlement settlement = attempt.state() == CheckoutAttemptStore.State.COMPLETED
+                ? Settlement.completed(attempt.settledAt(), recorded)
+                : Settlement.reopened(attempt.rejectionReason(), attempt.rejectedSku(), recorded);
+        try (var held = locks.acquire(key.transactionId())) {
+            cache.invalidate(key.transactionId());
+            registry.complete(key, settlement);
+        }
     }
 
     private void recoverSafely(AttemptKey key) {

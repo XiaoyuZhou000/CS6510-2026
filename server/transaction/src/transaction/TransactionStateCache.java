@@ -89,6 +89,15 @@ public final class TransactionStateCache {
         return loaded;
     }
 
+    /** The cached entry without loading or counting a hit, or null; for settlers that only refine an entry. */
+    public State peek(String transactionId) {
+        requireLock(transactionId);
+        if (!enabled()) return null;
+        synchronized (entries) {
+            return entries.get(transactionId);
+        }
+    }
+
     /** Records a committed state; a state that is no longer OPEN leaves the cache. */
     public void put(State state) {
         requireLock(state.transactionId());

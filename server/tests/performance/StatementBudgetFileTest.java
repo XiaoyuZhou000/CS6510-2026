@@ -26,7 +26,7 @@ class StatementBudgetFileTest {
         assertFalse(budgets.ceilingKeys().isEmpty(), "No statement budgets");
         for (String required : List.of("start.statements", "scan.warm.statements", "scan.warm.selects",
                 "scan.warm.commits", "scan.warm.sessionCalls", "scan.cold.extraReads", "complete.t1.statements",
-                "complete.t3.statements", "complete.reopen.statements", "inventory.apply.applied.statements",
+                "complete.t3.statements", "complete.reopen.statements", "transaction.outcome.statements", "inventory.apply.statements",
                 "inventory.apply.rejected.statements", "analytics.ingest.statements", "relay.round.statements")) {
             if (!budgets.has(required)) problems.add("Missing budget " + required);
         }

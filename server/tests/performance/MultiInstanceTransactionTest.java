@@ -2,14 +2,12 @@ package performance;
 
 import metrics.PerfMetrics;
 import org.junit.jupiter.api.Test;
-import support.FakeInventoryGateway;
 import support.InProcessInventory;
 import support.InProcessTransaction;
 import support.InventoryTestSchema;
 import support.TransactionTestSchema;
 import transaction.CheckoutOrchestrator;
 import transaction.CheckoutPendingFailure;
-import transaction.InventoryGateway;
 import transaction.TransactionFailure;
 import transaction.TransactionOperations;
 
@@ -24,22 +22,25 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Two independent Transaction Service instances, each with its own cache and locks, over one schema:
- * the database, not either cache, decides every outcome (R19 rule 8; Implementation Rule 3), for Scan
+ * the database, not either cache, decides every outcome (R19 rule 8; Implementation Rule 1), for Scan
  * and for Complete against one shared Inventory, and for recovery: a worker against a live request, two
  * workers against each other, and waiters in both instances (T147).
+ *
+ * <p>Both instances share the {@code transaction-checkout-outcome} group on one in-memory bus with the real
+ * Inventory (006 D11): an outcome consumed by the instance not holding the request settles durably there,
+ * and the waiting request answers from its database backstop. Attempts are held pending by delaying the
+ * bus's delivery.</p>
  */
 class MultiInstanceTransactionTest {
     private static final String MISSES = "transaction.cache.guardMisses";
@@ -160,8 +161,8 @@ class MultiInstanceTransactionTest {
              InventoryTestSchema stock = InventoryTestSchema.create(InventoryTestSchema.Options.defaults().pool(4, 16));
              InProcessInventory inventory = InProcessInventory.over(stock)) {
             stock.seed(20, 100);
-            InProcessTransaction one = InProcessTransaction.over(schema).pool(4, 8).inventory(inventory.gateway()).build();
-            InProcessTransaction two = InProcessTransaction.over(schema).pool(4, 8).inventory(inventory.gateway()).build();
+            InProcessTransaction one = InProcessTransaction.over(schema).pool(4, 8).bus(inventory.bus, inventory.names).build();
+            InProcessTransaction two = InProcessTransaction.over(schema).pool(4, 8).bus(inventory.bus, inventory.names).build();
             int rounds = 5;
             for (int round = 0; round < rounds; round++) {
                 String id = one.start();
@@ -212,24 +213,18 @@ class MultiInstanceTransactionTest {
              InventoryTestSchema stock = InventoryTestSchema.create();
              InProcessInventory inventory = InProcessInventory.over(stock)) {
             stock.seed(20, 100);
-            CountDownLatch inside = new CountDownLatch(1);
-            CountDownLatch release = new CountDownLatch(1);
-            FakeInventoryGateway blocking = FakeInventoryGateway.applying().thenAnswer(call -> {
-                inside.countDown();
-                assertTrue(release.await(30, TimeUnit.SECONDS));
-                return inventory.gateway().applyCheckout(call.key(), call.lines(), call.deadline());
-            });
-            InProcessTransaction one = InProcessTransaction.over(schema).inventory(blocking).build();
-            InProcessTransaction two = InProcessTransaction.over(schema).inventory(inventory.gateway()).build();
+            InProcessTransaction one = InProcessTransaction.over(schema).bus(inventory.bus, inventory.names).build();
+            InProcessTransaction two = InProcessTransaction.over(schema).bus(inventory.bus, inventory.names).build();
             String id = one.start();
             one.scan(id, "SKU-000001");
             two.scan(id, "SKU-000001");
 
+            inventory.bus.delayDelivery(Duration.ofSeconds(3));
             CompletableFuture<TransactionOperations.ReceiptView> completing = CompletableFuture.supplyAsync(() -> one.complete(id));
             CompletableFuture<String> otherScan;
             CompletableFuture<String> ownScan;
             try {
-                assertTrue(inside.await(30, TimeUnit.SECONDS));
+                awaitPending(schema, id);
                 // The other instance's stale entry misses its guard, finds the basket frozen, and waits (T085).
                 otherScan = CompletableFuture.supplyAsync(() -> scanOutcome(two, id, "SKU-000002"));
                 ownScan = CompletableFuture.supplyAsync(() -> scanOutcome(one, id, "SKU-000003"));
@@ -238,11 +233,11 @@ class MultiInstanceTransactionTest {
                 assertFalse(otherScan.isDone() || ownScan.isDone(), "both Scans wait for the settlement");
                 assertEquals(2, schema.scans(id).size(), "no unit joined the frozen basket");
             } finally {
-                release.countDown();
+                inventory.bus.delayDelivery(Duration.ZERO);
             }
             assertEquals(2, completing.get(30, TimeUnit.SECONDS).itemCount());
-            assertEquals("NOT_OPEN", ownScan.get(10, TimeUnit.SECONDS), "woken by the signal, then 409");
-            assertEquals("NOT_OPEN", otherScan.get(10, TimeUnit.SECONDS), "woken by its database backstop, then 409");
+            assertEquals("NOT_OPEN", ownScan.get(10, TimeUnit.SECONDS), "woken by the signal or its backstop, then 409");
+            assertEquals("NOT_OPEN", otherScan.get(10, TimeUnit.SECONDS), "woken by the signal or its backstop, then 409");
             assertEquals(0, one.registry.waiting() + two.registry.waiting(), "no local future is left behind");
             assertEquals(2, schema.scans(id).size());
             assertEquals(98, stock.stock("SKU-000001"));
@@ -257,8 +252,11 @@ class MultiInstanceTransactionTest {
              InProcessInventory inventory = InProcessInventory.over(stock)) {
             stock.seed(20, 100);
             stock.setStock("SKU-000001", 1);
-            InProcessTransaction one = InProcessTransaction.over(schema).inventory(inventory.gateway()).build();
-            InProcessTransaction two = InProcessTransaction.over(schema).inventory(inventory.gateway()).build();
+            InProcessTransaction one = InProcessTransaction.over(schema).bus(inventory.bus, inventory.names).build();
+            // The second instance joins the outcome group only after the rejection: its handler would otherwise
+            // refresh its own cache when it consumes the rejection, and the stale entry is what this test needs.
+            InProcessTransaction two = InProcessTransaction.over(schema).bus(inventory.bus, inventory.names)
+                    .messagingStopped().build();
             String id = one.start();
             one.scan(id, "SKU-000001");
             two.scan(id, "SKU-000001");
@@ -266,6 +264,7 @@ class MultiInstanceTransactionTest {
             assertEquals(1, stock.stock("SKU-000001"));
 
             stock.setStock("SKU-000001", 5);
+            two.startMessaging();
             long misses = PerfMetrics.counterValue(MISSES);
             TransactionOperations.ReceiptView receipt = two.complete(id);
             assertEquals(2, receipt.itemCount(), "no spurious 500");
@@ -280,8 +279,9 @@ class MultiInstanceTransactionTest {
 
     /**
      * Worker against live request (T147): the second instance's startup scan resumes an attempt that the
-     * first instance's live request still owns. Replay plus guarded writes settle it once, and the live
-     * request answers from the settled state, recording its own response.
+     * first instance's live request still owns and republishes its request. Inventory's idempotency and the
+     * guarded writes settle it once, through its outcome event, and the live request answers from the
+     * settled state, recording its own response.
      */
     @Test
     void aWorkerResumingALiveRequestsAttemptSettlesItOnceAndTheRequestRecordsItsOwnOutcome() throws Exception {
@@ -289,28 +289,21 @@ class MultiInstanceTransactionTest {
              InventoryTestSchema stock = InventoryTestSchema.create();
              InProcessInventory inventory = InProcessInventory.over(stock)) {
             stock.seed(20, 100);
-            CountDownLatch inside = new CountDownLatch(1);
-            CountDownLatch release = new CountDownLatch(1);
-            FakeInventoryGateway blocking = FakeInventoryGateway.applying().thenAnswer(call -> {
-                inside.countDown();
-                assertTrue(release.await(30, TimeUnit.SECONDS));
-                return inventory.gateway().applyCheckout(call.key(), call.lines(), call.deadline());
-            });
-            InProcessTransaction one = InProcessTransaction.over(schema).inventory(blocking).build();
-            InProcessTransaction two = InProcessTransaction.over(schema).inventory(inventory.gateway()).build();
+            InProcessTransaction one = InProcessTransaction.over(schema).bus(inventory.bus, inventory.names).build();
+            InProcessTransaction two = InProcessTransaction.over(schema).bus(inventory.bus, inventory.names).build();
             String id = one.start();
             one.scan(id, "SKU-000001");
 
+            inventory.bus.delayDelivery(Duration.ofSeconds(4));
             CompletableFuture<TransactionOperations.ReceiptView> completing = CompletableFuture.supplyAsync(() -> one.complete(id));
             try {
-                assertTrue(inside.await(30, TimeUnit.SECONDS));
+                awaitPending(schema, id);
                 assertEquals(1, two.recovery.startupScan(), "after a restart nothing is owned: the attempt is resumed");
-                assertTrue(two.recovery.runOnce(Duration.ofSeconds(5)));
-                TransactionTestSchema.AttemptRow settled = schema.attempts(id).get(0);
-                assertEquals("COMPLETED", settled.state(), "the second instance's worker settled it");
-                assertEquals("NONE", settled.clientOutcome(), "recovery never sets client_outcome");
+                inventory.bus.delayDelivery(Duration.ZERO);
+                assertTrue(two.recovery.runOnce(Duration.ofSeconds(5)), "the second instance republishes it");
+                assertEquals("PENDING", schema.attempts(id).get(0).state(), "the worker itself never settles it");
             } finally {
-                release.countDown();
+                inventory.bus.delayDelivery(Duration.ZERO);
             }
             assertEquals(1, completing.get(30, TimeUnit.SECONDS).itemCount(), "the live request answers 200");
             List<TransactionTestSchema.AttemptRow> attempts = schema.attempts(id);
@@ -330,13 +323,8 @@ class MultiInstanceTransactionTest {
              InProcessInventory inventory = InProcessInventory.over(stock)) {
             stock.seed(20, 100);
             String id = handedOver(schema);
-            CyclicBarrier together = new CyclicBarrier(2);
-            FakeInventoryGateway gateway = FakeInventoryGateway.applying().otherwise(call -> {
-                together.await(10, TimeUnit.SECONDS);
-                return inventory.gateway().applyCheckout(call.key(), call.lines(), call.deadline());
-            });
-            InProcessTransaction one = InProcessTransaction.over(schema).inventory(gateway).build();
-            InProcessTransaction two = InProcessTransaction.over(schema).inventory(gateway).build();
+            InProcessTransaction one = InProcessTransaction.over(schema).bus(inventory.bus, inventory.names).build();
+            InProcessTransaction two = InProcessTransaction.over(schema).bus(inventory.bus, inventory.names).build();
             assertEquals(1, one.recovery.startupScan());
             assertEquals(1, two.recovery.startupScan());
 
@@ -349,7 +337,8 @@ class MultiInstanceTransactionTest {
             } finally {
                 workers.shutdownNow();
             }
-            assertEquals(2, gateway.applyCalls(), "both workers replayed the attempt");
+            awaitSettled(schema, id);
+            awaitRequests(inventory, 2);
             List<TransactionTestSchema.AttemptRow> attempts = schema.attempts(id);
             assertEquals(1, attempts.size());
             assertEquals("COMPLETED", attempts.get(0).state(), "settled once");
@@ -372,12 +361,8 @@ class MultiInstanceTransactionTest {
              InProcessInventory inventory = InProcessInventory.over(stock)) {
             stock.seed(20, 100);
             String id = handedOver(schema);
-            AtomicBoolean up = new AtomicBoolean(false);
-            FakeInventoryGateway gateway = FakeInventoryGateway.applying().otherwise(call -> up.get()
-                    ? inventory.gateway().applyCheckout(call.key(), call.lines(), call.deadline())
-                    : new InventoryGateway.Uncertain("UNAVAILABLE"));
-            InProcessTransaction one = InProcessTransaction.over(schema).inventory(gateway).build();
-            InProcessTransaction two = InProcessTransaction.over(schema).inventory(inventory.gateway()).build();
+            InProcessTransaction one = InProcessTransaction.over(schema).bus(inventory.bus, inventory.names).build();
+            InProcessTransaction two = InProcessTransaction.over(schema).bus(inventory.bus, inventory.names).build();
 
             List<CompletableFuture<String>> waiters = List.of(
                     CompletableFuture.supplyAsync(() -> scanOutcome(one, id, "SKU-000002")),
@@ -389,7 +374,6 @@ class MultiInstanceTransactionTest {
             Thread.sleep(300);
             assertTrue(waiters.stream().noneMatch(CompletableFuture::isDone), "every request waits");
 
-            up.set(true);
             assertEquals(1, one.recovery.startupScan());
             assertTrue(one.recovery.runOnce(Duration.ofSeconds(5)));
             for (CompletableFuture<String> waiter : waiters) {
@@ -405,19 +389,46 @@ class MultiInstanceTransactionTest {
 
     /**
      * A transaction with one unit of SKU-000001 whose attempt 1 a third instance handed over to recovery
-     * at budget expiry, as if Inventory were down: PENDING, with {@code client_outcome = PENDING_ERROR}.
+     * at budget expiry, as if Inventory were down: PENDING, with {@code client_outcome = PENDING_ERROR}. The
+     * third instance's bus has no Inventory, so its request event reached nobody.
      */
     private static String handedOver(TransactionTestSchema schema) throws Exception {
         InProcessTransaction starter = InProcessTransaction.over(schema)
-                .inventory(FakeInventoryGateway.applying().otherwise(call -> new InventoryGateway.Uncertain("UNAVAILABLE")))
                 .settings(CheckoutOrchestrator.Settings.defaults().withResponseBudget(Duration.ofMillis(300))).build();
         String id = starter.start();
         starter.scan(id, "SKU-000001");
         assertThrows(CheckoutPendingFailure.class, () -> starter.complete(id));
+        starter.close();
         TransactionTestSchema.AttemptRow attempt = schema.attempts(id).get(0);
         assertEquals("PENDING", attempt.state());
         assertEquals("PENDING_ERROR", attempt.clientOutcome());
         return id;
+    }
+
+    private static void awaitPending(TransactionTestSchema schema, String id) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (schema.transaction(id).orElseThrow().activeAttemptNumber() == null) {
+            assertTrue(System.nanoTime() < deadline, "the checkout never became pending");
+            Thread.sleep(5);
+        }
+    }
+
+    private static void awaitSettled(TransactionTestSchema schema, String id) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (schema.attempts(id).get(0).state().equals("PENDING")) {
+            assertTrue(System.nanoTime() < deadline, "the republished attempt never settled");
+            Thread.sleep(20);
+        }
+    }
+
+    /** Waits until Inventory has received {@code count} checkout requests on the bus. */
+    private static void awaitRequests(InProcessInventory inventory, int count) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (inventory.bus.values(inventory.names.checkout()).size() < count) {
+            assertTrue(System.nanoTime() < deadline, "fewer than " + count + " requests were sent");
+            Thread.sleep(20);
+        }
+        assertEquals(count, inventory.bus.values(inventory.names.checkout()).size(), "both workers republished it");
     }
 
     private static String scanOutcome(InProcessTransaction instance, String id, String sku) {

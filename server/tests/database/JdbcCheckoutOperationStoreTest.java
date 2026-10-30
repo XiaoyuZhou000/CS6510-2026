@@ -6,7 +6,9 @@ import database.CheckoutOperationStore.Attempt;
 import database.CheckoutOperationStore.Line;
 import database.CheckoutOperationStore.RestoreOutcome;
 import database.CheckoutOperationStore.State;
+import events.TopicNames;
 import inventory.CheckoutStockService;
+import inventory.StockOutcomeEvents;
 import metrics.PerfMetrics;
 import org.junit.jupiter.api.Test;
 import support.InventoryTestSchema;
@@ -16,6 +18,7 @@ import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -30,8 +33,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Inventory's checkout operation store over a disposable schema (R8; contracts/grpc-internal-contracts.md
- * §ApplyCheckout, §RestoreCheckout). Migrates the inventory side of JdbcCheckoutCompletionStoreTest.
+ * Inventory's checkout operation store over a disposable schema (R8; 006 D8). Migrates the inventory side of
+ * JdbcCheckoutCompletionStoreTest. Every apply also records its outcome event in {@code outbox_event} in the
+ * same transaction, linked by {@code outcome_event_id}; a replay returns the recorded one and writes nothing.
  */
 class JdbcCheckoutOperationStoreTest {
     private static final String A = InventoryTestSchema.sku(1);
@@ -45,8 +49,17 @@ class JdbcCheckoutOperationStoreTest {
             Attempt attempt = attempt();
             List<Line> lines = List.of(new Line(A, 2), new Line(B, 1));
 
-            ApplyResult applied = store.apply(attempt, lines, canonical(lines));
-            assertEquals(new ApplyResult(ApplyOutcome.APPLIED, null, false), applied);
+            ApplyResult applied = store.apply(attempt, lines, canonical(lines), outcomes(attempt));
+            assertResult(ApplyOutcome.APPLIED, null, false, applied);
+            assertEquals("StockDeducted", outboxType(schema, applied.outcomeEventId()),
+                    "the outcome event committed with the deduction");
+            assertEquals(applied.outcomeEventId(), store.find(attempt).orElseThrow().outcomeEventId(),
+                    "linked from outcome_event_id");
+            assertEquals(1, schema.queryLong("SELECT COUNT(*) FROM outbox_event"));
+            assertEquals(EVENTS_TOPIC, schema.queryString("SELECT topic FROM outbox_event WHERE event_id = ?",
+                    applied.outcomeEventId()));
+            assertEquals(attempt.transactionId() + ":1", schema.queryString(
+                    "SELECT aggregate_key FROM outbox_event WHERE event_id = ?", applied.outcomeEventId()));
             assertEquals(3, schema.stock(A), "two units of A deducted once");
             assertEquals(4, schema.stock(B));
             assertEquals(5, schema.stock(C), "unreferenced stock is untouched");
@@ -56,8 +69,10 @@ class JdbcCheckoutOperationStoreTest {
             assertEquals("APPLIED", schema.queryString("SELECT state FROM checkout_operation WHERE transaction_id = ?",
                     attempt.transactionId()));
 
-            ApplyResult replay = store.apply(attempt, lines, canonical(lines));
-            assertEquals(new ApplyResult(ApplyOutcome.APPLIED, null, true), replay, "the recorded outcome, replayed");
+            ApplyResult replay = store.apply(attempt, lines, canonical(lines), outcomes(attempt));
+            assertResult(ApplyOutcome.APPLIED, null, true, replay, "the recorded outcome, replayed");
+            assertEquals(applied.outcomeEventId(), replay.outcomeEventId(), "the duplicate returns the recorded event");
+            assertEquals(1, schema.queryLong("SELECT COUNT(*) FROM outbox_event"), "a replay writes no row");
             assertEquals(3, schema.stock(A), "a replay deducts nothing");
             assertEquals(4, schema.stock(B));
             assertEquals(1, schema.operationCount("APPLIED"));
@@ -72,9 +87,11 @@ class JdbcCheckoutOperationStoreTest {
             Attempt attempt = attempt();
             List<Line> lines = List.of(new Line(A, 2), new Line(B, 1), new Line(C, 2));
 
-            ApplyResult rejected = store.apply(attempt, lines, canonical(lines));
-            assertEquals(new ApplyResult(ApplyOutcome.INSUFFICIENT_STOCK, A, false), rejected,
+            ApplyResult rejected = store.apply(attempt, lines, canonical(lines), outcomes(attempt));
+            assertResult(ApplyOutcome.INSUFFICIENT_STOCK, A, false, rejected,
                     "the first short SKU in SKU order");
+            assertEquals("StockRejected", outboxType(schema, rejected.outcomeEventId()),
+                    "a rejection records its outcome event too, without a stock update");
             assertEquals(1, schema.stock(A));
             assertEquals(1, schema.stock(B), "the line that had stock rolled back with the rest");
             assertEquals(1, schema.stock(C));
@@ -82,17 +99,15 @@ class JdbcCheckoutOperationStoreTest {
             assertEquals(State.REJECTED, recorded.state());
             assertEquals("INSUFFICIENT_STOCK", recorded.rejectionReason());
             assertEquals(A, recorded.rejectedSku());
-            assertEquals(new ApplyResult(ApplyOutcome.INSUFFICIENT_STOCK, A, true), store.apply(attempt, lines,
-                    canonical(lines)), "a rejection replays even after stock arrives");
+            assertResult(ApplyOutcome.INSUFFICIENT_STOCK, A, true, store.apply(attempt, lines, canonical(lines), outcomes(attempt)), "a rejection replays even after stock arrives");
             schema.setStock(A, 10);
-            assertEquals(new ApplyResult(ApplyOutcome.INSUFFICIENT_STOCK, A, true), store.apply(attempt, lines,
-                    canonical(lines)));
+            assertResult(ApplyOutcome.INSUFFICIENT_STOCK, A, true, store.apply(attempt, lines, canonical(lines), outcomes(attempt)));
             assertEquals(10, schema.stock(A));
 
             Attempt unknown = attempt();
             List<Line> withUnknown = List.of(new Line(A, 50), new Line("NO-SUCH-SKU", 1), new Line("ZZ-UNKNOWN", 1));
-            assertEquals(new ApplyResult(ApplyOutcome.INVALID_REQUEST, "NO-SUCH-SKU", false),
-                    store.apply(unknown, withUnknown, canonical(withUnknown)),
+            assertResult(ApplyOutcome.INVALID_REQUEST, "NO-SUCH-SKU", false,
+                    store.apply(unknown, withUnknown, canonical(withUnknown), outcomes(unknown)),
                     "an unknown SKU takes precedence over a shortfall, and the first one is named");
             assertEquals(10, schema.stock(A));
             assertEquals("INVALID_REQUEST", store.find(unknown).orElseThrow().rejectionReason());
@@ -113,7 +128,7 @@ class JdbcCheckoutOperationStoreTest {
                     Attempt attempt = attempt();
                     racers.add(() -> {
                         go.await();
-                        return store.apply(attempt, lines, canonical(lines));
+                        return store.apply(attempt, lines, canonical(lines), outcomes(attempt));
                     });
                 }
                 List<Future<ApplyResult>> results = new ArrayList<>();
@@ -153,16 +168,16 @@ class JdbcCheckoutOperationStoreTest {
             long retries = PerfMetrics.counterValue("inventory.apply.retries");
 
             failing.next(1, 1213);
-            assertEquals(ApplyOutcome.APPLIED, store.apply(attempt(), lines, canonical(lines)).outcome());
+            assertEquals(ApplyOutcome.APPLIED, apply(store, attempt(), lines).outcome());
             failing.next(2, 1205);
-            assertEquals(ApplyOutcome.APPLIED, store.apply(attempt(), lines, canonical(lines)).outcome(),
+            assertEquals(ApplyOutcome.APPLIED, apply(store, attempt(), lines).outcome(),
                     "a lock-wait timeout retries like a deadlock");
             assertEquals(3, schema.stock(A), "each retried attempt deducted exactly once");
             assertEquals(retries + 3, PerfMetrics.counterValue("inventory.apply.retries"));
 
             failing.next(Integer.MAX_VALUE, 1213);
             Attempt exhausted = attempt();
-            StoreFailure contention = assertThrows(StoreFailure.class, () -> store.apply(exhausted, lines, canonical(lines)));
+            StoreFailure contention = assertThrows(StoreFailure.class, () -> store.apply(exhausted, lines, canonical(lines), outcomes(exhausted)));
             assertTrue(contention.contended(), "exhausted retries are contention, never a business outcome");
             assertFalse(contention.commitOutcomeUnknown());
             failing.next(0, 0);
@@ -178,9 +193,9 @@ class JdbcCheckoutOperationStoreTest {
             List<Line> lines = List.of(new Line(A, 2), new Line(B, 1));
 
             Attempt applied = attempt();
-            store.apply(applied, lines, canonical(lines));
+            store.apply(applied, lines, canonical(lines), outcomes(applied));
             assertEquals(3, schema.stock(A));
-            var restored = store.restore(applied);
+            var restored = store.restore(applied, restoration(applied));
             assertEquals(RestoreOutcome.RESTORED, restored.outcome());
             assertEquals(canonical(lines), restored.lines());
             assertEquals(5, schema.stock(A), "APPLIED → RESTORED adds the recorded lines back");
@@ -189,25 +204,39 @@ class JdbcCheckoutOperationStoreTest {
             assertNotNull(schema.queryString("SELECT restored_at FROM checkout_operation WHERE transaction_id = ?",
                     applied.transactionId()));
 
-            var again = store.restore(applied);
+            String firstRequest = UUID.randomUUID().toString();
+            Attempt redelivered = attempt();
+            store.apply(redelivered, lines, canonical(lines), outcomes(redelivered));
+            var first = store.restore(redelivered, restoration(redelivered, firstRequest));
+            var replayed = store.restore(redelivered, restoration(redelivered, firstRequest));
+            assertTrue(replayed.replayed(), "a redelivered restoration request finds its recorded event");
+            assertEquals(first.eventId(), replayed.eventId());
+            assertEquals(RestoreOutcome.RESTORED, replayed.outcome());
+            assertEquals("StockRestored", outboxType(schema, first.eventId()));
+            assertEquals(first.eventId(), store.find(redelivered).orElseThrow().restorationEventId());
+            assertEquals(5, schema.stock(A), "restored once");
+
+            var again = store.restore(applied, restoration(applied));
             assertEquals(RestoreOutcome.ALREADY_RESTORED, again.outcome());
             assertEquals(canonical(lines), again.lines());
             assertEquals(5, schema.stock(A), "a repeated restore changes nothing");
 
             Attempt rejected = attempt();
             List<Line> tooMany = List.of(new Line(A, 50));
-            store.apply(rejected, tooMany, canonical(tooMany));
-            assertEquals(RestoreOutcome.NOTHING_TO_RESTORE, store.restore(rejected).outcome(), "REJECTED applied nothing");
+            store.apply(rejected, tooMany, canonical(tooMany), outcomes(rejected));
+            assertEquals(RestoreOutcome.NOTHING_TO_RESTORE, store.restore(rejected, restoration(rejected)).outcome(), "REJECTED applied nothing");
             assertEquals(State.REJECTED, store.find(rejected).orElseThrow().state());
 
             Attempt absent = attempt();
-            var blocked = store.restore(absent);
+            var blocked = store.restore(absent, restoration(absent));
             assertEquals(RestoreOutcome.NOTHING_TO_RESTORE, blocked.outcome());
             assertNull(blocked.lines());
             var tombstone = store.find(absent).orElseThrow();
             assertEquals(State.BLOCKED, tombstone.state(), "absent → a BLOCKED tombstone");
+            assertEquals(blocked.eventId(), tombstone.outcomeEventId(), "the tombstone's outcome event");
+            assertEquals("RestorationNotNeeded", outboxType(schema, blocked.eventId()));
             assertNull(tombstone.lines());
-            assertEquals(RestoreOutcome.NOTHING_TO_RESTORE, store.restore(absent).outcome(), "BLOCKED → nothing");
+            assertEquals(RestoreOutcome.NOTHING_TO_RESTORE, store.restore(absent, restoration(absent)).outcome(), "BLOCKED → nothing");
             assertEquals(5, schema.stock(A));
         }
     }
@@ -219,16 +248,14 @@ class JdbcCheckoutOperationStoreTest {
             List<Line> lines = List.of(new Line(A, 1));
 
             Attempt restored = attempt();
-            store.apply(restored, lines, canonical(lines));
-            store.restore(restored);
-            assertEquals(new ApplyResult(ApplyOutcome.STOCK_RESTORED, null, true), store.apply(restored, lines,
-                    canonical(lines)));
+            store.apply(restored, lines, canonical(lines), outcomes(restored));
+            store.restore(restored, restoration(restored));
+            assertResult(ApplyOutcome.STOCK_RESTORED, null, true, store.apply(restored, lines, canonical(lines), outcomes(restored)));
             assertEquals(5, schema.stock(A), "a restored attempt is never applied again");
 
             Attempt blocked = attempt();
-            store.restore(blocked);
-            assertEquals(new ApplyResult(ApplyOutcome.STOCK_RESTORED, null, true), store.apply(blocked, lines,
-                    canonical(lines)), "a tombstone refuses a late first apply");
+            store.restore(blocked, restoration(blocked));
+            assertResult(ApplyOutcome.STOCK_RESTORED, null, true, store.apply(blocked, lines, canonical(lines), outcomes(blocked)), "a tombstone refuses a late first apply");
             assertEquals(5, schema.stock(A));
             assertEquals(State.BLOCKED, store.find(blocked).orElseThrow().state());
         }
@@ -240,26 +267,65 @@ class JdbcCheckoutOperationStoreTest {
             JdbcCheckoutOperationStore store = new JdbcCheckoutOperationStore(schema.pool());
             Attempt attempt = attempt();
             List<Line> lines = List.of(new Line(A, 1));
-            store.apply(attempt, lines, canonical(lines));
+            store.apply(attempt, lines, canonical(lines), outcomes(attempt));
 
             List<Line> other = List.of(new Line(A, 2));
-            assertEquals(new ApplyResult(ApplyOutcome.PAYLOAD_MISMATCH, null, true),
-                    store.apply(attempt, other, canonical(other)));
+            assertResult(ApplyOutcome.PAYLOAD_MISMATCH, null, true,
+                    store.apply(attempt, other, canonical(other), outcomes(attempt)));
             assertEquals(4, schema.stock(A), "a mismatch changes nothing");
 
             Attempt second = new Attempt(attempt.transactionId(), 2);
-            assertThrows(CheckoutOperationStore.IntegrityFailure.class, () -> store.apply(second, lines, canonical(lines)),
+            assertThrows(CheckoutOperationStore.IntegrityFailure.class, () -> store.apply(second, lines, canonical(lines), outcomes(second)),
                     "the unique applied index allows one effective deduction per transaction (FR-029)");
             assertEquals(4, schema.stock(A));
             assertTrue(store.find(second).isEmpty(), "the refused operation rolled back entirely");
+            assertEquals(1, schema.queryLong("SELECT COUNT(*) FROM outbox_event"),
+                    "neither the mismatch nor the refused deduction left an outcome row");
             assertEquals(1, schema.operationCount("APPLIED"));
 
             Attempt rejectedSecond = new Attempt(attempt.transactionId(), 3);
             List<Line> tooMany = List.of(new Line(A, 99));
             assertEquals(ApplyOutcome.INSUFFICIENT_STOCK,
-                    store.apply(rejectedSecond, tooMany, canonical(tooMany)).outcome(),
+                    store.apply(rejectedSecond, tooMany, canonical(tooMany), outcomes(rejectedSecond)).outcome(),
                     "a rejection records no deduction, so it never meets the applied index");
         }
+    }
+
+    private static final String EVENTS_TOPIC = TopicNames.unprefixed().checkoutOutcome();
+    private static final StockOutcomeEvents EVENTS = new StockOutcomeEvents(TopicNames.unprefixed(), Clock.systemUTC());
+
+    private static CheckoutOperationStore.OutcomeEvents outcomes(Attempt attempt) {
+        return (outcome, rejectedSku) -> EVENTS.outcome(attempt, outcome, rejectedSku);
+    }
+
+    /** A restoration requested by a new request event each call; pass the same ID to model a redelivery. */
+    private static CheckoutOperationStore.RestorationEvents restoration(Attempt attempt) {
+        return restoration(attempt, UUID.randomUUID().toString());
+    }
+
+    private static CheckoutOperationStore.RestorationEvents restoration(Attempt attempt, String requestEventId) {
+        return outcome -> EVENTS.restoration(attempt, requestEventId, outcome);
+    }
+
+    private static ApplyResult apply(JdbcCheckoutOperationStore store, Attempt attempt, List<Line> lines) {
+        return store.apply(attempt, lines, canonical(lines), outcomes(attempt));
+    }
+
+    private static void assertResult(ApplyOutcome outcome, String sku, boolean replayed, ApplyResult actual) {
+        assertResult(outcome, sku, replayed, actual, null);
+    }
+
+    private static void assertResult(ApplyOutcome outcome, String sku, boolean replayed, ApplyResult actual,
+                                     String message) {
+        assertEquals(outcome, actual.outcome(), message);
+        assertEquals(sku, actual.rejectedSku(), message);
+        assertEquals(replayed, actual.replayed(), message);
+        assertNotNull(actual.outcomeEventId(), "every result names its outcome event");
+    }
+
+    /** The outbox row an outcome event ID names, as {@code event_type}; null when none was committed. */
+    private static String outboxType(InventoryTestSchema schema, String eventId) throws SQLException {
+        return schema.queryString("SELECT event_type FROM outbox_event WHERE event_id = ?", eventId);
     }
 
     private static String canonical(List<Line> lines) {

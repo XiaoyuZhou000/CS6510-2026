@@ -166,18 +166,5 @@ class ScanStatementBudgetTest {
             calls.incrementAndGet();
             throw new AssertionError("Inventory was called");
         }
-
-        @Override
-        public ApplyResult applyCheckout(database.CheckoutAttemptStore.AttemptKey key, java.util.List<CheckoutLine> lines,
-                                         java.time.Duration deadline) {
-            calls.incrementAndGet();
-            throw new AssertionError("Inventory was called");
-        }
-
-        @Override
-        public RecordedOutcome checkoutOutcome(database.CheckoutAttemptStore.AttemptKey key) {
-            calls.incrementAndGet();
-            throw new AssertionError("Inventory was called");
-        }
     }
 }

@@ -213,17 +213,6 @@ class ProductCatalogReplicaTest {
             if (down) throw new DependencyUnavailableFailure("Inventory unavailable");
             return new Catalog(version, products);
         }
-
-        @Override
-        public ApplyResult applyCheckout(database.CheckoutAttemptStore.AttemptKey key, java.util.List<CheckoutLine> lines,
-                                         java.time.Duration deadline) {
-            throw new AssertionError("The replica never checks out");
-        }
-
-        @Override
-        public RecordedOutcome checkoutOutcome(database.CheckoutAttemptStore.AttemptKey key) {
-            throw new AssertionError("The replica never checks out");
-        }
     }
 
     private static final class FakeStore implements ProductReplicaStore {

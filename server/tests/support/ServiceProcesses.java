@@ -108,6 +108,17 @@ public final class ServiceProcesses {
             return env("PERF_METRICS", Boolean.toString(enabled));
         }
 
+        /**
+         * The live test broker ({@code KAFKA_TEST_BOOTSTRAP}) with {@code names}' topic prefix, whose topics the
+         * caller created. Without it a service gets a fresh prefix whose topics do not exist, so it can never
+         * consume or produce the records of a deployment or of another test.
+         */
+        public Builder kafka(events.TopicNames names) {
+            environment.put("KAFKA_BOOTSTRAP", KafkaTestSupport.bootstrap());
+            environment.put(events.TopicNames.PREFIX_VARIABLE, names.prefix());
+            return this;
+        }
+
         /** Arms fault hooks in the child JVM through {@code -Dselfcheckout.faults} (see {@link FaultInjection}). */
         public Builder faults(String specification) {
             if (specification != null && !specification.isBlank()) {
@@ -124,6 +135,8 @@ public final class ServiceProcesses {
                     if (!environment.containsKey(peer)) environment.put(peer, "127.0.0.1:" + GrpcTestSupport.freePort());
                 }
             }
+            environment.putIfAbsent("KAFKA_BOOTSTRAP", KafkaTestSupport.bootstrap());
+            environment.putIfAbsent(events.TopicNames.PREFIX_VARIABLE, KafkaTestSupport.runTopics().prefix());
             Path server = serverRoot();
             String classpath = String.join(File.pathSeparator,
                     server.resolve("out/" + service + ".jar").toString(),

@@ -84,8 +84,11 @@ INSERT INTO product_replica_meta (meta_key, catalog_version, product_count, refr
 VALUES (1, NULL, 0, NULL);
 
 -- One row per checkout attempt, identified by (transaction_id, attempt_number).
--- `lines` is the immutable canonical snapshot sent on every ApplyCheckout replay:
--- a JSON array of {sku, quantity} sorted by SKU, with no whitespace.
+-- `lines` is the immutable canonical snapshot of the basket the attempt froze: a JSON array of
+-- {sku, quantity} sorted by SKU, with no whitespace. request_event_id names the CheckoutRequested
+-- outbox row written in the same T1 commit; recovery re-sends that row (006 D7). next_retry_at is
+-- the republish schedule, and last_error records REPUBLISHED, PUBLISH_FAILED, STUCK, or
+-- INTEGRITY:<reason>.
 CREATE TABLE checkout_attempt (
     transaction_id           VARCHAR(40)    NOT NULL,
     attempt_number           INT            NOT NULL,
@@ -101,6 +104,7 @@ CREATE TABLE checkout_attempt (
     retry_count              INT            NOT NULL DEFAULT 0,
     next_retry_at            TIMESTAMP(3)   NULL,
     last_error               VARCHAR(255)   NULL,
+    request_event_id         CHAR(36)       NOT NULL,
     -- Defense in depth (FR-029): at most one PENDING and one COMPLETED attempt per transaction.
     pending_transaction_id   VARCHAR(40)
         GENERATED ALWAYS AS (IF(state = 'PENDING', transaction_id, NULL)) STORED,

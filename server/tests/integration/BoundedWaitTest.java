@@ -3,15 +3,16 @@ package integration;
 import database.CheckoutAttemptStore;
 import metrics.PerfMetrics;
 import org.junit.jupiter.api.Test;
-import support.FakeInventoryGateway;
+import events.TopicNames;
+import support.FakeInventoryReactor;
 import support.FaultInjection;
+import support.InMemoryEventBus;
 import support.InProcessInventory;
 import support.InProcessTransaction;
 import support.InventoryTestSchema;
 import support.TestSchema;
 import support.TransactionTestSchema;
 import transaction.CheckoutPendingFailure;
-import transaction.InventoryGateway;
 import transaction.TransactionFailure;
 import transaction.TransactionOperations;
 
@@ -26,10 +27,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Bounded waiting for requests that arrive during a pending checkout (FR-035, R7; US3 scenario 6). The
- * attempt stays pending because Inventory's reply is delayed by its {@code inventory.apply.afterCommit}
- * hook, armed in this JVM over the real Inventory checkout path, or because a scripted Inventory blocks.
- * Two service instances over one schema stand for two Transaction processes (Implementation Rule 3).
+ * Bounded waiting for requests that arrive during a pending checkout (FR-042, R7; US3 scenario 6). The
+ * attempt stays pending because Inventory's outcome event is delayed by its {@code inventory.apply.afterCommit}
+ * hook, armed in this JVM over the real Inventory checkout path on an in-memory bus, or because a scripted
+ * Inventory blocks. Two service instances over one schema and one outcome consumer group stand for two
+ * Transaction processes (Implementation Rule 1, D11).
  */
 class BoundedWaitTest {
     private static final String A = InventoryTestSchema.sku(1);
@@ -110,12 +112,18 @@ class BoundedWaitTest {
         try (Fixture fixture = new Fixture()) {
             CountDownLatch inside = new CountDownLatch(1);
             CountDownLatch release = new CountDownLatch(1);
-            FakeInventoryGateway blocking = FakeInventoryGateway.applying().thenAnswer(call -> {
+            TopicNames names = TopicNames.unprefixed();
+            InMemoryEventBus scripted = InMemoryEventBus.withCatalogTopics(names, 3);
+            FakeInventoryReactor blocking = FakeInventoryReactor.deducting(scripted, names).thenAnswer(call -> {
                 inside.countDown();
-                assertTrue(release.await(60, TimeUnit.SECONDS));
-                return fixture.inventory.gateway().applyCheckout(call.key(), call.lines(), call.deadline());
-            });
-            InProcessTransaction service = fixture.instance(blocking);
+                try {
+                    assertTrue(release.await(60, TimeUnit.SECONDS));
+                } catch (InterruptedException interrupted) {
+                    throw new AssertionError(interrupted);
+                }
+                return FakeInventoryReactor.Reply.deduct();
+            }).start();
+            InProcessTransaction service = fixture.instance(scripted, names);
             String id = service.start();
             service.scan(id, A);
 
@@ -132,14 +140,24 @@ class BoundedWaitTest {
                 assertTrue(scanned.elapsedNanos() >= TimeUnit.SECONDS.toNanos(8), "it waited out the 8 s budget");
                 assertEquals(checks + 2, PerfMetrics.counterValue(DB_CHECKS), "exactly one database check each, at the bound");
                 assertEquals(1, fixture.transactionSchema.scans(id).size(), "no basket change");
+                assertEquals("PENDING", owner.get(20, TimeUnit.SECONDS).outcome(),
+                        "the owner's own 8 s budget, which began first, ended first: it handed the attempt over");
                 TransactionTestSchema.AttemptRow attempt = fixture.transactionSchema.attempts(id).get(0);
                 assertEquals("PENDING", attempt.state(), "the pending attempt is untouched");
-                assertEquals("NONE", attempt.clientOutcome(), "the waiters recorded nothing on it");
+                assertEquals("PENDING_ERROR", attempt.clientOutcome(),
+                        "only the owner's handover recorded an outcome; the waiters recorded nothing on it");
                 assertEquals(1, fixture.transactionSchema.attempts(id).size());
             } finally {
                 release.countDown();
             }
-            assertEquals("OK 1", owner.get(20, TimeUnit.SECONDS).outcome());
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            while (!fixture.transactionSchema.attempts(id).get(0).state().equals("COMPLETED")) {
+                assertTrue(System.nanoTime() < deadline, "the delayed outcome never settled the attempt");
+                Thread.sleep(20);
+            }
+            assertEquals("PENDING_ERROR", fixture.transactionSchema.attempts(id).get(0).clientOutcome(),
+                    "a background completion");
+            blocking.close();
         }
     }
 
@@ -173,7 +191,7 @@ class BoundedWaitTest {
         }
     }
 
-    /** Inventory's first reply to each attempt arrives after the 2 s deadline; the retry replays it at once. */
+    /** Inventory holds each attempt's outcome event back for up to 3 s after its apply commit. */
     private static FaultInjection.Armed delayedReplies() {
         return FaultInjection.spec().delay("inventory.apply.afterCommit", 3000).armInThisJvm();
     }
@@ -253,12 +271,13 @@ class BoundedWaitTest {
             inventory = InProcessInventory.over(inventorySchema);
         }
 
+        /** A Transaction instance on the real Inventory's bus; every instance joins one outcome group. */
         InProcessTransaction instance() throws Exception {
-            return instance(inventory.gateway());
+            return instance(inventory.bus, inventory.names);
         }
 
-        InProcessTransaction instance(InventoryGateway gateway) throws Exception {
-            return InProcessTransaction.over(transactionSchema).pool(4, 16).inventory(gateway)
+        InProcessTransaction instance(InMemoryEventBus bus, TopicNames names) throws Exception {
+            return InProcessTransaction.over(transactionSchema).pool(4, 16).bus(bus, names)
                     .wrapAttempts(store -> new Recording(store, settled)).build();
         }
 
@@ -326,6 +345,11 @@ class BoundedWaitTest {
         @Override
         public void scheduleRetry(AttemptKey key, Instant nextRetryAt, String lastError) {
             store.scheduleRetry(key, nextRetryAt, lastError);
+        }
+
+        @Override
+        public boolean recordError(AttemptKey key, String lastError) {
+            return store.recordError(key, lastError);
         }
     }
 }

@@ -1,5 +1,7 @@
 package database;
 
+import events.OutboxRow;
+
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -7,7 +9,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * The Transaction side of the checkout Saga (R5, R9; contracts/checkout-saga.md "Steps"). Every write to
+ * The Transaction side of the checkout Saga (R5, R9; 006 contracts/checkout-saga.md "Steps"). Every write to
  * the {@code transaction} row is a guarded conditional UPDATE: when its {@code WHERE} clause matches no
  * row, the unit rolls back and returns {@link WriteResult#GUARD_MISS}, and the caller re-evaluates from
  * the database. A failing commit raises {@link StoreFailure} with {@code commitOutcomeUnknown} and is
@@ -18,15 +20,16 @@ public interface CheckoutAttemptStore {
 
     /**
      * T1: moves the transaction from {@code attempt_count = n - 1} with no active attempt and the expected
-     * {@code item_count} to an active attempt {@code n}, and inserts attempt {@code n} as PENDING, in one
-     * commit. A stale expectation writes nothing.
+     * {@code item_count} to an active attempt {@code n}, inserts attempt {@code n} as PENDING with its
+     * {@code request_event_id}, and inserts its {@code CheckoutRequested} outbox row, in one commit
+     * (FR-010). A stale expectation writes nothing.
      */
     WriteResult begin(Begin begin) throws StoreFailure;
 
     /**
      * T3: completes the transaction whose active attempt is {@code key}, and settles the attempt as
      * COMPLETED, in one commit. {@code answering} records {@code client_outcome = SUCCESS} for the request
-     * that is about to answer 200, unless another outcome is recorded already.
+     * whose response the outcome handler claimed (D7), unless another outcome is recorded already.
      */
     WriteResult complete(AttemptKey key, Instant completedAt, boolean answering) throws StoreFailure;
 
@@ -52,8 +55,18 @@ public interface CheckoutAttemptStore {
 
     Optional<AttemptRecord> findAttempt(AttemptKey key) throws StoreFailure;
 
-    /** Recovery bookkeeping for an uncertain outcome: one more retry, due at {@code nextRetryAt}. */
+    /**
+     * Republish bookkeeping: one more retry, due at {@code nextRetryAt}, with {@code lastError}
+     * ({@code REPUBLISHED}, {@code PUBLISH_FAILED}, or {@code STUCK}). A recorded {@code INTEGRITY:} error
+     * is kept, so the alarm stays visible while the attempt is republished.
+     */
     void scheduleRetry(AttemptKey key, Instant nextRetryAt, String lastError) throws StoreFailure;
+
+    /**
+     * Records {@code lastError} on the attempt whatever its state, in its own commit, for example
+     * {@code INTEGRITY:deduction-after-reject} (FR-038); false when the attempt does not exist.
+     */
+    boolean recordError(AttemptKey key, String lastError) throws StoreFailure;
 
     /** The attempt identifier shared with Inventory (FR-028). */
     record AttemptKey(String transactionId, int attemptNumber) {
@@ -70,10 +83,12 @@ public interface CheckoutAttemptStore {
 
     /**
      * Attempt {@code key} over a basket of {@code itemCount} units, the cached expectation; the cached
-     * {@code attempt_count} is {@code key.attemptNumber() - 1}. {@code lines} is the canonical snapshot.
+     * {@code attempt_count} is {@code key.attemptNumber() - 1}. {@code lines} is the canonical snapshot, and
+     * {@code request} the attempt's {@code CheckoutRequested} outbox row, whose {@code event_id} becomes
+     * {@code request_event_id}.
      */
     record Begin(AttemptKey key, int itemCount, BigDecimal totalAmount, String lines, Instant createdAt,
-                 Instant nextRetryAt) {
+                 Instant nextRetryAt, OutboxRow request) {
         public Begin {
             Objects.requireNonNull(key, "key");
             if (itemCount < 1) throw new IllegalArgumentException("an attempt needs at least one unit");
@@ -81,6 +96,7 @@ public interface CheckoutAttemptStore {
             Objects.requireNonNull(lines, "lines");
             Objects.requireNonNull(createdAt, "createdAt");
             Objects.requireNonNull(nextRetryAt, "nextRetryAt");
+            Objects.requireNonNull(request, "request");
         }
     }
 
@@ -94,7 +110,8 @@ public interface CheckoutAttemptStore {
 
     record AttemptRecord(AttemptKey key, State state, RejectionReason rejectionReason, String rejectedSku, String lines,
                          int itemCount, BigDecimal totalAmount, ClientOutcome clientOutcome, Instant createdAt,
-                         Instant settledAt, int retryCount, Instant nextRetryAt, String lastError) {
+                         Instant settledAt, int retryCount, Instant nextRetryAt, String lastError,
+                         String requestEventId) {
         public AttemptRecord {
             Objects.requireNonNull(key, "key");
             Objects.requireNonNull(state, "state");

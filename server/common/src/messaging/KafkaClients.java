@@ -9,8 +9,12 @@ import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 
+import events.RecordStream;
+
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 /**
  * Builds the Kafka producers and consumers with the configuration of research D1 and the event catalog
@@ -24,7 +28,9 @@ import java.util.Properties;
  *       because Kafka requires {@code delivery.timeout.ms} to be at least {@code linger.ms} plus it.</li>
  *   <li><b>Consumers</b>: {@code enable.auto.commit=false}, {@code auto.offset.reset=earliest},
  *       {@code isolation.level=read_uncommitted}, {@code fetch.min.bytes=1}, {@code fetch.max.wait.ms=50},
- *       {@code max.poll.records=500}. A consumer without a group (the catalog reader) never commits.</li>
+ *       {@code max.poll.records=500}, and {@code session.timeout.ms=10000} with {@code heartbeat.interval.ms=3000},
+ *       so a crashed member's partitions are reassigned within about 10 s. A consumer without a group (the
+ *       catalog reader) never commits.</li>
  * </ul>
  */
 public final class KafkaClients {
@@ -33,6 +39,12 @@ public final class KafkaClients {
     public static final String SCAN_LINGER_VARIABLE = "SCAN_PRODUCER_LINGER_MS";
     public static final int IMMEDIATE_LINGER_MS = 0;
     public static final int DEFAULT_BATCH_LINGER_MS = 5;
+    /**
+     * A crashed member's partitions move to the survivors after this long instead of Kafka's 45 s, so a
+     * restarted service resumes its share of a group within seconds (US3, SC-005).
+     */
+    static final String SESSION_TIMEOUT_MS = "10000";
+    static final String HEARTBEAT_INTERVAL_MS = "3000";
 
     private KafkaClients() { }
 
@@ -82,6 +94,8 @@ public final class KafkaClients {
         properties.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, "1");
         properties.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, "50");
         properties.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "500");
+        properties.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, SESSION_TIMEOUT_MS);
+        properties.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, HEARTBEAT_INTERVAL_MS);
         properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         return properties;
@@ -89,5 +103,23 @@ public final class KafkaClients {
 
     public static KafkaConsumer<String, byte[]> consumer(Map<String, String> environment, String clientId, String group) {
         return new KafkaConsumer<>(consumerProperties(environment, clientId, group));
+    }
+
+    /**
+     * Opens a new {@link KafkaRecordStream} on every call, for a {@code ConsumerLoop} thread or its
+     * replacement after a stream failure; each gets the client ID {@code clientId-<n>}.
+     */
+    public static Supplier<RecordStream> streams(Map<String, String> environment, String clientId, String group) {
+        Map<String, String> copy = Map.copyOf(environment);
+        AtomicInteger next = new AtomicInteger();
+        return () -> {
+            String name = clientId + "-" + next.incrementAndGet();
+            return new KafkaRecordStream(consumer(copy, name, group), group, name);
+        };
+    }
+
+    /** A {@link RecordSender} over a new producer with the given {@code linger.ms}. */
+    public static KafkaRecordSender sender(Map<String, String> environment, String clientId, int lingerMs) {
+        return new KafkaRecordSender(producer(environment, clientId, lingerMs));
     }
 }

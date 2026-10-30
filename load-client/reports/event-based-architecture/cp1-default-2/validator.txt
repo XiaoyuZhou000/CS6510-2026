@@ -1,0 +1,38 @@
+﻿Validating transaction (cs6510_transaction as cs6510_transaction_svc)...
++------------------+--------------+------------------------+----------------+-------------------+--------------------+---------------+-------------------+-------------------+------------------------+------------------------------+-----------------------------+
+| invariant_status | transactions | completed_transactions | accepted_scans | unpublished_scans | unpublished_outbox | parked_events | checkout_attempts | completed_success | background_completions | completions_without_response | completed_reported_rejected |
++------------------+--------------+------------------------+----------------+-------------------+--------------------+---------------+-------------------+-------------------+------------------------+------------------------------+-----------------------------+
+| PASS             |         4312 |                   4312 |          45360 |                 0 |                  0 |             0 |              4312 |              4312 |                      0 |                            0 |                           0 |
++------------------+--------------+------------------------+----------------+-------------------+--------------------+---------------+-------------------+-------------------+------------------------+------------------------------+-----------------------------+
+Validating inventory (cs6510_inventory as cs6510_inventory_svc)...
++------------------+---------------+----------------+-------------+---------------+--------------------+---------------------+---------------------+--------------------+--------------------+---------------+
+| invariant_status | catalog_items | inventory_rows | total_units | minimum_stock | applied_operations | rejected_operations | restored_operations | blocked_operations | unpublished_outbox | parked_events |
++------------------+---------------+----------------+-------------+---------------+--------------------+---------------------+---------------------+--------------------+--------------------+---------------+
+| PASS             |          2000 |           2000 |    19954640 |          4441 |               4312 |                   0 |                   0 |                  0 |                  0 |             0 |
++------------------+---------------+----------------+-------------+---------------+--------------------+---------------------+---------------------+--------------------+--------------------+---------------+
+Validating analytics (cs6510_analytics as cs6510_analytics_svc)...
++------------------+---------------+---------------+---------------+-----------------+-------------------+---------------+------------------+
+| invariant_status | stored_events | last_position | product_names | popular_windows | latest_window_end | parked_events | consumer_offsets |
++------------------+---------------+---------------+---------------+-----------------+-------------------+---------------+------------------+
+| PASS             |         45360 |         45360 |          1963 |              89 |             45000 |             0 |                0 |
++------------------+---------------+---------------+---------------+-----------------+-------------------+---------------+------------------+
+Reconciling across services...
+Checking outboxes and parked events...
+  unpublished_outbox_transaction=0
+  unpublished_outbox_inventory=0
+  parked_events_transaction=0
+  parked_events_inventory=0
+  parked_events_analytics=0
+Checking consumer lag...
+  inventory-checkout: stable, lag 0, partitions without a committed offset 0
+  transaction-checkout-outcome: stable, lag 0, partitions without a committed offset 0
+  analytics-scan-ingest: absent; selfcheckout.scan-accepted.v1 holds 0 record(s)
+FR-061 counts:
+  completed_transactions=4312
+  background_completions=0
+  completions_without_response=0
+  parked_events=0
+  final_consumer_lag=0
+  client_total_transactions=4312
+  remaining_difference=0
+PASS (transaction, inventory, analytics)

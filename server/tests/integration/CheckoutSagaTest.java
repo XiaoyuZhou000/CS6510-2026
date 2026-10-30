@@ -1,30 +1,30 @@
 package integration;
 
-import api.json.Json;
-import contracts.inventory.v1.CheckoutAttemptKey;
-import contracts.inventory.v1.CheckoutOutcome;
-import contracts.inventory.v1.GetCheckoutOutcomeRequest;
-import contracts.inventory.v1.InventoryServiceGrpc;
+import api.ApiErrorMapper;
+import events.EnvelopeCodec;
+import events.EventTypes;
+import inventory.CheckoutStockService;
 import org.junit.jupiter.api.Test;
-import support.CheckoutDeployment;
+import support.InProcessCheckout;
 import support.InventoryTestSchema;
-import support.ServiceHttp;
 import support.TransactionTestSchema;
+import transaction.ProductCatalogReplica;
+import transaction.TransactionOperations;
+import transaction.TransactionOperations.ReceiptView;
 
 import java.math.BigDecimal;
-import java.net.http.HttpResponse;
-import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The checkout Saga end to end (US1 scenarios 1, 2, 5, and 6): a Transaction process and an Inventory
- * process, each over its own disposable schema and user, talking only through gRPC. Every compensation a
- * normal Saga path can trigger is covered: insufficient stock and an unknown SKU (Constitution IX).
+ * The choreographed checkout Saga end to end (US1 scenarios 1, 2, 5, and 6; 006 D7, D8): the real Transaction
+ * and Inventory business classes, each over its own disposable schema, exchanging only {@code CheckoutRequested}
+ * and its outcome event through an {@link support.InMemoryEventBus}. Every compensation a normal Saga path can
+ * trigger is covered: insufficient stock and an unknown SKU (Constitution IX). Public status codes are those
+ * the HTTP mapper gives the failures.
  */
 class CheckoutSagaTest {
     private static final String A = InventoryTestSchema.sku(1);
@@ -33,159 +33,173 @@ class CheckoutSagaTest {
 
     @Test
     void aBasketOfTwoAAndOneBCompletesWithCapturedPricesAndExactDeductions() throws Exception {
-        try (CheckoutDeployment deployment = CheckoutDeployment.start(10, 50)) {
-            ServiceHttp http = deployment.transactionHttp;
-            String id = http.start("saga-station");
-            assertEquals(200, http.scan(id, A).statusCode());
-            assertEquals(200, http.scan(id, A).statusCode());
-            assertEquals(200, http.scan(id, B).statusCode());
+        try (InProcessCheckout saga = InProcessCheckout.start(10, 50)) {
+            TransactionOperations service = saga.checkout();
+            String id = service.start(new TransactionOperations.StartCommand("saga-station")).transactionId();
+            scan(saga, id, A);
+            scan(saga, id, A);
+            scan(saga, id, B);
 
-            HttpResponse<String> completed = http.complete(id);
-            assertEquals(200, completed.statusCode(), completed.body() + deployment.logs());
-            Map<String, Object> receipt = ServiceHttp.json(completed);
-            assertEquals(id, receipt.get("transactionId"));
-            assertEquals("saga-station", receipt.get("stationId"));
-            assertEquals(3, ((Number) receipt.get("itemCount")).intValue());
+            ReceiptView receipt = service.complete(id);
+            assertEquals(id, receipt.transactionId());
+            assertEquals("saga-station", receipt.stationId());
+            assertEquals(3, receipt.itemCount());
             BigDecimal total = InventoryTestSchema.price(1).multiply(BigDecimal.TWO).add(InventoryTestSchema.price(2));
-            assertEquals(0, total.compareTo(new BigDecimal(receipt.get("totalAmount").toString())));
-            List<Object> lines = Json.getList(receipt, "lines");
-            assertEquals(2, lines.size());
-            Map<String, Object> first = Json.asObject(lines.get(0));
-            assertEquals(A, first.get("sku"));
-            assertEquals(2, ((Number) first.get("quantity")).intValue());
-            assertEquals(0, InventoryTestSchema.price(1).compareTo(new BigDecimal(first.get("unitPrice").toString())));
-            assertNotNull(receipt.get("completedAt"));
+            assertEquals(0, total.compareTo(receipt.totalAmount()));
+            assertEquals(2, receipt.lines().size());
+            assertEquals(A, receipt.lines().get(0).sku());
+            assertEquals(2, receipt.lines().get(0).quantity());
+            assertEquals(0, InventoryTestSchema.price(1).compareTo(receipt.lines().get(0).unitPrice()));
+            assertNotNull(receipt.completedAt());
 
-            assertEquals(48, deployment.inventorySchema.stock(A), "two units of A");
-            assertEquals(49, deployment.inventorySchema.stock(B), "one unit of B");
-            assertEquals(50, deployment.inventorySchema.stock(C));
-            assertEquals("COMPLETED", ServiceHttp.json(http.lookup(id)).get("status"));
-            assertEquals("COMPLETED", deployment.transactionSchema.attempts(id).get(0).state());
-            assertEquals(CheckoutOutcome.CHECKOUT_OUTCOME_APPLIED, outcome(deployment, id, 1));
+            assertEquals(48, saga.stock(A), "two units of A");
+            assertEquals(49, saga.stock(B), "one unit of B");
+            assertEquals(50, saga.stock(C));
+            assertEquals(TransactionOperations.TransactionStatus.COMPLETED, service.get(id).status());
+            assertEquals("COMPLETED", saga.transactionSchema.attempts(id).get(0).state());
+            assertEquals(CheckoutStockService.Outcome.APPLIED, saga.inventory.stock.outcome(id, 1).outcome());
+            assertEquals(List.of("CheckoutRequested"), types(saga.bus.values(saga.names.checkout())));
+            assertEquals(List.of("StockDeducted"), types(saga.bus.values(saga.names.checkoutOutcome())));
         }
     }
 
     /** Migrates ScanCompletionConvergenceTest#failedCompletionLeavesOpenBasketForScanningAndRetry. */
     @Test
     void insufficientStockLeavesTheOpenBasketForScanningAndRetry() throws Exception {
-        try (CheckoutDeployment deployment = CheckoutDeployment.start(10, 1)) {
-            ServiceHttp http = deployment.transactionHttp;
-            String id = http.start("retry-station");
-            assertEquals(200, http.scan(id, A).statusCode());
-            assertEquals(200, http.scan(id, A).statusCode());
+        try (InProcessCheckout saga = InProcessCheckout.start(10, 1)) {
+            TransactionOperations service = saga.checkout();
+            String id = service.start(new TransactionOperations.StartCommand("retry-station")).transactionId();
+            scan(saga, id, A);
+            scan(saga, id, A);
 
-            HttpResponse<String> insufficient = http.complete(id);
+            RuntimeException insufficient = failure(() -> service.complete(id));
             assertError(insufficient, 409, "INSUFFICIENT_STOCK");
-            assertEquals("Insufficient stock for SKU: " + A, ServiceHttp.json(insufficient).get("message"));
-            assertEquals(1, deployment.inventorySchema.stock(A), "nothing was deducted");
-            assertEquals("OPEN", ServiceHttp.json(http.lookup(id)).get("status"));
-            TransactionTestSchema.AttemptRow rejected = deployment.transactionSchema.attempts(id).get(0);
+            assertEquals("Insufficient stock for SKU: " + A, ApiErrorMapper.map(insufficient).message());
+            assertEquals(1, saga.stock(A), "nothing was deducted");
+            assertEquals(TransactionOperations.TransactionStatus.OPEN, service.get(id).status());
+            TransactionTestSchema.AttemptRow rejected = saga.transactionSchema.attempts(id).get(0);
             assertEquals("REJECTED", rejected.state());
             assertEquals("INSUFFICIENT_STOCK", rejected.rejectionReason());
             assertEquals(A, rejected.rejectedSku());
 
-            deployment.inventorySchema.setStock(A, 3);
-            assertEquals(200, http.scan(id, A).statusCode(), "the reopened basket accepts another scan");
-            HttpResponse<String> completed = http.complete(id);
-            assertEquals(200, completed.statusCode(), completed.body());
-            Map<String, Object> receipt = ServiceHttp.json(completed);
-            assertEquals(3, ((Number) receipt.get("itemCount")).intValue());
-            assertEquals(3, ((Number) Json.asObject(Json.getList(receipt, "lines").get(0)).get("quantity")).intValue());
-            assertEquals(0, deployment.inventorySchema.stock(A));
-            assertEquals(List.of(1, 2), deployment.transactionSchema.attempts(id).stream()
+            saga.inventorySchema.setStock(A, 3);
+            assertEquals(3, scan(saga, id, A).itemCount(), "the reopened basket accepts another scan");
+            ReceiptView receipt = service.complete(id);
+            assertEquals(3, receipt.itemCount());
+            assertEquals(3, receipt.lines().get(0).quantity());
+            assertEquals(0, saga.stock(A));
+            assertEquals(List.of(1, 2), saga.transactionSchema.attempts(id).stream()
                     .map(TransactionTestSchema.AttemptRow::attemptNumber).toList());
+            assertEquals(List.of("StockRejected", "StockDeducted"), types(saga.bus.values(saga.names.checkoutOutcome())),
+                    "the compensation and the later success, each one outcome event");
         }
     }
 
     @Test
     void anUnknownTransactionIs404AndAnEmptyBasketIs409WithoutReachingInventory() throws Exception {
-        try (CheckoutDeployment deployment = CheckoutDeployment.start(10, 5)) {
-            ServiceHttp http = deployment.transactionHttp;
-            assertError(http.complete("no-such-transaction"), 404, "TRANSACTION_NOT_FOUND");
-            String id = http.start("empty-station");
-            assertError(http.complete(id), 409, "EMPTY_BASKET");
-            assertEquals(CheckoutOutcome.CHECKOUT_OUTCOME_NOT_PROCESSED, outcome(deployment, id, 1),
+        try (InProcessCheckout saga = InProcessCheckout.start(10, 5)) {
+            TransactionOperations service = saga.checkout();
+            assertError(failure(() -> service.complete("no-such-transaction")), 404, "TRANSACTION_NOT_FOUND");
+            String id = service.start(new TransactionOperations.StartCommand("empty-station")).transactionId();
+            assertError(failure(() -> service.complete(id)), 409, "EMPTY_BASKET");
+            assertEquals(CheckoutStockService.Outcome.NOT_PROCESSED, saga.inventory.stock.outcome(id, 1).outcome(),
                     "Inventory never heard of the attempt");
-            assertEquals(0, deployment.transactionSchema.attempts(id).size());
-            assertEquals("OPEN", ServiceHttp.json(http.lookup(id)).get("status"));
+            assertEquals(0, saga.transactionSchema.attempts(id).size());
+            assertEquals(0, saga.transactionSchema.queryLong("SELECT COUNT(*) FROM outbox_event"), "no event was recorded");
+            assertTrue(saga.bus.values(saga.names.checkout()).isEmpty(), "and none was published");
+            assertEquals(TransactionOperations.TransactionStatus.OPEN, service.get(id).status());
         }
     }
 
     @Test
     void aPriceChangeInInventoryAfterScanningLeavesTheReceiptAtTheCapturedPrice() throws Exception {
-        try (CheckoutDeployment deployment = CheckoutDeployment.start(10, 5, Map.of("CATALOG_REFRESH_SECONDS", "1"))) {
-            ServiceHttp http = deployment.transactionHttp;
-            String id = http.start("price-station");
-            assertEquals(200, http.scan(id, A).statusCode());
+        try (InProcessCheckout saga = InProcessCheckout.start(10, 5)) {
+            TransactionOperations service = saga.checkout();
+            String id = service.start(new TransactionOperations.StartCommand("price-station")).transactionId();
+            scan(saga, id, A);
 
             BigDecimal changed = new BigDecimal("9.99");
-            deployment.inventorySchema.update("UPDATE catalog_item SET price = ? WHERE sku = ?", changed, A);
-            String version = deployment.inventorySchema.newCatalogVersion();
-            awaitReplica(deployment, version);
+            saga.inventorySchema.update("UPDATE catalog_item SET price = ? WHERE sku = ?", changed, A);
+            String version = saga.inventorySchema.newCatalogVersion();
+            List<ProductCatalogReplica.Product> products = new ArrayList<>();
+            for (int n = 1; n <= 10; n++) {
+                products.add(new ProductCatalogReplica.Product(InventoryTestSchema.sku(n), "Item " + n,
+                        n == 1 ? changed : InventoryTestSchema.price(n)));
+            }
+            // The replica takes Inventory's new version, as replication would deliver it.
+            saga.transaction.replica.install(version, products);
 
-            assertEquals(0, InventoryTestSchema.price(1).compareTo(
-                    new BigDecimal(ServiceHttp.json(http.scan(id, A)).get("unitPrice").toString())),
+            assertEquals(0, InventoryTestSchema.price(1).compareTo(scan(saga, id, A).unitPrice()),
                     "a repeated SKU keeps the line's captured price");
-            String fresh = http.start("price-station-2");
-            assertEquals(0, changed.compareTo(new BigDecimal(ServiceHttp.json(http.scan(fresh, A)).get("unitPrice").toString())),
+            String fresh = service.start(new TransactionOperations.StartCommand("price-station-2")).transactionId();
+            assertEquals(0, changed.compareTo(scan(saga, fresh, A).unitPrice()),
                     "a new basket captures the new price, so the replica did change");
 
-            HttpResponse<String> completed = http.complete(id);
-            assertEquals(200, completed.statusCode(), completed.body());
-            Map<String, Object> receipt = ServiceHttp.json(completed);
-            assertEquals(0, InventoryTestSchema.price(1).multiply(BigDecimal.TWO)
-                    .compareTo(new BigDecimal(receipt.get("totalAmount").toString())), "the receipt uses the captured price");
-            assertEquals(3, deployment.inventorySchema.stock(A));
+            ReceiptView receipt = service.complete(id);
+            assertEquals(0, InventoryTestSchema.price(1).multiply(BigDecimal.TWO).compareTo(receipt.totalAmount()),
+                    "the receipt uses the captured price");
+            assertEquals(3, saga.stock(A));
         }
     }
 
     @Test
     void anInvalidRequestFromInventoryReopensTheBasketEndToEnd() throws Exception {
-        try (CheckoutDeployment deployment = CheckoutDeployment.start(10, 5)) {
-            ServiceHttp http = deployment.transactionHttp;
-            String id = http.start("invalid-station");
-            assertEquals(200, http.scan(id, A).statusCode());
-            assertEquals(200, http.scan(id, C).statusCode());
-            // Inventory forgets C after the scan; its stock row goes with it (ON DELETE CASCADE).
-            deployment.inventorySchema.update("DELETE FROM catalog_item WHERE sku = ?", C);
+        try (InProcessCheckout saga = InProcessCheckout.start(10, 5)) {
+            TransactionOperations service = saga.checkout();
+            String id = service.start(new TransactionOperations.StartCommand("invalid-station")).transactionId();
+            scan(saga, id, A);
+            scan(saga, id, C);
+            // Inventory forgets C after the scan, while Transaction's replica still has it; its stock row goes
+            // with it (ON DELETE CASCADE).
+            saga.inventorySchema.update("DELETE FROM catalog_item WHERE sku = ?", C);
 
-            assertError(http.complete(id), 500, "INTERNAL_ERROR");
-            Map<String, Object> lookup = ServiceHttp.json(http.lookup(id));
-            assertEquals("OPEN", lookup.get("status"), "the transaction reopened");
-            assertEquals(2, ((Number) lookup.get("itemCount")).intValue(), "with its basket");
-            TransactionTestSchema.AttemptRow attempt = deployment.transactionSchema.attempts(id).get(0);
+            assertError(failure(() -> service.complete(id)), 500, "INTERNAL_ERROR");
+            var lookup = service.get(id);
+            assertEquals(TransactionOperations.TransactionStatus.OPEN, lookup.status(), "the transaction reopened");
+            assertEquals(2, lookup.itemCount(), "with its basket");
+            TransactionTestSchema.AttemptRow attempt = saga.transactionSchema.attempts(id).get(0);
             assertEquals("REJECTED", attempt.state());
             assertEquals("INVALID_REQUEST", attempt.rejectionReason());
             assertEquals(C, attempt.rejectedSku());
-            assertNull(deployment.transactionSchema.transaction(id).orElseThrow().activeAttemptNumber());
-            assertEquals(5, deployment.inventorySchema.stock(A), "no stock changed");
-            assertEquals(5, deployment.inventorySchema.stock(B));
-            assertEquals(CheckoutOutcome.CHECKOUT_OUTCOME_INVALID_REQUEST, outcome(deployment, id, 1));
+            assertNull(saga.transactionSchema.transaction(id).orElseThrow().activeAttemptNumber());
+            assertEquals(5, saga.stock(A), "no stock changed");
+            assertEquals(5, saga.stock(B));
+            assertEquals(CheckoutStockService.Outcome.INVALID_REQUEST, saga.inventory.stock.outcome(id, 1).outcome());
         }
     }
 
-    private static void awaitReplica(CheckoutDeployment deployment, String version) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-        while (!version.equals(deployment.transactionSchema.queryString(
-                "SELECT catalog_version FROM product_replica_meta WHERE meta_key = 1"))) {
-            if (System.nanoTime() > deadline) fail("The replica never reached version " + version + deployment.logs());
-            Thread.sleep(100);
+    private static TransactionOperations.ScanView scan(InProcessCheckout saga, String id, String sku) {
+        return saga.checkout().scan(new TransactionOperations.ScanCommand(id, sku));
+    }
+
+    private static List<String> types(List<byte[]> values) {
+        List<String> types = new ArrayList<>();
+        for (byte[] value : values) {
+            var envelope = parse(value);
+            types.add(envelope.getEventType());
+            EventTypes type = EventTypes.byName(envelope.getEventType()).orElseThrow();
+            assertEquals(type.producer(), envelope.getProducer(), "each event carries its owner as producer");
+            EnvelopeCodec.decode(value, envelope.getRoutingKey());
         }
-        // The in-memory snapshot swaps right after the replica's commit.
-        Thread.sleep(Duration.ofMillis(200));
+        return types;
     }
 
-    private static CheckoutOutcome outcome(CheckoutDeployment deployment, String id, int attempt) {
-        return InventoryServiceGrpc.newBlockingStub(deployment.inventoryChannel()).withDeadlineAfter(10, TimeUnit.SECONDS)
-                .getCheckoutOutcome(GetCheckoutOutcomeRequest.newBuilder().setAttempt(CheckoutAttemptKey.newBuilder()
-                        .setTransactionId(id).setAttemptNumber(attempt)).build()).getOutcome();
+    private static selfcheckout.events.v1.EventEnvelope parse(byte[] value) {
+        try {
+            return selfcheckout.events.v1.EventEnvelope.parseFrom(value);
+        } catch (Exception failure) {
+            throw new AssertionError(failure);
+        }
     }
 
-    private static void assertError(HttpResponse<String> response, int status, String code) {
-        assertEquals(status, response.statusCode(), response.body());
-        Map<String, Object> body = ServiceHttp.json(response);
-        assertEquals(Set.of("error", "message"), body.keySet());
-        assertEquals(code, body.get("error"));
-        assertNotNull(body.get("message"));
+    private static RuntimeException failure(Supplier<?> action) {
+        return assertThrows(RuntimeException.class, action::get);
+    }
+
+    private static void assertError(RuntimeException failure, int status, String code) {
+        ApiErrorMapper.ApiError error = ApiErrorMapper.map(failure);
+        assertEquals(status, error.httpStatus(), String.valueOf(failure));
+        assertEquals(code, error.error());
+        assertNotNull(error.message());
     }
 }

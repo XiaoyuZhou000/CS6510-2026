@@ -4,12 +4,22 @@ import database.CheckoutAttemptStore;
 import database.ScanStore;
 import database.StoreFailure;
 import database.TransactionStore;
+import events.ConsumerLoop;
+import events.OutboxDispatcher;
+import events.TopicNames;
+import messaging.CheckoutOutcomeConsumer;
 import metrics.PerfMetrics;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import support.FakeInventoryGateway;
+import support.FakeInventoryReactor;
+import support.FakeInventoryReactor.Reply;
+import support.InMemoryDeadLetterStore;
+import support.InMemoryEventBus;
+import support.InMemoryOutboxStore;
+import transaction.CheckoutEvents;
 import transaction.CheckoutOrchestrator;
+import transaction.CheckoutOutcomeHandler;
 import transaction.CheckoutPendingFailure;
-import transaction.InventoryGateway;
 import transaction.ProductCatalogReplica;
 import transaction.ProductCatalogUnavailableFailure;
 import transaction.RecoverySchedule;
@@ -21,6 +31,8 @@ import transaction.TransactionService;
 import transaction.TransactionStateCache;
 
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -37,13 +49,32 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Start, Scan, Lookup, and the delegated Complete through the state cache, the catalog replica, and
- * guarded writes, with fakes (R19; contracts/checkout-saga.md).
+ * guarded writes, with fakes (R19; contracts/checkout-saga.md). Complete's outcomes come from a scripted
+ * {@link FakeInventoryReactor} over an {@link InMemoryEventBus}, through the real dispatcher and outcome
+ * consumer (006 D7).
  */
 class TransactionServiceTest {
     private final FakeDatabase database = new FakeDatabase();
-    private final FakeInventoryGateway inventory = FakeInventoryGateway.applying();
+    private final TopicNames names = TopicNames.unprefixed();
+    private final InMemoryEventBus bus = InMemoryEventBus.withCatalogTopics(names, 7);
+    private final FakeInventoryReactor inventory = FakeInventoryReactor.deducting(bus, names).start();
+    private final OutboxDispatcher dispatcher = new OutboxDispatcher("transaction", database.outbox,
+            Map.of(names.checkout(), bus), List.of(names.checkout()), OutboxDispatcher.Settings.defaults(),
+            Clock.systemUTC());
+    private final List<ConsumerLoop> consumers = new ArrayList<>();
     private final ProductCatalogReplica replica = replica("v1", "1.25", "2.50");
     private final TransactionService service = newService(replica, 100);
+
+    {
+        dispatcher.start();
+    }
+
+    @AfterEach
+    void stop() throws InterruptedException {
+        for (ConsumerLoop consumer : consumers) consumer.stop(Duration.ofSeconds(5));
+        dispatcher.stop(Duration.ofSeconds(5));
+        inventory.close();
+    }
 
     @Test
     void startReturnsAnOpenEmptyTransactionWithAMillisecondStart() {
@@ -251,9 +282,9 @@ class TransactionServiceTest {
         assertEquals(new BigDecimal("2.50"), receipt.lines().get(1).unitPrice());
         assertEquals(database.completedAt(id), receipt.completedAt(), "the receipt carries the stored completed_at");
         assertEquals(TransactionOperations.TransactionStatus.COMPLETED, restarted.get(id).status());
-        assertEquals(1, inventory.applyCalls());
-        assertEquals(List.of(new InventoryGateway.CheckoutLine("A", 2), new InventoryGateway.CheckoutLine("B", 1)),
-                inventory.calls().get(0).lines(), "one batched call with the frozen basket");
+        assertEquals(1, inventory.requests());
+        assertEquals(List.of(new FakeInventoryReactor.Line("A", 2), new FakeInventoryReactor.Line("B", 1)),
+                inventory.calls().get(0).lines(), "one request event with the frozen basket");
     }
 
     @Test
@@ -261,10 +292,11 @@ class TransactionServiceTest {
         assertFailure(TransactionFailure.Code.NOT_FOUND, () -> service.complete("missing"));
         String id = service.start(new TransactionOperations.StartCommand("station-2")).transactionId();
         assertFailure(TransactionFailure.Code.EMPTY_BASKET, () -> service.complete(id));
-        assertEquals(0, inventory.applyCalls(), "an empty basket never reaches Inventory");
+        assertEquals(0, inventory.requests(), "an empty basket never reaches Inventory");
+        assertEquals(0, database.outbox.ordered().size(), "and records no event");
 
         service.scan(new TransactionOperations.ScanCommand(id, "A"));
-        inventory.then(new InventoryGateway.Rejected(InventoryGateway.RejectionReason.INSUFFICIENT_STOCK, "A"));
+        inventory.then(Reply.insufficient("A"));
         TransactionFailure insufficient = assertThrows(TransactionFailure.class, () -> service.complete(id));
         assertEquals(TransactionFailure.Code.INSUFFICIENT_STOCK, insufficient.code());
         assertEquals("Insufficient stock for SKU: A", insufficient.getMessage());
@@ -286,12 +318,12 @@ class TransactionServiceTest {
         String id = service.start(new TransactionOperations.StartCommand("station-3")).transactionId();
         service.scan(new TransactionOperations.ScanCommand(id, "B"));
         service.complete(id);
-        assertEquals(1, inventory.applyCalls());
+        assertEquals(1, inventory.requests());
         for (int i = 0; i < 3; i++) assertFailure(TransactionFailure.Code.NOT_OPEN, () -> service.complete(id));
-        assertEquals(1, inventory.applyCalls(), "FR-036: no Inventory call after COMPLETED");
+        assertEquals(1, inventory.requests(), "FR-042: no request event after COMPLETED");
         TransactionService restarted = newService(replica, 100);
         assertFailure(TransactionFailure.Code.NOT_OPEN, () -> restarted.complete(id));
-        assertEquals(1, inventory.applyCalls());
+        assertEquals(1, inventory.requests());
     }
 
     private TransactionService newService(ProductCatalogReplica catalog, int cacheEntries) {
@@ -302,8 +334,17 @@ class TransactionServiceTest {
                                           CheckoutOrchestrator.Settings settings) {
         TransactionLocks locks = new TransactionLocks();
         TransactionStateCache cache = new TransactionStateCache(locks, cacheEntries);
-        CheckoutOrchestrator checkout = new CheckoutOrchestrator(database, database, inventory, cache,
-                new SettlementRegistry(locks), new RecoverySchedule(), settings);
+        SettlementRegistry registry = new SettlementRegistry(locks);
+        CheckoutOrchestrator checkout = new CheckoutOrchestrator(database, database, new CheckoutEvents(names), dispatcher,
+                cache, registry, new RecoverySchedule(), settings);
+        // A reconstructed service replaces the previous one, consumer included, as a restarted process does.
+        for (ConsumerLoop previous : consumers) previous.stop(Duration.ofSeconds(5));
+        consumers.clear();
+        ConsumerLoop outcomes = CheckoutOutcomeConsumer.create(names, bus::stream,
+                new CheckoutOutcomeHandler(database, cache, registry, CheckoutOrchestrator.Timing.SYSTEM),
+                new InMemoryDeadLetterStore(), ConsumerLoop.Settings.defaults().withThreads(1));
+        outcomes.start();
+        consumers.add(outcomes);
         return new TransactionService(database, database, checkout, catalog, locks, cache);
     }
 
@@ -338,6 +379,7 @@ class TransactionServiceTest {
         final Map<String, Row> rows = new HashMap<>();
         final Map<String, List<AcceptedScan>> scans = new HashMap<>();
         final Map<AttemptKey, AttemptRecord> attempts = new HashMap<>();
+        final InMemoryOutboxStore outbox = new InMemoryOutboxStore();
         StoreFailure appendFailure;
         int finds;
         int loads;
@@ -424,7 +466,9 @@ class TransactionServiceTest {
             rows.put(key.transactionId(), new Row(row.stationId(), row.status(), row.itemCount(), row.total(),
                     key.attemptNumber(), key.attemptNumber(), row.startedAt()));
             attempts.put(key, new AttemptRecord(key, State.PENDING, null, null, begin.lines(), begin.itemCount(),
-                    begin.totalAmount(), ClientOutcome.NONE, begin.createdAt(), null, 0, begin.nextRetryAt(), null));
+                    begin.totalAmount(), ClientOutcome.NONE, begin.createdAt(), null, 0, begin.nextRetryAt(), null,
+                    begin.request().eventId()));
+            outbox.add(begin.request());
             return WriteResult.OK;
         }
 
@@ -458,7 +502,7 @@ class TransactionServiceTest {
             AttemptRecord a = attempts.get(key);
             ClientOutcome outcome = answer != null && a.clientOutcome() == ClientOutcome.NONE ? answer : a.clientOutcome();
             attempts.put(key, new AttemptRecord(key, state, reason, sku, a.lines(), a.itemCount(), a.totalAmount(),
-                    outcome, a.createdAt(), at, a.retryCount(), a.nextRetryAt(), a.lastError()));
+                    outcome, a.createdAt(), at, a.retryCount(), a.nextRetryAt(), a.lastError(), a.requestEventId()));
         }
 
         @Override
@@ -467,7 +511,7 @@ class TransactionServiceTest {
             if (a == null || a.clientOutcome() != ClientOutcome.NONE) return false;
             attempts.put(key, new AttemptRecord(key, a.state(), a.rejectionReason(), a.rejectedSku(), a.lines(),
                     a.itemCount(), a.totalAmount(), outcome, a.createdAt(), a.settledAt(), a.retryCount(),
-                    a.nextRetryAt(), a.lastError()));
+                    a.nextRetryAt(), a.lastError(), a.requestEventId()));
             return true;
         }
 
@@ -476,7 +520,8 @@ class TransactionServiceTest {
             AttemptRecord a = attempts.get(key);
             if (a == null || a.state() != State.PENDING || a.clientOutcome() != ClientOutcome.NONE) return false;
             attempts.put(key, new AttemptRecord(key, a.state(), null, null, a.lines(), a.itemCount(), a.totalAmount(),
-                    ClientOutcome.PENDING_ERROR, a.createdAt(), null, a.retryCount(), now, a.lastError()));
+                    ClientOutcome.PENDING_ERROR, a.createdAt(), null, a.retryCount(), now, a.lastError(),
+                    a.requestEventId()));
             return true;
         }
 
@@ -495,6 +540,11 @@ class TransactionServiceTest {
             throw new UnsupportedOperationException("recovery is not part of this test");
         }
 
+        @Override
+        public synchronized boolean recordError(AttemptKey key, String lastError) {
+            throw new UnsupportedOperationException("no integrity fault is part of this test");
+        }
+
         /** Another instance's T1: the row's active attempt and its PENDING attempt row. */
         synchronized void beginAttempt(String id) {
             Row row = rows.get(id);
@@ -504,7 +554,7 @@ class TransactionServiceTest {
             AttemptKey key = new AttemptKey(id, number);
             Instant now = Instant.now();
             attempts.put(key, new AttemptRecord(key, State.PENDING, null, null, "[]", row.itemCount(), row.total(),
-                    ClientOutcome.NONE, now, null, 0, now, null));
+                    ClientOutcome.NONE, now, null, 0, now, null, "request-" + key));
         }
 
         synchronized List<Integer> sequences(String id) {

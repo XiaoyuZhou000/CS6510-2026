@@ -8,13 +8,11 @@ import contracts.inventory.v1.GetCatalogVersionResponse;
 import contracts.inventory.v1.InventoryServiceGrpc;
 import database.JdbcCatalogMetaStore;
 import database.JdbcCatalogStore;
-import database.JdbcCheckoutOperationStore;
 import database.JdbcInventoryStore;
 import io.grpc.ManagedChannel;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import inventory.CatalogCache;
 import inventory.CatalogOperations;
-import inventory.CheckoutStockService;
 import inventory.StoreQueryService;
 import org.junit.jupiter.api.Test;
 import support.GrpcTestSupport;
@@ -105,9 +103,9 @@ class InventoryCatalogContractTest {
         }
     }
 
-    /** Checkout calls are covered by InventoryCheckoutContractTest; here they only complete the service. */
+    /** The catalog half of InventoryService; checkout runs over events (CheckoutEventContractTest). */
     private static InventoryGrpcService service(InventoryTestSchema schema, CatalogCache cache) throws Exception {
-        return new InventoryGrpcService(cache, new CheckoutStockService(new JdbcCheckoutOperationStore(schema.pool())));
+        return new InventoryGrpcService(cache);
     }
 
     private static CatalogCache cache(InventoryTestSchema schema) throws Exception {

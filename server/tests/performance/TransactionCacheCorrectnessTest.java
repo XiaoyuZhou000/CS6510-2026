@@ -5,12 +5,12 @@ import database.ScanStore;
 import metrics.PerfMetrics;
 import org.junit.jupiter.api.Test;
 import support.CountingConnections;
-import support.FakeInventoryGateway;
+import support.FakeInventoryReactor;
+import support.FakeInventoryReactor.Reply;
 import support.InProcessTransaction;
 import support.TransactionTestSchema;
 import transaction.CheckoutOrchestrator;
 import transaction.CheckoutPendingFailure;
-import transaction.InventoryGateway;
 import transaction.TransactionFailure;
 
 import java.math.BigDecimal;
@@ -35,6 +35,9 @@ class TransactionCacheCorrectnessTest {
      */
     private static final CheckoutOrchestrator.Settings SHORT_WAIT =
             CheckoutOrchestrator.Settings.defaults().withResponseBudget(Duration.ofMillis(300));
+    /** Complete also waits for an outcome event from the scripted Inventory, which a 300 ms budget may cut short. */
+    private static final CheckoutOrchestrator.Settings COMPLETE_WAIT =
+            CheckoutOrchestrator.Settings.defaults().withResponseBudget(Duration.ofMillis(1_500));
 
     @Test
     void aRowChangedBehindAWarmEntryGivesTheUncachedOutcomeThroughAGuardMissAndAReload() throws Exception {
@@ -117,18 +120,19 @@ class TransactionCacheCorrectnessTest {
     void staleEntriesBeforeEachCompleteWriteGiveTheUncachedOutcome() throws Exception {
         try (TransactionTestSchema schema = seeded()) {
             for (CompleteChange change : CompleteChange.values()) {
-                FakeInventoryGateway cachedInventory = FakeInventoryGateway.applying();
-                FakeInventoryGateway uncachedInventory = FakeInventoryGateway.applying();
-                InProcessTransaction cached = InProcessTransaction.over(schema).inventory(cachedInventory)
-                        .settings(SHORT_WAIT).build();
+                InProcessTransaction cached = InProcessTransaction.over(schema).settings(COMPLETE_WAIT).build();
                 InProcessTransaction uncached = InProcessTransaction.over(schema).pool(cached.pool).cacheEntries(0)
-                        .inventory(uncachedInventory).settings(SHORT_WAIT).build();
+                        .settings(COMPLETE_WAIT).build();
+                FakeInventoryReactor cachedInventory = cached.reactor();
+                FakeInventoryReactor uncachedInventory = uncached.reactor();
                 String warm = cached.start();
                 cached.scan(warm, "SKU-000001");
                 String cold = uncached.start();
                 uncached.scan(cold, "SKU-000001");
                 change.arrange(schema, cached, warm, cachedInventory);
                 change.arrange(schema, uncached, cold, uncachedInventory);
+                cachedInventory.start();
+                uncachedInventory.start();
 
                 long misses = PerfMetrics.counterValue(MISSES);
                 String withCache = completeOutcome(cached, warm);
@@ -139,6 +143,10 @@ class TransactionCacheCorrectnessTest {
                 assertEquals(attempts(schema, cold), attempts(schema, warm), change + ": the same attempts");
                 assertTrue(schema.queryLong("SELECT COUNT(*) FROM checkout_attempt WHERE transaction_id = ? "
                         + "AND state = 'PENDING'", warm) <= 1, change + ": never a second pending attempt");
+                cachedInventory.close();
+                uncachedInventory.close();
+                cached.close();
+                uncached.close();
             }
         }
     }
@@ -162,54 +170,56 @@ class TransactionCacheCorrectnessTest {
     private enum CompleteChange {
         ITEM_COUNT_BEFORE_T1("OK 2 2.05") {
             @Override
-            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryGateway inventory)
+            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryReactor inventory)
                     throws Exception {
                 foreignScan(schema, service, id, "SKU-000002", "Item 2", "1.20");
             }
         },
         ATTEMPT_COUNT_BEFORE_T1("OK 1 0.85") {
             @Override
-            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryGateway inventory)
+            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryReactor inventory)
                     throws Exception {
                 // Another instance's attempt 1 was rejected and the basket reopened behind this cache.
                 schema.update("UPDATE `transaction` SET attempt_count = 1 WHERE transaction_id = ?", id);
                 schema.update("INSERT INTO checkout_attempt (transaction_id, attempt_number, state, rejection_reason, "
-                        + "rejected_sku, `lines`, item_count, total_amount, created_at, settled_at, next_retry_at) VALUES "
-                        + "(?, 1, 'REJECTED', 'INSUFFICIENT_STOCK', 'SKU-000001', '[]', 1, 0.85, NOW(3), NOW(3), NOW(3))", id);
+                        + "rejected_sku, `lines`, item_count, total_amount, created_at, settled_at, next_retry_at, request_event_id) "
+                        + "VALUES (?, 1, 'REJECTED', 'INSUFFICIENT_STOCK', 'SKU-000001', '[]', 1, 0.85, NOW(3), NOW(3), NOW(3), "
+                        + "UUID())", id);
             }
         },
         COMPLETED_BEFORE_T1("NOT_OPEN") {
             @Override
-            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryGateway inventory)
+            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryReactor inventory)
                     throws Exception {
                 Change.COMPLETED.apply(schema, service, id);
             }
         },
         PENDING_BEFORE_T1("PENDING") {
             @Override
-            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryGateway inventory)
+            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryReactor inventory)
                     throws Exception {
                 schema.update("UPDATE `transaction` SET attempt_count = 1, active_attempt_number = 1 WHERE transaction_id = ?", id);
                 schema.update("INSERT INTO checkout_attempt (transaction_id, attempt_number, state, `lines`, item_count, "
-                        + "total_amount, created_at, next_retry_at) VALUES (?, 1, 'PENDING', '[]', 1, 0.85, NOW(3), NOW(3))", id);
+                        + "total_amount, created_at, next_retry_at, request_event_id) VALUES (?, 1, 'PENDING', '[]', 1, 0.85, "
+                        + "NOW(3), NOW(3), UUID())", id);
             }
         },
         SETTLED_BEFORE_T3("OK 1 0.85") {
             @Override
-            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryGateway inventory) {
+            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryReactor inventory) {
                 inventory.thenAnswer(call -> {
                     service.attempts.complete(call.key(), Instant.now().truncatedTo(ChronoUnit.MILLIS), false);
-                    return new InventoryGateway.Applied(true);
+                    return Reply.deduct();
                 });
             }
         },
         SETTLED_BEFORE_REOPEN("INSUFFICIENT_STOCK") {
             @Override
-            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryGateway inventory) {
+            void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryReactor inventory) {
                 inventory.thenAnswer(call -> {
                     service.attempts.reopen(call.key(), CheckoutAttemptStore.RejectionReason.INSUFFICIENT_STOCK,
                             "SKU-000001", Instant.now().truncatedTo(ChronoUnit.MILLIS), false);
-                    return new InventoryGateway.Rejected(InventoryGateway.RejectionReason.INSUFFICIENT_STOCK, "SKU-000001");
+                    return Reply.insufficient("SKU-000001");
                 });
             }
         };
@@ -221,7 +231,7 @@ class TransactionCacheCorrectnessTest {
         }
 
         abstract void arrange(TransactionTestSchema schema, InProcessTransaction service, String id,
-                              FakeInventoryGateway inventory) throws Exception;
+                              FakeInventoryReactor inventory) throws Exception;
     }
 
     private static List<String> anonymous(List<String> responses, List<String> ids) {
@@ -320,8 +330,9 @@ class TransactionCacheCorrectnessTest {
                 schema.update("UPDATE `transaction` SET attempt_count = attempt_count + 1, "
                         + "active_attempt_number = attempt_count WHERE transaction_id = ?", id);
                 schema.update("INSERT INTO checkout_attempt (transaction_id, attempt_number, state, `lines`, item_count, "
-                        + "total_amount, created_at, next_retry_at) SELECT transaction_id, attempt_count, 'PENDING', '[]', "
-                        + "item_count, total_amount, NOW(3), NOW(3) FROM `transaction` WHERE transaction_id = ?", id);
+                        + "total_amount, created_at, next_retry_at, request_event_id) SELECT transaction_id, attempt_count, "
+                        + "'PENDING', '[]', item_count, total_amount, NOW(3), NOW(3), UUID() FROM `transaction` "
+                        + "WHERE transaction_id = ?", id);
             }
         },
         ITEM_COUNT("OK") {

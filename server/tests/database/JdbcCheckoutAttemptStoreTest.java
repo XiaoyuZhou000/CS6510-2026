@@ -7,8 +7,11 @@ import database.CheckoutAttemptStore.ClientOutcome;
 import database.CheckoutAttemptStore.RejectionReason;
 import database.CheckoutAttemptStore.State;
 import database.CheckoutAttemptStore.WriteResult;
+import events.OutboxRow;
+import events.TopicNames;
 import org.junit.jupiter.api.Test;
 import support.CountingConnections;
+import transaction.CheckoutEvents;
 import support.TransactionTestSchema;
 
 import java.math.BigDecimal;
@@ -27,12 +30,15 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The Transaction side of the checkout Saga over a disposable schema (R5, R9, R19; contracts/checkout-saga.md
- * "Steps"). Migrates the transaction side of JdbcCheckoutCompletionStoreTest.
+ * The Transaction side of the checkout Saga over a disposable schema (R5, R9, R19; 006 contracts/checkout-saga.md
+ * "Steps"). Migrates the transaction side of JdbcCheckoutCompletionStoreTest. T1 commits the attempt, its
+ * {@code request_event_id}, and its {@code CheckoutRequested} outbox row together (FR-010).
  */
 class JdbcCheckoutAttemptStoreTest {
     private static final String LINES = "[{\"sku\":\"SKU-000001\",\"quantity\":2},{\"sku\":\"SKU-000002\",\"quantity\":1}]";
-    private static final Duration BUDGET = Duration.ofMillis(8_000);
+    /** {@code CHECKOUT_REPUBLISH_AFTER_MS}: T1 makes the first republish due this long after creation. */
+    private static final Duration REPUBLISH_AFTER = Duration.ofMillis(2_000);
+    private static final CheckoutEvents EVENTS = new CheckoutEvents(TopicNames.unprefixed());
 
     @Test
     void beginIsGuardedAndCommitsThePendingAttemptWithItsSnapshot() throws Exception {
@@ -43,13 +49,21 @@ class JdbcCheckoutAttemptStoreTest {
             String id = basket(pool, 3);
             Instant createdAt = now();
 
+            Begin t1 = begin(id, 1, 3, createdAt);
             try (CountingConnections.Scope scope = counting.scope()) {
-                assertEquals(WriteResult.OK, store.begin(begin(id, 1, 3, createdAt)));
+                assertEquals(WriteResult.OK, store.begin(t1));
                 assertEquals(1, scope.counts().updates(), "one guarded UPDATE");
-                assertEquals(1, scope.counts().inserts(), "one attempt INSERT");
+                assertEquals(2, scope.counts().inserts(), "the attempt INSERT and the outbox INSERT");
                 assertEquals(0, scope.counts().selects(), "no read");
-                assertEquals(1, scope.counts().commits(), "both in one commit");
+                assertEquals(3, scope.counts().statements());
+                assertEquals(1, scope.counts().commits(), "all three in one commit");
             }
+            assertEquals("CheckoutRequested", schema.queryString("SELECT event_type FROM outbox_event WHERE event_id = ?",
+                    t1.request().eventId()), "the request event is durable with the attempt");
+            assertEquals(id + ":1", schema.queryString("SELECT aggregate_key FROM outbox_event WHERE event_id = ?",
+                    t1.request().eventId()));
+            assertNull(schema.queryString("SELECT published_at FROM outbox_event WHERE event_id = ?",
+                    t1.request().eventId()), "published only after the broker confirms");
             var row = schema.transaction(id).orElseThrow();
             assertEquals("OPEN", row.status(), "lookup still says OPEN while the attempt is pending");
             assertEquals(1, row.attemptCount());
@@ -61,7 +75,9 @@ class JdbcCheckoutAttemptStoreTest {
             assertEquals(new BigDecimal("2.55"), attempt.totalAmount());
             assertEquals(ClientOutcome.NONE, attempt.clientOutcome());
             assertEquals(createdAt, attempt.createdAt());
-            assertEquals(createdAt.plus(BUDGET), attempt.nextRetryAt(), "recovery leaves a live request's attempt alone");
+            assertEquals(createdAt.plus(REPUBLISH_AFTER), attempt.nextRetryAt(),
+                    "the first republish is due CHECKOUT_REPUBLISH_AFTER_MS after T1");
+            assertEquals(t1.request().eventId(), attempt.requestEventId(), "request_event_id names the outbox row");
             assertNull(attempt.settledAt());
             assertEquals(0, attempt.retryCount());
 
@@ -73,6 +89,7 @@ class JdbcCheckoutAttemptStoreTest {
                     completed);
             assertEquals(WriteResult.GUARD_MISS, store.begin(begin(completed, 1, 1, now())), "not OPEN");
             assertEquals(1, schema.queryLong("SELECT COUNT(*) FROM checkout_attempt"), "every miss wrote nothing");
+            assertEquals(1, schema.queryLong("SELECT COUNT(*) FROM outbox_event"), "not even an outbox row");
             assertEquals(0, schema.transaction(stale).orElseThrow().attemptCount());
         }
     }
@@ -240,7 +257,7 @@ class JdbcCheckoutAttemptStoreTest {
                 String id = basket(schema.pool(), 1);
                 // Pairs share a due time, so the keyset must order by key within a timestamp.
                 Instant due = base.plusMillis(1_000L * (i / 2));
-                store.begin(new Begin(new AttemptKey(id, 1), 1, new BigDecimal("0.85"), LINES, due.minus(BUDGET), due));
+                store.begin(beginDue(id, due));
                 dueTimes.put(new AttemptKey(id, 1), due);
             }
             List<AttemptKey> expected = new ArrayList<>(dueTimes.keySet());
@@ -249,7 +266,7 @@ class JdbcCheckoutAttemptStoreTest {
             String future = basket(schema.pool(), 1);
             store.begin(begin(future, 1, 1, now()));
             String settled = basket(schema.pool(), 1);
-            store.begin(new Begin(new AttemptKey(settled, 1), 1, new BigDecimal("0.85"), LINES, base.minus(BUDGET), base));
+            store.begin(beginDue(settled, base));
             store.complete(new AttemptKey(settled, 1), now(), false);
 
             Instant dueBefore = now();
@@ -294,6 +311,15 @@ class JdbcCheckoutAttemptStoreTest {
             assertEquals(later, attempt.nextRetryAt());
             assertEquals(255, attempt.lastError().length(), "the stored error fits its column");
             assertTrue(store.findAttempt(new AttemptKey(id, 2)).isEmpty());
+
+            assertTrue(store.recordError(key, "INTEGRITY:deduction-after-reject"));
+            store.scheduleRetry(key, later.plusSeconds(5), "REPUBLISHED");
+            attempt = store.findAttempt(key).orElseThrow();
+            assertEquals("INTEGRITY:deduction-after-reject", attempt.lastError(),
+                    "a republish keeps a recorded integrity alarm visible");
+            assertEquals(3, attempt.retryCount());
+            assertEquals(State.PENDING, attempt.state(), "an alarm never changes the state");
+            assertFalse(store.recordError(new AttemptKey(id, 9), "STUCK"), "no such attempt");
         }
     }
 
@@ -334,13 +360,27 @@ class JdbcCheckoutAttemptStoreTest {
 
     private static void insertAttempt(TransactionTestSchema schema, String id, int number, String state) throws SQLException {
         schema.update("INSERT INTO checkout_attempt (transaction_id, attempt_number, state, `lines`, item_count, "
-                + "total_amount, created_at, settled_at, next_retry_at) VALUES (?, ?, ?, ?, 1, 0.85, NOW(3), "
-                + (state.equals("PENDING") ? "NULL" : "NOW(3)") + ", NOW(3))", id, number, state, LINES);
+                + "total_amount, created_at, settled_at, next_retry_at, request_event_id) VALUES (?, ?, ?, ?, 1, 0.85, NOW(3), "
+                + (state.equals("PENDING") ? "NULL" : "NOW(3)") + ", NOW(3), ?)", id, number, state, LINES,
+                UUID.randomUUID().toString());
     }
 
     private static Begin begin(String id, int attemptNumber, int itemCount, Instant createdAt) {
-        return new Begin(new AttemptKey(id, attemptNumber), itemCount, new BigDecimal("2.55"), LINES, createdAt,
-                createdAt.plus(BUDGET));
+        AttemptKey key = new AttemptKey(id, attemptNumber);
+        return new Begin(key, itemCount, new BigDecimal("2.55"), LINES, createdAt, createdAt.plus(REPUBLISH_AFTER),
+                request(key, createdAt));
+    }
+
+    /** Attempt 1 of a one-unit basket whose first republish is due at {@code due}. */
+    private static Begin beginDue(String id, Instant due) {
+        AttemptKey key = new AttemptKey(id, 1);
+        Instant createdAt = due.minus(REPUBLISH_AFTER);
+        return new Begin(key, 1, new BigDecimal("0.85"), LINES, createdAt, due, request(key, createdAt));
+    }
+
+    private static OutboxRow request(AttemptKey key, Instant createdAt) {
+        return EVENTS.request(key, List.of(new CheckoutEvents.Line("SKU-000001", 2), new CheckoutEvents.Line("SKU-000002", 1)),
+                createdAt);
     }
 
     /** An OPEN transaction with {@code units} accepted scans of SKU-000001 at 0.85. */

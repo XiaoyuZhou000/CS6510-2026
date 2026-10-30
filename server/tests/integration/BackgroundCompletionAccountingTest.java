@@ -28,11 +28,13 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Background-completion accounting (FR-054, R9; contracts/checkout-saga.md): a checkout whose client got
- * 500 and that recovery completed later counts as one background completion, and one completed by
- * recovery after Transaction halted before answering counts as a completion without a recorded response.
- * {@code db/validate-invariants.ps1} prints both counts. The deployment uses the baseline catalog size and
- * stock, so the script's cross-service reconciliation applies unchanged.
+ * Background-completion accounting (FR-061, FR-066, R9; 006 contracts/checkout-saga.md): a checkout whose
+ * client got 500 and that its outcome event completed later counts as one background completion, and one
+ * completed by the redelivered outcome after Transaction halted before answering counts as a completion
+ * without a recorded response. {@code db/validate-invariants.ps1} prints both counts. The deployment uses the
+ * baseline catalog size and stock, so the script's cross-service reconciliation applies unchanged. Under races
+ * between the outcome handler's claim and the request's timeout claim, exactly one of them writes
+ * {@code client_outcome} (D7).
  */
 class BackgroundCompletionAccountingTest {
     private static final int PRODUCTS = 2000;
@@ -46,7 +48,7 @@ class BackgroundCompletionAccountingTest {
             String a = InventoryTestSchema.sku(1);
             String b = InventoryTestSchema.sku(2);
 
-            // Inventory is delayed past the 8 s budget: its stock row is locked, so every ApplyCheckout waits.
+            // Inventory is delayed past the 8 s budget: its stock row is locked, so its apply waits.
             String late = http.start("late-station");
             assertEquals(200, http.scan(late, a).statusCode());
             ConnectionPool lockPool = deployment.inventorySchema.newPool("test.stock-lock", 1, 1, null);
@@ -71,12 +73,13 @@ class BackgroundCompletionAccountingTest {
             }
             awaitSettled(deployment, late);
             TransactionTestSchema.AttemptRow background = deployment.transactionSchema.attempts(late).get(0);
-            assertEquals("COMPLETED", background.state(), "recovery completed it after the client's 500");
+            assertEquals("COMPLETED", background.state(), "its outcome completed it after the client's 500");
             assertEquals("PENDING_ERROR", background.clientOutcome(), "one background completion");
             assertEquals(STOCK - 1, deployment.inventorySchema.stock(a));
 
-            // Transaction halts after Inventory's reply, before T3 and before answering.
-            deployment.startTransaction(FaultInjection.spec().halt("checkout.afterApplyReply").build());
+            // Transaction halts on consuming Inventory's outcome, before T3 and before answering; the outcome
+            // is redelivered to the restarted process, which has no responder for it.
+            deployment.startTransaction(FaultInjection.haltAt("checkout.outcome.beforeCommit"));
             String unanswered = http.start("halt-station");
             assertEquals(200, http.scan(unanswered, b).statusCode());
             assertThrows(IOException.class, () -> http.complete(unanswered), "the halted process never answers");
@@ -97,6 +100,58 @@ class BackgroundCompletionAccountingTest {
             assertTrue(report.contains("background_completions=1"), report);
             assertTrue(report.contains("completions_without_response=1"), report);
             assertTrue(report.contains("PASS"), report);
+        }
+    }
+
+    @Test
+    void underRacesBetweenTheHandlersClaimAndTheTimeoutClaimExactlyOneWritesTheClientOutcome() throws Exception {
+        try (support.TransactionTestSchema schema = support.TransactionTestSchema.create()) {
+            schema.seedReplica(5, java.util.UUID.randomUUID().toString());
+            Duration budget = Duration.ofMillis(200);
+            support.InProcessTransaction service = support.InProcessTransaction.over(schema).pool(4, 16)
+                    .settings(transaction.CheckoutOrchestrator.Settings.defaults().withResponseBudget(budget)).build();
+            java.util.Random random = new java.util.Random(87);
+            try (support.FakeInventoryReactor inventory = service.reactor().otherwise(call ->
+                    support.FakeInventoryReactor.Reply.deduct().delayed(Duration.ofMillis(150 + random.nextInt(100))))
+                    .start()) {
+                java.util.Map<String, String> answers = new java.util.concurrent.ConcurrentHashMap<>();
+                try (var stations = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+                    java.util.List<java.util.concurrent.Future<?>> work = new java.util.ArrayList<>();
+                    for (int i = 0; i < 60; i++) {
+                        String id = service.start();
+                        service.scan(id, InventoryTestSchema.sku(1 + i % 5));
+                        work.add(stations.submit(() -> {
+                            try {
+                                service.complete(id);
+                                answers.put(id, "200");
+                            } catch (transaction.CheckoutPendingFailure pending) {
+                                answers.put(id, "500");
+                            }
+                        }));
+                    }
+                    for (var done : work) done.get(60, TimeUnit.SECONDS);
+                }
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+                while (schema.pendingAttemptCount() > 0) {
+                    assertTrue(System.nanoTime() < deadline, "every delayed outcome settles its attempt");
+                    Thread.sleep(50);
+                }
+                int success = 0;
+                int background = 0;
+                for (var answer : answers.entrySet()) {
+                    TransactionTestSchema.AttemptRow attempt = schema.attempts(answer.getKey()).get(0);
+                    assertEquals("COMPLETED", attempt.state());
+                    String expected = answer.getValue().equals("200") ? "SUCCESS" : "PENDING_ERROR";
+                    assertEquals(expected, attempt.clientOutcome(),
+                            answer.getKey() + ": the outcome recorded is the one the client got");
+                    if (expected.equals("SUCCESS")) success++; else background++;
+                }
+                assertEquals(60, success + background);
+                assertEquals(background, schema.queryLong("SELECT COUNT(*) FROM checkout_attempt "
+                        + "WHERE state = 'COMPLETED' AND client_outcome = 'PENDING_ERROR'"), "background completions, exactly");
+                assertEquals(0, schema.queryLong("SELECT COUNT(*) FROM checkout_attempt "
+                        + "WHERE state = 'COMPLETED' AND client_outcome = 'NONE'"), "every answered completion has its outcome");
+            }
         }
     }
 

@@ -3,6 +3,7 @@ package support;
 import faults.FaultHooks;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
 
@@ -16,7 +17,21 @@ import java.util.StringJoiner;
  * }</pre>
  */
 public final class FaultInjection {
+    /**
+     * The checkout Saga's hooks of 006 contracts/checkout-saga.md "Test-only fault hooks", in Saga order. The
+     * {@code outbox.*} and {@code consumer.*} hooks fire in every producing or consuming service; which
+     * service halts depends on the process the specification is armed in.
+     */
+    public static final List<String> CHECKOUT_HOOKS = List.of("checkout.afterBegin", "outbox.beforeSend",
+            "outbox.afterConfirm", "outbox.beforeMark", "inventory.apply.afterCommit", "consumer.afterHandlerCommit",
+            "checkout.outcome.beforeCommit", "checkout.afterRecordCompletion", "inventory.restore.afterCommit");
+
     private final Map<String, String> actions = new LinkedHashMap<>();
+
+    /** A specification that halts the JVM at {@code hook}, for a service started with it. */
+    public static String haltAt(String hook) {
+        return spec().halt(hook).build();
+    }
 
     private FaultInjection() { }
 
