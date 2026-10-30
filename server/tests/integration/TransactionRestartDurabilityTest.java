@@ -3,7 +3,6 @@ package integration;
 import api.json.Json;
 import org.junit.jupiter.api.Test;
 import support.CheckoutDeployment;
-import support.GrpcTestSupport;
 import support.InventoryTestSchema;
 import support.ServiceHttp;
 import support.ServiceProcesses;
@@ -29,10 +28,10 @@ class TransactionRestartDurabilityTest {
              InventoryTestSchema stock = InventoryTestSchema.create()) {
             stock.seed(2, 10);
             db.seedReplica(2, UUID.randomUUID().toString());
-            int port = GrpcTestSupport.freePort();
+            int port = ServiceProcesses.freePort();
             ServiceHttp http = new ServiceHttp(port);
             try (ServiceProcesses.ServiceProcess service = ServiceProcesses.service("transaction").database(db).httpPort(port)
-                    .grpcTarget("inventory", GrpcTestSupport.freePort()).start()) {
+                    .start()) {
                 service.awaitHttp("/transactions/missing", 404, Duration.ofSeconds(30));
                 String id = http.start("failure-station");
 

@@ -5,7 +5,10 @@ import support.CountingConnections;
 import support.FaultingConnections;
 import support.FaultingConnections.CommitFault;
 import support.InventoryTestSchema;
+import support.TestEvents;
 import support.TransactionTestSchema;
+import transaction.CatalogEventHandler;
+import transaction.ProductCatalogReplica;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -14,7 +17,10 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** The durable product replica: one-commit replacement and a usable-or-empty load (R4). */
+/**
+ * The durable product replica: one-commit replacement, from a catalog snapshot when fed by events (006 D9),
+ * and a usable-or-empty load (R4).
+ */
 class JdbcProductReplicaStoreTest {
 
     @Test
@@ -39,6 +45,27 @@ class JdbcProductReplicaStoreTest {
             assertEquals(version, schema.queryString("SELECT catalog_version FROM product_replica_meta WHERE meta_key = 1"));
             assertEquals(1200, schema.queryLong("SELECT product_count FROM product_replica_meta WHERE meta_key = 1"));
             assertNotNull(schema.queryString("SELECT refreshed_at FROM product_replica_meta WHERE meta_key = 1"));
+
+            // The same one-commit replacement, fed by a complete catalog snapshot (006 D9); memory swaps after it.
+            ProductCatalogReplica replica = new ProductCatalogReplica();
+            CatalogEventHandler handler = new CatalogEventHandler(store, replica);
+            assertTrue(handler.loadDurable());
+            String next = UUID.randomUUID().toString();
+            for (int n = 1; n <= 1200; n++) {
+                handler.handle(TestEvents.item(InventoryTestSchema.sku(n), "v2 Item " + n,
+                        InventoryTestSchema.price(n).toPlainString(), next));
+            }
+            try (CountingConnections.Scope scope = counting.scope()) {
+                handler.handle(TestEvents.snapshot(next, 1200));
+                assertEquals(1, scope.counts().commits(), "the snapshot is installed in one local transaction");
+                assertEquals(1, scope.counts().deletes());
+                assertEquals(1, scope.counts().updates());
+            }
+            assertEquals(next, replica.version());
+            assertEquals(next, schema.queryString("SELECT catalog_version FROM product_replica_meta WHERE meta_key = 1"));
+            assertEquals(1200, schema.queryLong("SELECT COUNT(*) FROM product_replica WHERE catalog_version = ?", next));
+            assertEquals("v2 Item 7", schema.queryString("SELECT name FROM product_replica WHERE sku = ?",
+                    InventoryTestSchema.sku(7)));
         }
     }
 

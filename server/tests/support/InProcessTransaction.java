@@ -17,7 +17,9 @@ import events.OutboxSignal;
 import events.RecordSender;
 import events.RecordStream;
 import events.TopicNames;
+import messaging.CatalogConsumer;
 import messaging.CheckoutOutcomeConsumer;
+import transaction.CatalogEventHandler;
 import transaction.CheckoutEvents;
 import transaction.CheckoutOrchestrator;
 import transaction.CheckoutOutcomeHandler;
@@ -44,6 +46,8 @@ import java.util.function.UnaryOperator;
  * One in-process Transaction Service over a {@link TransactionTestSchema}, wired like
  * {@code TransactionMain} but without HTTP, for the performance, cache, and recovery tests (R19, R22; 006
  * T059). The schema's product replica must be seeded first; it is loaded from the durable store, as at startup.
+ * With {@link Builder#catalogFromEvents()} it may start empty instead, and a catalog consumer keeps it current
+ * from the catalog topic on the same transport, as in {@code TransactionMain} (D9).
  *
  * <p>Checkout runs over events: the orchestrator records {@code CheckoutRequested} in this schema's
  * {@code outbox_event}, an {@link OutboxDispatcher} sends it, and the {@code transaction-checkout-outcome}
@@ -74,6 +78,9 @@ public final class InProcessTransaction implements AutoCloseable {
     public final ConsumerLoop outcomeConsumer;
     public final TransactionService service;
     public final CheckoutRecoveryWorker recovery;
+    /** The catalog handler and its consumer; null unless built {@link Builder#catalogFromEvents()}. */
+    public final CatalogEventHandler catalogHandler;
+    public final ConsumerLoop catalogConsumer;
     private final RecordSender sender;
     private final boolean ownsSender;
     private boolean messagingStarted;
@@ -87,17 +94,24 @@ public final class InProcessTransaction implements AutoCloseable {
         scans = builder.wrapScans.apply(new JdbcScanStore(pool));
         attempts = builder.wrapAttempts.apply(new JdbcCheckoutAttemptStore(pool));
         replica = new ProductCatalogReplica();
-        ProductReplicaStore.Replica stored = new JdbcProductReplicaStore(pool).load()
-                .orElseThrow(() -> new IllegalStateException("Seed the product replica before building the service"));
-        replica.install(stored.catalogVersion(), stored.products().stream()
-                .map(product -> new ProductCatalogReplica.Product(product.sku(), product.name(), product.price()))
-                .toList());
+        if (builder.catalogFromEvents) {
+            catalogHandler = new CatalogEventHandler(new JdbcProductReplicaStore(pool), replica);
+            catalogHandler.loadDurable();
+        } else {
+            catalogHandler = null;
+            ProductReplicaStore.Replica stored = new JdbcProductReplicaStore(pool).load()
+                    .orElseThrow(() -> new IllegalStateException("Seed the product replica before building the service"));
+            replica.install(stored.catalogVersion(), stored.products().stream()
+                    .map(product -> new ProductCatalogReplica.Product(product.sku(), product.name(), product.price()))
+                    .toList());
+        }
         locks = builder.stripes == 0 ? new TransactionLocks() : new TransactionLocks(builder.stripes);
         cache = new TransactionStateCache(locks, builder.cacheEntries);
         registry = new SettlementRegistry(locks);
         schedule = new RecoverySchedule();
 
         Supplier<RecordStream> streams;
+        Supplier<RecordStream> catalogStreams;
         if (builder.live) {
             names = builder.names != null ? builder.names : KafkaTestSupport.runTopics();
             KafkaTestSupport.createCatalogTopics(names);
@@ -106,12 +120,14 @@ public final class InProcessTransaction implements AutoCloseable {
             ownsSender = true;
             streams = KafkaTestSupport.streams("test-transaction-outcome",
                     names.group(TopicNames.TRANSACTION_CHECKOUT_OUTCOME_GROUP));
+            catalogStreams = KafkaTestSupport.streams("test-transaction-catalog", null);
         } else {
             names = builder.names != null ? builder.names : TopicNames.unprefixed();
             bus = builder.bus != null ? builder.bus : InMemoryEventBus.withCatalogTopics(names, builder.seed);
             sender = bus;
             ownsSender = false;
             streams = bus::stream;
+            catalogStreams = bus::stream;
         }
         outbox = new JdbcOutboxStore(pool, "transaction.outbox");
         deadLetters = new JdbcDeadLetterStore(pool, "transaction.deadLetter");
@@ -122,6 +138,8 @@ public final class InProcessTransaction implements AutoCloseable {
                 schedule, builder.settings, builder.timing);
         outcomes = new CheckoutOutcomeHandler(attempts, cache, registry, builder.timing);
         outcomeConsumer = CheckoutOutcomeConsumer.create(names, streams, outcomes, deadLetters, builder.consumerSettings);
+        catalogConsumer = catalogHandler == null ? null : CatalogConsumer.create(names, catalogStreams, catalogHandler,
+                deadLetters, ConsumerLoop.Settings.defaults());
         service = new TransactionService(transactions, scans, checkout, replica, locks, cache);
         recovery = new CheckoutRecoveryWorker(attempts, signal, cache, registry, schedule, builder.recoverySettings,
                 Clock.systemUTC());
@@ -129,10 +147,11 @@ public final class InProcessTransaction implements AutoCloseable {
         if (builder.startMessaging) startMessaging();
     }
 
-    /** Starts the dispatcher and the outcome consumer, as {@code TransactionMain} does. */
+    /** Starts the dispatcher, the catalog consumer if any, and the outcome consumer, as {@code TransactionMain} does. */
     public synchronized InProcessTransaction startMessaging() {
         if (!messagingStarted) {
             dispatcher.start();
+            if (catalogConsumer != null) catalogConsumer.start();
             outcomeConsumer.start();
             messagingStarted = true;
         }
@@ -158,6 +177,7 @@ public final class InProcessTransaction implements AutoCloseable {
         recovery.close();
         if (messagingStarted) {
             outcomeConsumer.stop(Duration.ofSeconds(5));
+            if (catalogConsumer != null) catalogConsumer.stop(Duration.ofSeconds(5));
             dispatcher.stop(Duration.ofSeconds(5));
             messagingStarted = false;
         }
@@ -208,6 +228,7 @@ public final class InProcessTransaction implements AutoCloseable {
         private boolean live;
         private boolean startMessaging = true;
         private OutboxSignal signal;
+        private boolean catalogFromEvents;
 
         private Builder(TransactionTestSchema schema) {
             this.schema = schema;
@@ -243,6 +264,11 @@ public final class InProcessTransaction implements AutoCloseable {
         }
         /** Leaves the dispatcher and consumer stopped until {@link InProcessTransaction#startMessaging()}. */
         public Builder messagingStopped() { this.startMessaging = false; return this; }
+        /**
+         * Loads the durable replica if there is one, without requiring it, and keeps it current with a catalog
+         * consumer on this instance's transport, which replays the catalog topic from offset 0 (D9).
+         */
+        public Builder catalogFromEvents() { this.catalogFromEvents = true; return this; }
         /** Replaces the dispatcher as the orchestrator's and the worker's signal, for unit-level checks. */
         public Builder signal(OutboxSignal replacement) { this.signal = replacement; return this; }
 

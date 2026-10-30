@@ -1,8 +1,6 @@
 package support;
 
 import events.TopicNames;
-import io.grpc.ManagedChannel;
-import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -10,15 +8,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 /**
  * An Inventory process and a Transaction process, each over its own disposable schema and user (R3),
  * started from the built artifacts for process-level Saga tests. They exchange checkout events through the
  * live test broker under a per-deployment topic prefix ({@link #names}), whose topics the deployment
- * creates; without a reachable broker the calling test is skipped, or fails under {@code STRICT_LIVE_GATES=1}. Transaction's product replica is seeded
- * with Inventory's catalog and version, so no refresh is needed before the first Scan. Either service can
- * be started with fault hooks armed (see {@link FaultInjection}) and restarted without them.
+ * creates; without a reachable broker the calling test is skipped, or fails under {@code STRICT_LIVE_GATES=1}.
+ * Transaction's product replica is seeded with Inventory's catalog and version, so Scan works before the
+ * catalog topic is read, and the catalog Inventory publishes at every startup is a no-op for it (D9). Either
+ * service can be started with fault hooks armed (see {@link FaultInjection}) and restarted without them.
  *
  * <p>{@link #withAnalytics} adds an Analytics schema and ports; the Analytics process starts only on
  * {@link #startAnalytics}, so a test can scan while it is down. Transaction's relay always targets this
@@ -32,7 +30,6 @@ public final class CheckoutDeployment implements AutoCloseable {
     /** Null unless the deployment was started {@link #withAnalytics}. */
     public final AnalyticsTestSchema analyticsSchema;
     public final int inventoryHttpPort;
-    public final int inventoryGrpcPort;
     public final int transactionHttpPort;
     public final int analyticsHttpPort;
     public final int analyticsGrpcPort;
@@ -46,7 +43,6 @@ public final class CheckoutDeployment implements AutoCloseable {
     private ServiceProcesses.ServiceProcess inventory;
     private ServiceProcesses.ServiceProcess transaction;
     private ServiceProcesses.ServiceProcess analytics;
-    private ManagedChannel channel;
 
     private CheckoutDeployment(int products, int stock, Map<String, String> transactionEnvironment,
                                String transactionFaults, String inventoryFaults, boolean withAnalytics) throws Exception {
@@ -67,11 +63,10 @@ public final class CheckoutDeployment implements AutoCloseable {
         }
         inventorySchema = inventories;
         analyticsSchema = analyticsSchemaCreated;
-        inventoryHttpPort = GrpcTestSupport.freePort();
-        inventoryGrpcPort = GrpcTestSupport.freePort();
-        transactionHttpPort = GrpcTestSupport.freePort();
-        analyticsHttpPort = GrpcTestSupport.freePort();
-        analyticsGrpcPort = GrpcTestSupport.freePort();
+        inventoryHttpPort = ServiceProcesses.freePort();
+        transactionHttpPort = ServiceProcesses.freePort();
+        analyticsHttpPort = ServiceProcesses.freePort();
+        analyticsGrpcPort = ServiceProcesses.freePort();
         transactionHttp = new ServiceHttp(transactionHttpPort);
         inventoryHttp = new ServiceHttp(inventoryHttpPort);
         analyticsHttp = new ServiceHttp(analyticsHttpPort);
@@ -89,7 +84,7 @@ public final class CheckoutDeployment implements AutoCloseable {
         return new CheckoutDeployment(products, stock, Map.of(), null, null, false);
     }
 
-    /** With extra Transaction variables, for example {@code CATALOG_REFRESH_SECONDS}. */
+    /** With extra Transaction variables, for example {@code CHECKOUT_CONSUMER_THREADS}. */
     public static CheckoutDeployment start(int products, int stock, Map<String, String> transactionEnvironment)
             throws Exception {
         return new CheckoutDeployment(products, stock, transactionEnvironment, null, null, false);
@@ -119,9 +114,8 @@ public final class CheckoutDeployment implements AutoCloseable {
         Set<String> previous = KafkaTestSupport.memberIds(names.group(TopicNames.INVENTORY_CHECKOUT_GROUP));
         closeQuietly(inventory);
         inventory = ServiceProcesses.service("inventory").database(inventorySchema).httpPort(inventoryHttpPort)
-                .grpcPort(inventoryGrpcPort).kafka(names).faults(faults).start();
+                .kafka(names).faults(faults).start();
         inventory.awaitHttp("/items", 200, Duration.ofSeconds(60));
-        inventory.awaitPort(inventoryGrpcPort, Duration.ofSeconds(30));
         KafkaTestSupport.awaitGroupAssigned(names.group(TopicNames.INVENTORY_CHECKOUT_GROUP), names.checkout(),
                 TopicNames.Topic.CHECKOUT.partitions(), CONSUMER_THREADS, previous, Duration.ofSeconds(60));
     }
@@ -201,7 +195,7 @@ public final class CheckoutDeployment implements AutoCloseable {
 
     private ServiceProcesses.Builder transactionBuilder(int httpPort) {
         ServiceProcesses.Builder builder = ServiceProcesses.service("transaction").database(transactionSchema)
-                .httpPort(httpPort).grpcTarget("inventory", inventoryGrpcPort).grpcTarget("analytics", analyticsGrpcPort)
+                .httpPort(httpPort).grpcTarget("analytics", analyticsGrpcPort)
                 .kafka(names);
         transactionEnvironment.forEach(builder::env);
         return builder;
@@ -266,14 +260,6 @@ public final class CheckoutDeployment implements AutoCloseable {
         return analytics;
     }
 
-    /** A channel to Inventory's gRPC port, for the catalog and the reserved restoration until T111. */
-    public synchronized ManagedChannel inventoryChannel() {
-        if (channel == null) {
-            channel = NettyChannelBuilder.forAddress("127.0.0.1", inventoryGrpcPort).usePlaintext().build();
-        }
-        return channel;
-    }
-
     /**
      * Waits until Transaction's outbox is empty and Analytics stores exactly the identities Transaction
      * accepted, then asserts that positions are contiguous from 1.
@@ -315,7 +301,6 @@ public final class CheckoutDeployment implements AutoCloseable {
     @Override
     public void close() throws Exception {
         try (transactionSchema; inventorySchema; AutoCloseable analyticsData = analyticsSchema) {
-            if (channel != null) channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
             for (ServiceProcesses.ServiceProcess extra : extraTransactions) extra.close();
             if (transaction != null) transaction.close();
             if (analytics != null) analytics.close();

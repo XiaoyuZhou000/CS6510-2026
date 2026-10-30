@@ -8,8 +8,9 @@
     does not exist yet is reported as absent, not as an error. With -Json one JSON document is
     written to stdout for the benchmark harness:
       { reachable, topics: [{ name, exists, partitions, endOffsets: [..], totalEndOffset }],
-        groups: [{ group, state, lag, uncommitted,
-                   partitions: [{ topic, partition, currentOffset, endOffset, lag }] }] }
+        groups: [{ group, state, lag, uncommitted, assigned,
+                   partitions: [{ topic, partition, currentOffset, endOffset, lag, consumerId }] }] }
+    assigned counts the partitions a live member holds; consumerId is null for the others.
     An unreachable broker gives reachable=false and exit code 1.
 
 .EXAMPLE
@@ -51,9 +52,9 @@ if ($reachable) {
         $lag = $lags[$group]
         $partitions = @($lag.Partitions | ForEach-Object {
             [pscustomobject]@{ topic = $_.Topic; partition = $_.Partition; currentOffset = $_.CurrentOffset
-                endOffset = $_.EndOffset; lag = $_.Lag } })
+                endOffset = $_.EndOffset; lag = $_.Lag; consumerId = $_.ConsumerId } })
         $groups += [pscustomobject]@{ group = $group; state = $lag.State; lag = $lag.Lag; uncommitted = $lag.Uncommitted
-            partitions = $partitions }
+            assigned = $lag.Assigned; partitions = $partitions }
     }
 }
 

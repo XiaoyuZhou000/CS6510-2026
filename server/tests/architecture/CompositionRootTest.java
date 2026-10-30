@@ -86,6 +86,12 @@ class CompositionRootTest {
             if (domain.equals("transaction")) {
                 assertFalse(source.contains("GrpcServers"), main + " is a gRPC client only");
                 assertFalse(source.contains("ServerBuilder"), main + " is a gRPC client only");
+            } else if (domain.equals("inventory")) {
+                // The catalog moved to events (006 T111): Inventory serves no gRPC and calls no peer.
+                assertFalse(source.contains("GrpcServers"), main + " serves no gRPC");
+                assertFalse(source.contains("ServerBuilder"), main + " serves no gRPC");
+                assertFalse(source.contains("rpc."), main + " holds no rpc types");
+                assertTrue(source.contains("new CatalogPublisher("), main + " publishes its catalog through the outbox");
             } else {
                 assertTrue(source.contains("GrpcServers.start("), main + " serves gRPC through GrpcServers");
             }

@@ -1,8 +1,9 @@
 package performance;
 
+import events.TopicNames;
 import org.junit.jupiter.api.Test;
-import support.GrpcTestSupport;
 import support.InventoryTestSchema;
+import support.KafkaTestSupport;
 import support.ServiceHttp;
 import support.ServiceProcesses;
 import support.TestSchema;
@@ -19,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * Every Transaction cache rebuilds after a restart with Inventory down: the product snapshot from
  * product_replica, and the transaction state lazily from transaction plus accepted_scan (R4, R19, R22).
+ * The replica first arrives through Inventory's catalog events on the live broker (006 D9).
  */
 class CacheRebuildAfterRestartTest {
 
@@ -27,16 +29,18 @@ class CacheRebuildAfterRestartTest {
         try (InventoryTestSchema inventorySchema = InventoryTestSchema.create(TestSchema.Options.defaults().withOwnUser());
              TransactionTestSchema transactionSchema = TransactionTestSchema.create(TestSchema.Options.defaults().withOwnUser())) {
             inventorySchema.seed(20, 10_000);
-            int grpcPort = GrpcTestSupport.freePort();
-            int httpPort = GrpcTestSupport.freePort();
+            KafkaTestSupport.requireBroker();
+            TopicNames names = KafkaTestSupport.runTopics();
+            KafkaTestSupport.createCatalogTopics(names);
+            int httpPort = ServiceProcesses.freePort();
             ServiceHttp http = new ServiceHttp(httpPort);
 
             String id;
             Map<String, Object> before;
             try (ServiceProcesses.ServiceProcess inventory = ServiceProcesses.service("inventory").database(inventorySchema)
-                    .httpPort(GrpcTestSupport.freePort()).grpcPort(grpcPort).start()) {
-                inventory.awaitPort(grpcPort, Duration.ofSeconds(30));
-                ServiceProcesses.ServiceProcess transaction = startTransaction(transactionSchema, httpPort, grpcPort);
+                    .httpPort(ServiceProcesses.freePort()).kafka(names).start()) {
+                inventory.awaitHttp("/items", 200, Duration.ofSeconds(60));
+                ServiceProcesses.ServiceProcess transaction = startTransaction(transactionSchema, httpPort, names);
                 try {
                     awaitReplica(transactionSchema, transaction);
                     id = http.start("rebuild-station");
@@ -49,13 +53,15 @@ class CacheRebuildAfterRestartTest {
                 }
             }
 
-            // Inventory is now down. A later refresh had changed two prices in the durable replica.
+            // Inventory is now down. A later catalog version had changed two prices in the durable replica.
             transactionSchema.update("UPDATE product_replica SET price = 9.99 WHERE sku IN ('SKU-000001', 'SKU-000004')");
             transactionSchema.update("UPDATE product_replica SET catalog_version = ?", UUID.randomUUID().toString());
             transactionSchema.update("UPDATE product_replica_meta SET catalog_version = "
                     + "(SELECT catalog_version FROM product_replica LIMIT 1) WHERE meta_key = 1");
 
-            try (ServiceProcesses.ServiceProcess restarted = startTransaction(transactionSchema, httpPort, grpcPort)) {
+            // Restarted under a fresh topic prefix: no catalog event can reach it, so only the durable replica serves.
+            try (ServiceProcesses.ServiceProcess restarted = startTransaction(transactionSchema, httpPort,
+                    KafkaTestSupport.runTopics())) {
                 restarted.awaitHttp("/transactions/missing", 404, Duration.ofSeconds(30));
                 Map<String, Object> after = ServiceHttp.json(http.get("/transactions/" + id));
                 assertEquals(before, after, "Lookup sees the same durable basket");
@@ -74,10 +80,9 @@ class CacheRebuildAfterRestartTest {
         }
     }
 
-    static ServiceProcesses.ServiceProcess startTransaction(TransactionTestSchema schema, int httpPort, int inventoryGrpcPort)
+    static ServiceProcesses.ServiceProcess startTransaction(TransactionTestSchema schema, int httpPort, TopicNames names)
             throws Exception {
-        return ServiceProcesses.service("transaction").database(schema).httpPort(httpPort)
-                .grpcTarget("inventory", inventoryGrpcPort).start();
+        return ServiceProcesses.service("transaction").database(schema).httpPort(httpPort).kafka(names).start();
     }
 
     /** Waits until the Transaction process has made Inventory's catalog durable and can price a Scan. */

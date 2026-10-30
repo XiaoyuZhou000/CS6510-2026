@@ -7,20 +7,19 @@ import support.CountingConnections;
 import support.FaultingConnections;
 import support.FaultingConnections.CommitFault;
 import support.InProcessTransaction;
+import support.InventoryTestSchema;
 import support.StatementBudgets;
+import support.TestEvents;
 import support.TransactionTestSchema;
-import transaction.CatalogReplicaRefresher;
-import transaction.InventoryGateway;
+import transaction.CatalogEventHandler;
 import transaction.ProductCatalogReplica;
 import transaction.TransactionOperations;
 import transaction.TransactionService;
 
-import java.time.Duration;
 import java.util.Arrays;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -84,11 +83,10 @@ class ScanStatementBudgetTest {
     @Test
     void theGuardedUpdateAndTheEventShareOneCommitAndStartAndScanMakeNoRemoteCall() throws Exception {
         CountingConnections counting = new CountingConnections();
-        FailingInventory inventory = new FailingInventory();
         try (TransactionTestSchema schema = seeded()) {
             InProcessTransaction transaction = InProcessTransaction.over(schema).decorator(counting::wrap).build();
-            new CatalogReplicaRefresher(inventory, new JdbcProductReplicaStore(transaction.pool), new ProductCatalogReplica(),
-                    Duration.ofSeconds(30)).loadDurable();
+            assertTrue(new CatalogEventHandler(new JdbcProductReplicaStore(transaction.pool), new ProductCatalogReplica())
+                    .loadDurable(), "the durable replica the catalog events left is what Scan prices from");
             String id;
             try (CountingConnections.Scope scope = counting.scope()) {
                 id = transaction.start();
@@ -104,9 +102,11 @@ class ScanStatementBudgetTest {
                     assertEquals(0, scope.counts().rollbacks());
                 }
             }
-            assertEquals(0, inventory.calls.get(), "Start and Scan never call Inventory");
+            assertThrows(ClassNotFoundException.class, () -> Class.forName("transaction.InventoryGateway"),
+                    "Transaction has no synchronous route to Inventory at all");
             assertTrue(Arrays.stream(TransactionService.class.getConstructors()[0].getParameterTypes())
-                    .noneMatch(InventoryGateway.class::isAssignableFrom), "the Scan path has no route to Inventory");
+                    .noneMatch(type -> type.getPackageName().equals("messaging") || type.getPackageName().equals("rpc")
+                            || type.getSimpleName().contains("Inventory")), "the Scan path has no route to Inventory");
         }
     }
 
@@ -145,26 +145,17 @@ class ScanStatementBudgetTest {
         }
     }
 
+    /** A schema whose replica holds 20 products, installed from a complete catalog snapshot as at runtime (D9). */
     private static TransactionTestSchema seeded() throws Exception {
         TransactionTestSchema schema = TransactionTestSchema.create();
-        schema.seedReplica(20, UUID.randomUUID().toString());
+        String version = UUID.randomUUID().toString();
+        CatalogEventHandler catalog = new CatalogEventHandler(new JdbcProductReplicaStore(schema.pool()),
+                new ProductCatalogReplica());
+        for (int n = 1; n <= 20; n++) {
+            catalog.handle(TestEvents.item(InventoryTestSchema.sku(n), "Item " + n, InventoryTestSchema.price(n).toPlainString(),
+                    version));
+        }
+        catalog.handle(TestEvents.snapshot(version, 20));
         return schema;
-    }
-
-    /** An Inventory that fails the test if anything calls it. */
-    private static final class FailingInventory implements InventoryGateway {
-        final AtomicInteger calls = new AtomicInteger();
-
-        @Override
-        public CatalogVersion catalogVersion() {
-            calls.incrementAndGet();
-            throw new AssertionError("Inventory was called");
-        }
-
-        @Override
-        public Catalog catalog() {
-            calls.incrementAndGet();
-            throw new AssertionError("Inventory was called");
-        }
     }
 }

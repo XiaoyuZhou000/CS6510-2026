@@ -265,6 +265,31 @@ class OutboxDispatcherTest {
     }
 
     @Test
+    void theSagaFaultHooksApplyOnlyToRowsOfAnAggregate() throws Exception {
+        InMemoryOutboxStore store = new InMemoryOutboxStore();
+        store.add(new OutboxRow("item", CATALOG, "SKU-1", "CatalogItemPublished", null,
+                "envelope-item".getBytes(StandardCharsets.UTF_8), Instant.now()));
+        store.add(row("request", CHECKOUT, "tx-1", Instant.now()));
+        ScriptedSender sender = new ScriptedSender();
+        OutboxDispatcher dispatcher = start(store, Map.of(CATALOG, sender, CHECKOUT, sender), quietSweep());
+        System.setProperty(faults.FaultHooks.PROPERTY, "outbox.beforeSend:delay:400");
+        try {
+            long started = System.nanoTime();
+            dispatcher.signal(List.of("item"));
+            await(() -> sender.sent.size() == 1);
+            assertTrue(System.nanoTime() - started < TimeUnit.MILLISECONDS.toNanos(300),
+                    "a catalog row has no aggregate, so an armed Saga hook never fires for it at Inventory startup");
+            started = System.nanoTime();
+            dispatcher.signal(List.of("request"));
+            await(() -> sender.sent.size() == 2);
+            assertTrue(System.nanoTime() - started >= TimeUnit.MILLISECONDS.toNanos(400),
+                    "a checkout row still meets outbox.beforeSend");
+        } finally {
+            System.clearProperty(faults.FaultHooks.PROPERTY);
+        }
+    }
+
+    @Test
     void withTheImmediatePathOffTheSweepAlonePublishesEveryRow() throws Exception {
         InMemoryOutboxStore store = new InMemoryOutboxStore();
         List<String> ids = new ArrayList<>();

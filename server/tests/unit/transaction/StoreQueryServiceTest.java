@@ -3,11 +3,13 @@ package unit.transaction;
 import database.CatalogMetaStore;
 import database.CatalogStore;
 import database.InventoryStore;
+import events.OutboxRow;
 import org.junit.jupiter.api.Test;
 import inventory.CatalogCache;
 import inventory.StoreQueryService;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -17,8 +19,18 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class StoreQueryServiceTest {
-    /** A fixed catalog version, so the cache never reloads; low stock still reads the store on every call. */
-    private static final CatalogMetaStore META = () -> Optional.of(new CatalogMetaStore.CatalogMeta("v1", 2));
+    /** A fixed catalog version; the cache loads once and low stock still reads the store on every call. */
+    private static final CatalogMetaStore META = new CatalogMetaStore() {
+        @Override
+        public Optional<CatalogMeta> read() {
+            return Optional.of(new CatalogMeta("v1", 2, null));
+        }
+
+        @Override
+        public void publish(List<OutboxRow> outboxRows, Instant publishedAt) {
+            throw new AssertionError("listing items never publishes the catalog");
+        }
+    };
 
     @Test
     void mapsCatalogWithoutChangingStableStoreOrder() {

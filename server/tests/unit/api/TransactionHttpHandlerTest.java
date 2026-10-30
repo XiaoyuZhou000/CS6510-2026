@@ -10,7 +10,6 @@ import database.StoreFailure;
 import org.junit.jupiter.api.Test;
 import transaction.CheckoutPendingFailure;
 import transaction.CheckoutRejectedFailure;
-import transaction.DependencyUnavailableFailure;
 import transaction.ProductCatalogUnavailableFailure;
 import transaction.TransactionFailure;
 import transaction.TransactionOperations;
@@ -118,9 +117,6 @@ class TransactionHttpHandlerTest {
         Map<String, RuntimeException> failures = new LinkedHashMap<>();
         failures.put("pending", new CheckoutPendingFailure("tx-1"));
         failures.put("catalog", new ProductCatalogUnavailableFailure());
-        failures.put("dependency", new DependencyUnavailableFailure(
-                "io.grpc.StatusRuntimeException: UNAVAILABLE: io exception",
-                new IllegalStateException("DEADLINE_EXCEEDED after 2s on selfcheckout.inventory.v1")));
         failures.put("invalid request", new CheckoutRejectedFailure("tx-1", "INVALID_REQUEST", "SKU-000042"));
         failures.put("stock restored", new CheckoutRejectedFailure("tx-1", "STOCK_RESTORED", null));
         failures.put("store", sql);

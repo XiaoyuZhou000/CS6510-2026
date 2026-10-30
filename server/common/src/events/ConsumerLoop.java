@@ -44,12 +44,17 @@ import java.util.function.ToLongFunction;
  *
  * <p>A stream failure ends that stream; the thread opens a new one after a backoff, so a consumer survives
  * broker restarts. Test-only fault hook {@code consumer.afterHandlerCommit}, between the handler's return
- * and the offset commit. Timers {@code consumer.<name>.lag} (record timestamp to handler start) and
+ * and the offset commit, unless {@link Settings#faultHooks} is off. Timers {@code consumer.<name>.lag} (record timestamp to handler start) and
  * {@code consumer.<name>.handler}, counter {@code consumer.<name>.parked}, gauge
  * {@code consumer.<name>.lagRecords} ({@link #lag}).</p>
  */
 public final class ConsumerLoop implements AutoCloseable {
-    public record Settings(int threads, ParkingPolicy policy, Duration pollTimeout, Duration statusInterval) {
+    /**
+     * @param faultHooks whether this loop hits the Saga's test-only hook {@code consumer.afterHandlerCommit}; the
+     *                   catalog reader turns it off, so a halt armed for a checkout consumer never fires at startup
+     */
+    public record Settings(int threads, ParkingPolicy policy, Duration pollTimeout, Duration statusInterval,
+                           boolean faultHooks) {
         public Settings {
             if (threads < 1) throw new IllegalArgumentException("threads must be positive");
             Objects.requireNonNull(policy, "policy");
@@ -62,19 +67,23 @@ public final class ConsumerLoop implements AutoCloseable {
         }
 
         public static Settings defaults() {
-            return new Settings(1, ParkingPolicy.defaults(), Duration.ofMillis(100), Duration.ofSeconds(30));
+            return new Settings(1, ParkingPolicy.defaults(), Duration.ofMillis(100), Duration.ofSeconds(30), true);
         }
 
         public Settings withThreads(int count) {
-            return new Settings(count, policy, pollTimeout, statusInterval);
+            return new Settings(count, policy, pollTimeout, statusInterval, faultHooks);
         }
 
         public Settings withPolicy(ParkingPolicy replacement) {
-            return new Settings(threads, replacement, pollTimeout, statusInterval);
+            return new Settings(threads, replacement, pollTimeout, statusInterval, faultHooks);
         }
 
         public Settings withStatusInterval(Duration interval) {
-            return new Settings(threads, policy, pollTimeout, interval);
+            return new Settings(threads, policy, pollTimeout, interval, faultHooks);
+        }
+
+        public Settings withoutFaultHooks() {
+            return new Settings(threads, policy, pollTimeout, statusInterval, false);
         }
     }
 
@@ -406,7 +415,7 @@ public final class ConsumerLoop implements AutoCloseable {
                 long started = System.nanoTime();
                 handler.handle(event);
                 handlerTimer.record(System.nanoTime() - started);
-                FaultHooks.hit("consumer.afterHandlerCommit");
+                if (settings.faultHooks()) FaultHooks.hit("consumer.afterHandlerCommit");
                 return new Outcome(null, event.eventId(), event.type().typeName(), event.schemaVersion());
             } catch (EventDecodeException failure) {
                 return new Outcome(settings.policy().classify(failure), failure.eventId(), failure.eventType(),

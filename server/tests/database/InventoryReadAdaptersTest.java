@@ -1,17 +1,20 @@
 package database;
 
+import events.OutboxRow;
 import org.junit.jupiter.api.Test;
 import support.InventoryTestSchema;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Inventory's catalog, catalog-meta, and low-stock readers over Inventory's own schema (R8).
- * Migrates the catalog and inventory parts of JdbcStoreAdaptersTest.
+ * Inventory's catalog, catalog-meta, and low-stock readers over Inventory's own schema (R8), and the catalog
+ * publication's outbox rows and {@code catalog_meta.published_at} (006 D9). Migrates the catalog and inventory
+ * parts of JdbcStoreAdaptersTest.
  */
 class InventoryReadAdaptersTest {
 
@@ -40,10 +43,25 @@ class InventoryReadAdaptersTest {
             assertEquals(List.of("A"), inventory.findLowStock(null).stream().map(InventoryStore.LowStockRecord::sku).toList(),
                     "an override never changes the stored thresholds");
 
-            CatalogMetaStore.CatalogMeta meta = new JdbcCatalogMetaStore(schema.pool()).read().orElseThrow();
+            JdbcCatalogMetaStore metaStore = new JdbcCatalogMetaStore(schema.pool());
+            CatalogMetaStore.CatalogMeta meta = metaStore.read().orElseThrow();
             assertEquals(version, meta.catalogVersion());
             assertEquals(2, meta.productCount());
+            assertNull(meta.publishedAt(), "a fresh seed was never published (006 D9)");
+
+            Instant at = Instant.parse("2026-10-30T12:00:00.123Z");
+            metaStore.publish(List.of(outboxRow("e-1", "A"), outboxRow("e-2", "__snapshot__")), at);
+            assertEquals(at, metaStore.read().orElseThrow().publishedAt(), "published_at is set by the publication");
+            assertEquals(2, schema.queryLong("SELECT COUNT(*) FROM outbox_event WHERE published_at IS NULL"));
+            assertEquals("__snapshot__", schema.queryString("SELECT routing_key FROM outbox_event ORDER BY outbox_seq DESC LIMIT 1"),
+                    "rows are recorded in the order given");
+            assertEquals(version, metaStore.read().orElseThrow().catalogVersion(), "the version is untouched");
         }
+    }
+
+    private static OutboxRow outboxRow(String eventId, String key) {
+        return new OutboxRow(eventId, "selfcheckout.catalog.v1", key, "CatalogItemPublished", null,
+                new byte[] {1, 2, 3}, Instant.parse("2026-10-30T12:00:00.100Z"));
     }
 
     @Test
@@ -86,6 +104,12 @@ class InventoryReadAdaptersTest {
             assertEquals("Failed to read low-stock inventory", inventoryFailure.getMessage());
             assertInstanceOf(SQLException.class, metaFailure.getCause());
             assertEquals("Failed to read catalog version", metaFailure.getMessage());
+
+            StoreFailure publishFailure = assertThrows(StoreFailure.class,
+                    () -> meta.publish(List.of(outboxRow("e-1", "A")), Instant.now()));
+            assertInstanceOf(SQLException.class, publishFailure.getCause());
+            assertEquals(0, schema.queryLong("SELECT COUNT(*) FROM outbox_event"),
+                    "a failed published_at UPDATE rolls the outbox rows back with it");
         }
     }
 }

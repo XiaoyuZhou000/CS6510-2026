@@ -1,8 +1,9 @@
 package integration;
 
+import events.TopicNames;
 import org.junit.jupiter.api.Test;
-import support.GrpcTestSupport;
 import support.InventoryTestSchema;
+import support.KafkaTestSupport;
 import support.ServiceHttp;
 import support.ServiceProcesses;
 import support.TestSchema;
@@ -18,7 +19,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * User Story 2 scenarios 1, 2, 5, and 6 with real service processes: once the replica has loaded, Scan
  * needs neither Inventory nor Analytics, including across a Transaction restart (FR-006, FR-012,
  * FR-019, FR-021, FR-022). Analytics is never started: Transaction does not call it until the relay
- * exists (US5), and nothing here waits for delivery.
+ * exists (US5), and nothing here waits for delivery. The replica arrives through Inventory's catalog
+ * events on the live broker (006 D9); the restarted Transaction reads a topic prefix with no events.
  */
 class ScanWithoutPeersTest {
 
@@ -28,16 +30,18 @@ class ScanWithoutPeersTest {
              TransactionTestSchema transactionSchema = TransactionTestSchema.create(TestSchema.Options.defaults().withOwnUser())) {
             inventorySchema.seed(30, 10_000);
             long units = inventorySchema.totalUnits();
-            int grpcPort = GrpcTestSupport.freePort();
-            int httpPort = GrpcTestSupport.freePort();
+            KafkaTestSupport.requireBroker();
+            TopicNames names = KafkaTestSupport.runTopics();
+            KafkaTestSupport.createCatalogTopics(names);
+            int httpPort = ServiceProcesses.freePort();
             ServiceHttp http = new ServiceHttp(httpPort);
 
             ServiceProcesses.ServiceProcess inventory = ServiceProcesses.service("inventory").database(inventorySchema)
-                    .httpPort(GrpcTestSupport.freePort()).grpcPort(grpcPort).start();
+                    .httpPort(ServiceProcesses.freePort()).kafka(names).start();
             ServiceProcesses.ServiceProcess transaction;
             try {
-                inventory.awaitPort(grpcPort, Duration.ofSeconds(30));
-                transaction = startTransaction(transactionSchema, httpPort, grpcPort);
+                inventory.awaitHttp("/items", 200, Duration.ofSeconds(60));
+                transaction = startTransaction(transactionSchema, httpPort, names);
                 awaitReplica(transactionSchema, transaction);
             } finally {
                 inventory.close();
@@ -53,7 +57,7 @@ class ScanWithoutPeersTest {
                 assertEquals(6, ((Number) lookup.get("itemCount")).intValue());
 
                 transaction.kill();
-                transaction = startTransaction(transactionSchema, httpPort, grpcPort);
+                transaction = startTransaction(transactionSchema, httpPort, KafkaTestSupport.runTopics());
                 transaction.awaitHttp("/transactions/missing", 404, Duration.ofSeconds(30));
                 assertEquals(lookup, ServiceHttp.json(http.get("/transactions/" + id)), "the basket survived the restart");
                 assertOk(http.scan(id, InventoryTestSchema.sku(2)), 7);
@@ -83,9 +87,9 @@ class ScanWithoutPeersTest {
     }
 
     private static ServiceProcesses.ServiceProcess startTransaction(TransactionTestSchema schema, int httpPort,
-                                                                    int inventoryGrpcPort) throws Exception {
-        return ServiceProcesses.service("transaction").database(schema).httpPort(httpPort)
-                .grpcTarget("inventory", inventoryGrpcPort).grpcTarget("analytics", GrpcTestSupport.freePort()).start();
+                                                                    TopicNames names) throws Exception {
+        return ServiceProcesses.service("transaction").database(schema).httpPort(httpPort).kafka(names)
+                .grpcTarget("analytics", ServiceProcesses.freePort()).start();
     }
 
     private static void awaitReplica(TransactionTestSchema schema, ServiceProcesses.ServiceProcess transaction)

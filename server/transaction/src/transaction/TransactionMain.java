@@ -16,6 +16,7 @@ import events.ConsumerLoop;
 import events.OutboxDispatcher;
 import events.ParkingPolicy;
 import events.TopicNames;
+import messaging.CatalogConsumer;
 import messaging.CheckoutOutcomeConsumer;
 import messaging.KafkaClients;
 import messaging.KafkaRecordSender;
@@ -23,7 +24,6 @@ import metrics.MetricsReporter;
 import metrics.StatusReporter;
 import rpc.GrpcAnalyticsIngestClient;
 import rpc.GrpcChannels;
-import rpc.GrpcInventoryGateway;
 
 import java.net.InetSocketAddress;
 import java.time.Clock;
@@ -35,8 +35,10 @@ import java.util.concurrent.Executors;
 /**
  * Independent Transaction Service entry point. Transaction runs no gRPC server. Checkout runs over events:
  * T1 records {@code CheckoutRequested} in the outbox, and the {@code transaction-checkout-outcome} consumer
- * settles attempts (D7). Until T110 and T126, Transaction is still a gRPC client of Inventory (catalog) and
- * of Analytics (the scan relay). The broker is never awaited at startup.
+ * settles attempts (D7). The product replica is loaded from the database first, so Scan works before the
+ * catalog topic is read, and is then kept current by the catalog consumer, which replays the topic from
+ * offset 0 (D9); Transaction never calls Inventory. Until T126, Transaction is still a gRPC client of
+ * Analytics (the scan relay). The broker is never awaited at startup.
  */
 public final class TransactionMain {
     private TransactionMain() { }
@@ -54,9 +56,8 @@ public final class TransactionMain {
             throw failure;
         }
         ProductCatalogReplica replica = new ProductCatalogReplica();
-        GrpcInventoryGateway inventory = GrpcInventoryGateway.forTarget(env("INVENTORY_GRPC_TARGET", "127.0.0.1:9092"));
-        CatalogReplicaRefresher refresher = new CatalogReplicaRefresher(inventory,
-            new JdbcProductReplicaStore(pool), replica, CatalogReplicaRefresher.refreshInterval(environment));
+        CatalogEventHandler catalog = new CatalogEventHandler(new JdbcProductReplicaStore(pool), replica);
+        catalog.loadDurable();
         TransactionLocks locks = new TransactionLocks();
         TransactionStateCache cache = new TransactionStateCache(locks, TransactionStateCache.maxEntries(environment));
         JdbcTransactionStore transactions = new JdbcTransactionStore(pool);
@@ -80,6 +81,9 @@ public final class TransactionMain {
             new JdbcDeadLetterStore(pool, "transaction.deadLetter"),
             ConsumerLoop.Settings.defaults().withThreads(CheckoutOutcomeConsumer.threads(environment))
                 .withPolicy(ParkingPolicy.fromEnvironment(environment)));
+        ConsumerLoop catalogConsumer = CatalogConsumer.create(names, CatalogConsumer.kafkaStreams(environment), catalog,
+            new JdbcDeadLetterStore(pool, "transaction.deadLetter"),
+            ConsumerLoop.Settings.defaults().withPolicy(ParkingPolicy.fromEnvironment(environment)));
         var service = new TransactionService(transactions, new JdbcScanStore(pool), checkout, replica, locks, cache);
         ScanEventRelay relay = new ScanEventRelay(new JdbcRelayStore(pool),
             GrpcAnalyticsIngestClient.forTarget(env("ANALYTICS_GRPC_TARGET", "127.0.0.1:9093"),
@@ -88,7 +92,6 @@ public final class TransactionMain {
         HttpServer server = HttpServer.create(new InetSocketAddress(port),0);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.createContext("/transactions",new TransactionHttpHandler(service));
-        refresher.start();
         MetricsReporter reporter = MetricsReporter.start("transaction");
         TransactionStatusQueries statusQueries = new TransactionStatusQueries(pool, Clock.systemUTC(),
             recoverySettings.stuckAfter());
@@ -99,15 +102,16 @@ public final class TransactionMain {
             relay.close();
             recovery.close();
             outcomes.stop(Duration.ofSeconds(5));
+            catalogConsumer.stop(Duration.ofSeconds(5));
             dispatcher.stop(Duration.ofSeconds(5));
             checkoutSender.close();
-            refresher.stop();
             GrpcChannels.shutdownAll();
             status.stop();
             reporter.stop();
             pool.close();
         }));
         dispatcher.start();
+        catalogConsumer.start();
         outcomes.start();
         server.start();
         recovery.start();

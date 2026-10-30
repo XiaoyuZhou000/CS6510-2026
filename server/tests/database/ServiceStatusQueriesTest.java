@@ -80,7 +80,7 @@ class ServiceStatusQueriesTest {
             InventoryStatusQueries.Status empty = queries.read();
             assertEquals(Map.of("APPLIED", 0L, "REJECTED", 0L, "RESTORED", 0L, "BLOCKED", 0L), empty.operations());
             assertEquals("status service=inventory applied=0 rejected=0 restored=0 blocked=0 "
-                    + "unpublished_outbox=0 parked_events=0", empty.line());
+                    + "unpublished_outbox=0 parked_events=0 catalog_version=none catalog_published_at=none", empty.line());
 
             operation(schema, "a", "APPLIED");
             operation(schema, "b", "APPLIED");
@@ -92,12 +92,17 @@ class ServiceStatusQueriesTest {
             outbox(schema, true);
             park(schema);
             park(schema);
+            String version = schema.seed(1, 10);
+            schema.update("UPDATE catalog_meta SET published_at = '2026-10-30 12:00:00.250' WHERE meta_key = 1");
             InventoryStatusQueries.Status status = queries.read();
             assertEquals(Map.of("APPLIED", 2L, "REJECTED", 1L, "RESTORED", 1L, "BLOCKED", 2L), status.operations());
             assertEquals(1, status.unpublishedOutbox());
             assertEquals(2, status.parkedEvents());
+            assertEquals(version, status.catalogVersion(), "the version the startup publication announces (D9)");
+            assertNotNull(status.catalogPublishedAt());
             assertEquals("status service=inventory applied=2 rejected=1 restored=1 blocked=2 "
-                    + "unpublished_outbox=1 parked_events=2", status.line());
+                    + "unpublished_outbox=1 parked_events=2 catalog_version=" + version
+                    + " catalog_published_at=" + status.catalogPublishedAt(), status.line());
         }
     }
 

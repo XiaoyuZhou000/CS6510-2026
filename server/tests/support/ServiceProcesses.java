@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit;
  *
  * <pre>{@code
  * try (ServiceProcesses.ServiceProcess inventory = ServiceProcesses.service("inventory")
- *         .database(inventorySchema).httpPort(GrpcTestSupport.freePort()).grpcPort(grpcPort).start()) {
+ *         .database(inventorySchema).httpPort(ServiceProcesses.freePort()).kafka(names).start()) {
  *     inventory.awaitHttp("/items", 200, Duration.ofSeconds(30));
  * }
  * }</pre>
@@ -93,7 +93,7 @@ public final class ServiceProcesses {
             return this;
         }
 
-        /** {@code INVENTORY_GRPC_TARGET} or {@code ANALYTICS_GRPC_TARGET} for the Transaction Service. */
+        /** {@code ANALYTICS_GRPC_TARGET} for the Transaction Service, until scans move to events (T126). */
         public Builder grpcTarget(String peer, int port) {
             environment.put(peer.toUpperCase(java.util.Locale.ROOT) + "_GRPC_TARGET", "127.0.0.1:" + port);
             return this;
@@ -130,10 +130,8 @@ public final class ServiceProcesses {
         public ServiceProcess start() throws IOException {
             if (service.equals("transaction")) {
                 // A peer target nobody listens on unless the test wires one: a test Transaction must never
-                // reach the running deployment's Inventory (9092) or deliver scans to its Analytics (9093).
-                for (String peer : List.of("INVENTORY_GRPC_TARGET", "ANALYTICS_GRPC_TARGET")) {
-                    if (!environment.containsKey(peer)) environment.put(peer, "127.0.0.1:" + GrpcTestSupport.freePort());
-                }
+                // deliver scans to the running deployment's Analytics (9093).
+                environment.putIfAbsent("ANALYTICS_GRPC_TARGET", "127.0.0.1:" + freePort());
             }
             environment.putIfAbsent("KAFKA_BOOTSTRAP", KafkaTestSupport.bootstrap());
             environment.putIfAbsent(events.TopicNames.PREFIX_VARIABLE, KafkaTestSupport.runTopics().prefix());
@@ -268,6 +266,14 @@ public final class ServiceProcesses {
         public void close() throws InterruptedException {
             stop();
             try { Files.deleteIfExists(log); } catch (IOException ignored) { }
+        }
+    }
+
+    /** A free TCP port on the loopback interface at the time of the call. */
+    public static int freePort() throws IOException {
+        try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
+            socket.setReuseAddress(true);
+            return socket.getLocalPort();
         }
     }
 

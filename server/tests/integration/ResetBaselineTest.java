@@ -1,8 +1,9 @@
 package integration;
 
 import api.json.Json;
+import events.TopicNames;
 import org.junit.jupiter.api.Test;
-import support.GrpcTestSupport;
+import support.KafkaTestSupport;
 import support.LiveSchemas;
 import support.ServiceHttp;
 import support.ServiceProcesses;
@@ -62,14 +63,15 @@ public final class ResetBaselineTest {
         }
         assertExactDatabaseBaseline();
 
-        int inventoryGrpc = GrpcTestSupport.freePort();
-        int analyticsGrpc = GrpcTestSupport.freePort();
+        int analyticsGrpc = ServiceProcesses.freePort();
+        // The catalog reaches Transaction through Inventory's events (006 D9), on topics of this run only.
+        KafkaTestSupport.requireBroker();
+        TopicNames names = KafkaTestSupport.runTopics();
+        KafkaTestSupport.createCatalogTopics(names);
         // Started in the benchmark order: Inventory, then Transaction (it loads the new replica), then Analytics.
         try (ServiceProcesses.ServiceProcess inventory = ServiceProcesses.service("inventory")
-                 .database(credentials.get("inventory")).httpPort(GrpcTestSupport.freePort())
-                 .grpcPort(inventoryGrpc).start()) {
+                 .database(credentials.get("inventory")).httpPort(ServiceProcesses.freePort()).kafka(names).start()) {
             inventory.awaitHttp("/items", 200, Duration.ofSeconds(60));
-            inventory.awaitPort(inventoryGrpc, Duration.ofSeconds(30));
             ServiceHttp inventoryHttp = new ServiceHttp(inventory.httpPort());
             HttpResponse<String> response = inventoryHttp.get("/items");
             assertEquals(200, response.statusCode());
@@ -85,12 +87,12 @@ public final class ResetBaselineTest {
             assertEquals(List.of(), Json.parseObject(lowStock.body()).get("alerts"), "No SKU starts at or below 50");
 
             try (ServiceProcesses.ServiceProcess transaction = ServiceProcesses.service("transaction")
-                     .database(credentials.get("transaction")).httpPort(GrpcTestSupport.freePort())
-                     .grpcTarget("inventory", inventoryGrpc).grpcTarget("analytics", analyticsGrpc).start()) {
+                     .database(credentials.get("transaction")).httpPort(ServiceProcesses.freePort()).kafka(names)
+                     .grpcTarget("analytics", analyticsGrpc).start()) {
                 transaction.awaitHttp("/transactions/missing", 404, Duration.ofSeconds(60));
                 awaitReplicaLoaded(transaction, Duration.ofSeconds(60));
                 try (ServiceProcesses.ServiceProcess analytics = ServiceProcesses.service("analytics")
-                         .database(credentials.get("analytics")).httpPort(GrpcTestSupport.freePort())
+                         .database(credentials.get("analytics")).httpPort(ServiceProcesses.freePort())
                          .grpcPort(analyticsGrpc).start()) {
                     analytics.awaitHttp("/analytics/popular-items", 200, Duration.ofSeconds(60));
                     for (ServiceProcesses.ServiceProcess fresh : List.of(inventory, transaction, analytics)) {

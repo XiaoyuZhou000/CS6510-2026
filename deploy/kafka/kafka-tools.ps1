@@ -189,7 +189,8 @@ function Get-KafkaEndOffsets {
 
 # Lag of each requested consumer group from one kafka-consumer-groups --describe --all-groups. A
 # group that the broker does not know is absent, not an error. Lag is the sum over partitions with a
-# committed offset; partitions without one are counted in Uncommitted.
+# committed offset; partitions without one are counted in Uncommitted. Assigned counts the partitions
+# a live member holds.
 function Get-KafkaGroupLags {
     param([string[]]$Groups = $script:KafkaGroups, [string]$KafkaHome)
     $result = Invoke-KafkaTool 'kafka-consumer-groups' @('--describe', '--all-groups') -KafkaHome $KafkaHome
@@ -206,23 +207,30 @@ function Get-KafkaGroupLags {
                 if ($columns[4] -match '^\d+$') { $end = [long]$columns[4] }
                 $lag = $null
                 if ($columns[5] -match '^\d+$') { $lag = [long]$columns[5] }
+                # CONSUMER-ID is '-' while no live member holds the partition.
+                $consumer = $null
+                if ($columns.Count -ge 7 -and $columns[6] -ne '-') { $consumer = $columns[6] }
                 $partitions += [pscustomobject]@{ Topic = $columns[1]; Partition = [int]$columns[2]
-                    CurrentOffset = $current; EndOffset = $end; Lag = $lag }
+                    CurrentOffset = $current; EndOffset = $end; Lag = $lag; ConsumerId = $consumer }
             }
         }
         $empty = @($result.Lines | Where-Object { $_ -match "^Consumer group '$([regex]::Escape($group))' has no active members" }).Count -gt 0
         if ($partitions.Count -eq 0 -and -not $empty) {
-            $lags[$group] = [pscustomobject]@{ Group = $group; State = 'absent'; Lag = $null; Uncommitted = 0; Partitions = @() }
+            $lags[$group] = [pscustomobject]@{ Group = $group; State = 'absent'; Lag = $null; Uncommitted = 0; Assigned = 0
+                Partitions = @() }
             continue
         }
         $total = [long]0
         $uncommitted = 0
+        $assigned = 0
         foreach ($p in $partitions) {
             if ($null -eq $p.Lag) { $uncommitted++ } else { $total += $p.Lag }
+            if ($null -ne $p.ConsumerId) { $assigned++ }
         }
         $state = 'stable'
         if ($empty) { $state = 'empty' }
-        $lags[$group] = [pscustomobject]@{ Group = $group; State = $state; Lag = $total; Uncommitted = $uncommitted; Partitions = $partitions }
+        $lags[$group] = [pscustomobject]@{ Group = $group; State = $state; Lag = $total; Uncommitted = $uncommitted
+            Assigned = $assigned; Partitions = $partitions }
     }
     return $lags
 }

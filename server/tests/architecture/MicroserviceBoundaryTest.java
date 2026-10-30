@@ -27,9 +27,13 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class MicroserviceBoundaryTest {
     private static final List<String> SERVICES = List.of("transaction", "inventory", "analytics");
-    /** The only business components allowed to hold in-memory state such as maps (Implementation Rule 4). */
+    /**
+     * The only business components allowed to hold in-memory state such as maps (Implementation Rule 4), plus
+     * feature 006's catalog version buffer in {@code CatalogEventHandler} (data-model "In-memory projections").
+     */
     private static final Set<String> DESIGNATED_STATE = Set.of("TransactionStateCache", "TransactionLocks",
-            "ProductCatalogReplica", "SettlementRegistry", "RecoverySchedule", "CatalogCache", "ProductNameMap");
+            "ProductCatalogReplica", "SettlementRegistry", "RecoverySchedule", "CatalogCache", "ProductNameMap",
+            "CatalogEventHandler");
     private static final Pattern KAFKA_REFERENCE = Pattern.compile("\\borg\\.apache\\.kafka\\.");
 
     /** Kafka is the one broker (FR-007); a cache or a second broker product stays off the classpath. */

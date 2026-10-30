@@ -4,6 +4,8 @@ import events.DecodedEvent;
 import events.EnvelopeCodec;
 import events.EventTypes;
 import selfcheckout.events.v1.AttemptId;
+import selfcheckout.events.v1.CatalogItemPublished;
+import selfcheckout.events.v1.CatalogSnapshotPublished;
 import selfcheckout.events.v1.CheckoutLine;
 import selfcheckout.events.v1.CheckoutRequested;
 import selfcheckout.events.v1.StockRestorationRequested;
@@ -11,8 +13,9 @@ import selfcheckout.events.v1.StockRestorationRequested;
 import java.util.UUID;
 
 /**
- * Checkout events as Transaction's producer records them, for tests that hand them to Inventory's handlers
- * directly or publish them as the owning producer would. Lines are sent in the order given.
+ * Checkout events as Transaction's producer records them, and catalog events as Inventory's publisher records
+ * them, for tests that hand them to a handler directly or publish them as the owning producer would. Lines are
+ * sent in the order given.
  */
 public final class TestEvents {
     private TestEvents() { }
@@ -46,6 +49,30 @@ public final class TestEvents {
         return EnvelopeCodec.encode(eventId, EventTypes.STOCK_RESTORATION_REQUESTED, transactionId, transactionId,
                 EventTypes.TRANSACTION, System.currentTimeMillis(),
                 StockRestorationRequested.newBuilder().setAttempt(attempt(transactionId, attemptNumber)).build());
+    }
+
+    /** The serialized envelope of a {@code CatalogItemPublished}, as Inventory's publisher records it. */
+    public static byte[] catalogItem(String sku, String name, String price, String catalogVersion) {
+        return EnvelopeCodec.encode(UUID.randomUUID().toString(), EventTypes.CATALOG_ITEM_PUBLISHED, sku, catalogVersion,
+                EventTypes.INVENTORY, System.currentTimeMillis(), CatalogItemPublished.newBuilder().setSku(sku)
+                        .setName(name).setPrice(price).setCatalogVersion(catalogVersion).build());
+    }
+
+    /** The serialized envelope of a {@code CatalogSnapshotPublished} marker. */
+    public static byte[] catalogSnapshot(String catalogVersion, int productCount) {
+        return EnvelopeCodec.encode(UUID.randomUUID().toString(), EventTypes.CATALOG_SNAPSHOT_PUBLISHED,
+                EventTypes.SNAPSHOT_KEY, catalogVersion, EventTypes.INVENTORY, System.currentTimeMillis(),
+                CatalogSnapshotPublished.newBuilder().setCatalogVersion(catalogVersion).setProductCount(productCount).build());
+    }
+
+    /** The decoded {@code CatalogItemPublished}, as Transaction's catalog consumer hands it to its handler. */
+    public static DecodedEvent item(String sku, String name, String price, String catalogVersion) {
+        return EnvelopeCodec.decode(catalogItem(sku, name, price, catalogVersion), sku);
+    }
+
+    /** The decoded {@code CatalogSnapshotPublished}. */
+    public static DecodedEvent snapshot(String catalogVersion, int productCount) {
+        return EnvelopeCodec.decode(catalogSnapshot(catalogVersion, productCount), EventTypes.SNAPSHOT_KEY);
     }
 
     private static AttemptId attempt(String transactionId, int attemptNumber) {

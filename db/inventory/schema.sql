@@ -41,12 +41,15 @@ CREATE TABLE inventory (
 ) ENGINE = InnoDB;
 
 -- A new catalog_version UUID at every reset or reseed (R4); Transaction replaces
--- its product replica when the version it reads differs from its stored one.
+-- its product replica when it reads a complete snapshot of a version that differs
+-- from its stored one (006 D9).
 CREATE TABLE catalog_meta (
     meta_key        TINYINT      NOT NULL,
     catalog_version CHAR(36)     NOT NULL,
     product_count   INT          NOT NULL,
     seeded_at       TIMESTAMP(3) NOT NULL,
+    -- Set by the startup transaction that records the catalog's events in outbox_event.
+    published_at    TIMESTAMP(3) NULL,
     PRIMARY KEY (meta_key),
     CONSTRAINT chk_catalog_meta_singleton CHECK (meta_key = 1),
     CONSTRAINT chk_catalog_meta_count CHECK (product_count >= 0)

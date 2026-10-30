@@ -15,9 +15,9 @@
        running the broker JVM.
     4. Starts Inventory, then Transaction, then Analytics (unless -SkipAnalytics) with
        PERF_METRICS=true, retrying a start that fails with a BindException, then Nginx with
-       deploy/nginx.conf unchanged. Readiness is each service's health plus Transaction's product
-       replica matching Inventory's catalog_version, as in feature 005; T112 adds the
-       consumer-group assignment wait for $ConsumerGroups.
+       deploy/nginx.conf unchanged. Readiness is each service's health, Transaction's product
+       replica matching Inventory's catalog_version (replayed from the catalog topic, D9), and every
+       partition of each group in $ConsumerGroups held by a live member (SC-009).
     5. From load-client/, runs exactly `java -cp out Main` (default),
        `java -cp out Main --stations=100 --duration=120` (stress), or
        `java -cp out Main --duration=20` (smoke).
@@ -124,8 +124,8 @@ $services = @('inventory', 'transaction')
 if (-not $SkipAnalytics) { $services += 'analytics' }
 $intervalSeconds = 10
 if ($ExtraEnv.ContainsKey('PERF_METRICS_INTERVAL_SECONDS')) { $intervalSeconds = [int]$ExtraEnv['PERF_METRICS_INTERVAL_SECONDS'] }
-# Consumer groups whose partition assignment the readiness step waits for once T112 adds that
-# check; T126 adds analytics-scan-ingest.
+# Consumer groups whose partition assignment the readiness step waits for (T112, SC-009); T126 adds
+# analytics-scan-ingest.
 $ConsumerGroups = @('inventory-checkout', 'transaction-checkout-outcome')
 # The topic each consumer group reads (contracts/event-catalog.md "Topics").
 $groupTopics = [ordered]@{
@@ -331,6 +331,18 @@ function Get-LagSummary($Status) {
     $summary.total = $total
     $summary.zero = ($total -eq 0) -and ($summary.uncertain.Count -eq 0)
     return $summary
+}
+
+# True when every group in $ConsumerGroups has a live member on each partition of its topic (SC-009).
+function Test-GroupsAssigned($Status) {
+    if ($null -eq $Status -or -not $Status.reachable) { return $false }
+    foreach ($name in $script:ConsumerGroups) {
+        $group = @($Status.groups | Where-Object { $_.group -eq $name }) | Select-Object -First 1
+        $topic = @($Status.topics | Where-Object { "$($_.name)".EndsWith($script:groupTopics[$name]) }) | Select-Object -First 1
+        if ($null -eq $group -or $null -eq $topic -or -not $topic.exists) { return $false }
+        if ([int](Get-Prop $group 'assigned') -lt [int]$topic.partitions) { return $false }
+    }
+    return $true
 }
 
 function Add-LagSample([string]$Phase, [datetime]$Started, [string]$Text) {
@@ -552,10 +564,12 @@ try {
     # 4. Services, then the gateway.
     Start-ReadyService 'inventory' 'Inventory /items' { Test-Http 'http://127.0.0.1:8082/items' @(200) }
     Start-ReadyService 'transaction' 'Transaction HTTP' { Test-Http 'http://127.0.0.1:8081/transactions/readiness-probe' @(404) }
+    # The reset emptied Transaction's replica, so it matches only once the catalog events were replayed (D9).
     $catalogVersion = (Get-ServiceRow 'inventory' 'SELECT catalog_version FROM catalog_meta WHERE meta_key = 1')[0]
-    Wait-Until 'Transaction product replica' 60 {
+    Wait-Until 'Transaction product replica at the catalog version' 60 {
         (Get-ServiceRow 'transaction' "SELECT COALESCE(catalog_version, '') FROM product_replica_meta WHERE meta_key = 1")[0] -eq $catalogVersion
     }
+    Wait-Until "partition assignment of $($ConsumerGroups -join ', ')" 90 { Test-GroupsAssigned (Get-StatusNow 'ready') }
     if (-not $SkipAnalytics) {
         Start-ReadyService 'analytics' 'Analytics popular items' { Test-Http 'http://127.0.0.1:8083/analytics/popular-items' @(200) }
     }

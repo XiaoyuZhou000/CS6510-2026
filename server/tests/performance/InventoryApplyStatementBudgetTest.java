@@ -1,7 +1,11 @@
 package performance;
 
+import database.JdbcCatalogMetaStore;
+import database.JdbcCatalogStore;
 import database.JdbcCheckoutOperationStore;
 import events.TopicNames;
+import inventory.CatalogCache;
+import inventory.CatalogPublisher;
 import inventory.CheckoutStockService;
 import inventory.StockOutcomeEvents;
 import org.junit.jupiter.api.Test;
@@ -21,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Inventory's apply of a {@code CheckoutRequested} in a fixed number of round trips, whatever the basket size
  * (R8, R22, 006 D8): the locking SELECT, the operation INSERT, the CASE UPDATE, and the outcome outbox INSERT
  * share one commit; a replay writes nothing and re-sends the recorded outcome; a rejection issues no stock
- * UPDATE.
+ * UPDATE. The startup catalog publication is one batched outbox INSERT and one commit, whatever the catalog size.
  */
 class InventoryApplyStatementBudgetTest {
 
@@ -77,6 +81,24 @@ class InventoryApplyStatementBudgetTest {
             assertEquals(98, schema.stock(InventoryTestSchema.sku(2)), "in the 5- and 20-line baskets");
             assertEquals(99, schema.stock(InventoryTestSchema.sku(20)), "in the 20-line basket only");
             assertEquals(100, schema.stock(InventoryTestSchema.sku(21)), "never referenced");
+
+            // The startup catalog publication (006 D9): every item and the marker in one batched INSERT and one commit.
+            var pool = schema.newPool("test.catalog.budget." + UUID.randomUUID().toString().substring(0, 8), 1, 2,
+                    counting::wrap);
+            CatalogPublisher publisher = new CatalogPublisher(new CatalogCache(new JdbcCatalogStore(pool),
+                    new JdbcCatalogMetaStore(pool)), new JdbcCatalogMetaStore(pool), TopicNames.unprefixed(), signal,
+                    Clock.systemUTC());
+            try (CountingConnections.Scope scope = counting.scope()) {
+                CatalogPublisher.Publication published = publisher.publish().orElseThrow();
+                CountingConnections.Counts counts = scope.counts();
+                assertEquals(41, published.eventIds().size(), "40 items and one snapshot marker");
+                assertEquals(1, counts.inserts(), "one batched INSERT of all 41 outbox rows");
+                assertEquals(1, counts.updates(), "the catalog_meta published_at UPDATE");
+                StatementBudgets.assertWithin("inventory.catalog.publish.statements", counts.statements());
+                StatementBudgets.assertWithin("inventory.catalog.publish.commits", counts.commits());
+                assertEquals(published.eventIds(), signal.signalled.subList(signal.signalled.size() - 41,
+                        signal.signalled.size()), "the dispatcher is signalled after the commit, in outbox_seq order");
+            }
         }
     }
 

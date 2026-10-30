@@ -22,7 +22,8 @@ import java.util.Optional;
  *
  * <ul>
  *   <li>{@link #insert} joins the caller's open {@link JdbcUnitOfWork} through its connection; database
- *       adapters that need the unit's deadlock retries call {@link #insertRow} inside their own work.</li>
+ *       adapters that need the unit's deadlock retries call {@link #insertRow}, or {@link #insertRows} for a
+ *       batch such as the catalog publication, inside their own work.</li>
  *   <li>Rows are only ever updated in {@code published_at} and {@code send_count}, each in one statement and
  *       one commit per batch. {@code published_at} keeps the first confirmation time.</li>
  *   <li>The sweep query uses the {@code (published_at, outbox_seq)} index.</li>
@@ -64,6 +65,27 @@ public final class JdbcOutboxStore implements OutboxStore<Connection> {
             insert.setBytes(6, row.envelope());
             insert.setTimestamp(7, Timestamp.from(row.createdAt()));
             insert.executeUpdate();
+        }
+    }
+
+    /**
+     * One batched INSERT of {@code rows} on the caller's connection, in the order given, so their
+     * {@code outbox_seq} follows that order; the driver rewrites it into multi-row statements.
+     */
+    public static void insertRows(Connection connection, List<OutboxRow> rows) throws SQLException {
+        if (rows.isEmpty()) return;
+        try (PreparedStatement insert = connection.prepareStatement(INSERT)) {
+            for (OutboxRow row : rows) {
+                insert.setString(1, row.eventId());
+                insert.setString(2, row.topic());
+                insert.setString(3, row.routingKey());
+                insert.setString(4, row.eventType());
+                insert.setString(5, row.aggregateKey());
+                insert.setBytes(6, row.envelope());
+                insert.setTimestamp(7, Timestamp.from(row.createdAt()));
+                insert.addBatch();
+            }
+            insert.executeBatch();
         }
     }
 

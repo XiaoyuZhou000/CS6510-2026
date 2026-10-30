@@ -34,6 +34,18 @@ Outcomes of the scenarios in `specs/006-event-based-architecture/quickstart.md` 
 | Other partitions keep flowing | A checkout made right afterwards completed with 200 |
 | Visible in the status line | `status service=inventory applied=2 rejected=1 restored=0 blocked=0 unpublished_outbox=0 parked_events=1 checkout_consumer_lag=0` |
 
+## Scenario H: catalog replay (T114, US4)
+
+**Run**: 2026-10-30, on the benchmark machine, with the native broker. `db/reset-baseline.ps1` reset the schemas and topics. Inventory and Transaction then started from the built jars. Both were stopped, `db/reset-service.ps1 -Service transaction` reset Transaction only, and Transaction was restarted with Inventory still stopped.
+
+| Step | Expected | Observed |
+|---|---|---|
+| Inventory startup | The whole catalog is recorded in its outbox and published | 2,001 outbox rows (2,000 `CatalogItemPublished` and the marker), all published; `catalog_meta.published_at` set |
+| First Transaction start | The replica reaches Inventory's `catalog_version` | Version `23425b7e-…`, 2,000 products |
+| Transaction reset, Inventory stopped | The replica is empty | `catalog_version` NULL, 0 products |
+| Transaction restart | The replica is rebuilt from the compacted topic with no call to Inventory | Same version and 2,000 products within 1.6 s of the process start, with Inventory down; log line `Product replica now at catalog version 23425b7e-… (2000 products)` and no gRPC or Inventory address |
+| Scan afterwards | Priced from the rebuilt replica | `SKU-000007`: `Item 7`, 2.95 |
+
 ## Direct restoration (SC-016)
 
 `messaging.RestorationEventDirectTest` runs alone against Inventory Service over the live broker. Its result is reported apart from the end-to-end Saga results, because no production path produces `StockRestorationRequested` (FR-039, D8).

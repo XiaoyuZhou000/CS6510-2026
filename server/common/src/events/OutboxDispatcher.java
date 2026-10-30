@@ -43,9 +43,9 @@ import java.util.concurrent.atomic.LongAdder;
  * </ul>
  *
  * <p>Because every send goes through the one sender thread, a key's events leave in commit order; Kafka's
- * idempotent producer keeps that order on the partition. Test-only fault hooks: {@code outbox.beforeSend},
- * {@code outbox.afterConfirm} (on the marker thread, before the ID joins a batch), and
- * {@code outbox.beforeMark}. Timers {@code outbox.commitToSend} (signal to send) and
+ * idempotent producer keeps that order on the partition. Test-only fault hooks, for rows with an aggregate key
+ * (checkout events) only: {@code outbox.beforeSend}, {@code outbox.afterConfirm} (on the marker thread, before
+ * the ID joins a batch), and {@code outbox.beforeMark}. Timers {@code outbox.commitToSend} (signal to send) and
  * {@code outbox.sendToConfirm}; counters {@code outbox.markBatches} and {@code outbox.markedEvents}, whose
  * ratio is the mean marking batch size, plus {@code outbox.resends} and {@code outbox.sendFailures}.</p>
  */
@@ -119,7 +119,8 @@ public final class OutboxDispatcher implements OutboxSignal, AutoCloseable {
     /** Work for the sender thread: either signalled IDs to load, or rows already loaded for a re-send. */
     private record Work(List<String> eventIds, List<OutboxRow> rows, long queuedNanos) { }
 
-    private record Confirmed(String eventId) { }
+    /** {@code hooked}: the row belongs to an aggregate, so the Saga's fault hooks apply to it. */
+    private record Confirmed(String eventId, boolean hooked) { }
 
     private record Backoff(int failures, long eligibleNanos) { }
 
@@ -138,6 +139,8 @@ public final class OutboxDispatcher implements OutboxSignal, AutoCloseable {
     private final Thread sweeper;
     private volatile boolean running;
     private volatile boolean stopping;
+    /** Marker thread only: the batch being built holds a row the Saga's fault hooks apply to. */
+    private boolean batchHooked;
 
     /**
      * @param rowTopics every topic this service's rows may name; each must have a registered sender, so a
@@ -284,7 +287,8 @@ public final class OutboxDispatcher implements OutboxSignal, AutoCloseable {
             return;
         }
         if (!inFlight.add(row.eventId())) return;
-        FaultHooks.hit("outbox.beforeSend");
+        boolean hooked = hooked(row);
+        if (hooked) FaultHooks.hit("outbox.beforeSend");
         long sending = System.nanoTime();
         COMMIT_TO_SEND.record(sending - queuedNanos);
         CompletableFuture<Void> future;
@@ -299,7 +303,7 @@ public final class OutboxDispatcher implements OutboxSignal, AutoCloseable {
                 backoffs.remove(row.eventId());
                 awaitingMark.add(row.eventId());
                 inFlight.remove(row.eventId());
-                confirmed.add(new Confirmed(row.eventId()));
+                confirmed.add(new Confirmed(row.eventId(), hooked));
             } else {
                 SEND_FAILURES.increment();
                 backoffs.merge(row.eventId(), new Backoff(1, System.nanoTime() + settings.minBackoff().toNanos()),
@@ -344,8 +348,19 @@ public final class OutboxDispatcher implements OutboxSignal, AutoCloseable {
     }
 
     private void accept(Confirmed item, List<String> batch) {
-        FaultHooks.hit("outbox.afterConfirm");
+        if (item.hooked()) {
+            FaultHooks.hit("outbox.afterConfirm");
+            batchHooked = true;
+        }
         batch.add(item.eventId());
+    }
+
+    /**
+     * The test-only hooks belong to the Saga (contracts/checkout-saga.md), so they apply only to rows of an
+     * aggregate, the checkout events; catalog rows, which have none, never trigger them at startup.
+     */
+    private static boolean hooked(OutboxRow row) {
+        return row.aggregateKey() != null;
     }
 
     private List<String> drainConfirmed(List<String> batch) {
@@ -358,7 +373,7 @@ public final class OutboxDispatcher implements OutboxSignal, AutoCloseable {
     private void flushMarks(List<String> batch) {
         while (!batch.isEmpty()) {
             List<String> chunk = new ArrayList<>(batch.subList(0, Math.min(batch.size(), settings.markBatchSize())));
-            FaultHooks.hit("outbox.beforeMark");
+            if (batchHooked) FaultHooks.hit("outbox.beforeMark");
             try {
                 store.markPublished(chunk, clock.instant());
             } catch (StoreFailure failure) {
@@ -371,6 +386,7 @@ public final class OutboxDispatcher implements OutboxSignal, AutoCloseable {
             awaitingMark.removeAll(chunk);
             batch.subList(0, chunk.size()).clear();
         }
+        batchHooked = false;
     }
 
     private void sweepLoop() {
