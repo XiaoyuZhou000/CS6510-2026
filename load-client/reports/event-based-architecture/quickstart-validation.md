@@ -13,6 +13,35 @@ Outcomes of the scenarios in `specs/006-event-based-architecture/quickstart.md` 
 | Outbox rows afterwards | Every row has `published_at` | Transaction 2 rows, Inventory 2 rows, 0 unpublished in either; 0 parked |
 | Transaction's log | No checkout RPC | No `applyCheckout` |
 
+## Scenario B: broker outage (T139, US2)
+
+**Run**: 2026-10-30, 15:13 local time, on the benchmark machine, with the native broker. `db/reset-baseline.ps1` reset the schemas and topics. Inventory, Transaction, and Analytics then started from the built jars, and Nginx from `deploy/nginx.conf`. Every request below went through the gateway on port 8080. A warm-up Complete with the broker up returned 200.
+
+| Step | Expected | Observed |
+|---|---|---|
+| `deploy/kafka/stop-broker.ps1` | Port 19092 closed | Closed |
+| Start, then Scan `SKU-000003`, `SKU-000004`, `SKU-000003` | 201 and 200s with the right names and prices, without waiting on the broker | 201 in 24 ms; 200s in 18–19 ms: `Item 3` 1.55, `Item 4` 1.90, total 5.00 |
+| Lookup | OPEN with the same count and total | 200 in 14 ms: OPEN, 3 items, 5.00 |
+| `/items`, `/inventory/low-stock`, `/analytics/popular-items` | 200 | 200 in 69, 17, and 15 ms |
+| Complete the basket | 500 within 10 s, attempt PENDING | 500 in 8.0 s; attempt PENDING with `client_outcome = PENDING_ERROR`; stock unchanged |
+| Kill Transaction and restart it, broker still down | It starts and serves; the basket survives | Started; Lookup 200 in 12 ms, same status, count, total, and start time; Scan, Start, and Scan 200/201 in 17–21 ms |
+| Before the broker returns | Accepted scans wait unpublished | 8 accepted, 6 unpublished (the 2 warm-up scans were published before the stop) |
+| `start-broker.ps1 -NoTopics` | The attempt settles with no manual step; every scan counted once | Attempt COMPLETED (`PENDING_ERROR`, a background completion) and the transaction COMPLETED; `SKU-000003` 10000 → 9998, `SKU-000004` 10000 → 9999. A repeated Complete returned 409. Every scan was published, and Analytics stored all 8 accepted scans as 8 distinct identities. 0 parked events |
+
+The settlement time was not measured. The scenario script hung on the broker's inherited output handle after `start-broker.ps1` had started the broker. The checks above were taken when the run resumed at 15:59, against the same deployment.
+
+## Scenario D: Inventory outage (T139, US2)
+
+**Run**: the deployment of scenario B, right after it, with the broker up.
+
+| Step | Expected | Observed |
+|---|---|---|
+| Stop Inventory; Start and Scan `SKU-000008`, `SKU-000009`, `SKU-000008` | Scans succeed | 200s in 10–12 ms |
+| Complete | 500 within 10 s; no stock change | 500 in 8.0 s; attempt PENDING with `PENDING_ERROR`; stock still 10000 and 10000 |
+| `/items` and `/inventory/low-stock` while Inventory is down | Only Inventory's routes fail | 502 from the gateway |
+| Restart Inventory | The attempt settles (SC-006) | COMPLETED 3 s after the start; `SKU-000008` 10000 → 9998, `SKU-000009` 10000 → 9999 |
+| End of both scenarios | Every scan counted once; stock conserved | 11 accepted scans, 0 unpublished, 11 stored by Analytics as 11 distinct identities; 0 parked; 0 pending attempts; total units 19,999,992 = 20,000,000 − 8 completed units |
+
 ## Scenario E: Analytics outage (T129, US5)
 
 **Run**: 2026-10-30, 03:13–03:15 local time, on the benchmark machine, with the native broker. `db/reset-baseline.ps1` reset the schemas and topics. Inventory, Transaction, and Analytics then started from the built jars, and Nginx from `deploy/nginx.conf`. The unchanged Load Client ran its default workload (`java -cp out Main`, 10 stations, 60 s) through the gateway on port 8080. Scans now reach Analytics only as `ScanAccepted` records on `selfcheckout.scan-accepted.v1`.

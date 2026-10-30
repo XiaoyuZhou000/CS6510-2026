@@ -5,52 +5,47 @@ import org.junit.jupiter.api.Test;
 import support.CheckoutDeployment;
 import support.InventoryTestSchema;
 import support.ServiceHttp;
-import support.ServiceProcesses;
-import support.TestSchema;
 import support.TransactionTestSchema;
 
 import java.net.http.HttpResponse;
 import java.time.Duration;
-import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Transaction durability across failures in the per-schema topology: the service runs against its own
- * disposable schema and user, and stock lives in Inventory's schema. The Complete-dependent methods
- * run an Inventory process over its own schema too, so every Complete goes through the Saga (T142).
+ * Transaction durability across failures in the per-schema topology: each service runs against its own
+ * disposable schema and user, and stock lives in Inventory's schema. Every method runs Inventory, Transaction,
+ * and Analytics processes over the live broker, so every Complete goes through the Saga (T142) and every
+ * acknowledged scan, and only those, must reach Analytics exactly once (US2 scenario 4, FR-029).
  */
 class TransactionRestartDurabilityTest {
+    private static final Duration DELIVERY = Duration.ofSeconds(60);
 
     @Test
     void failedDatabaseWriteReturnsInternalErrorWithoutAcknowledgingScan() throws Exception {
-        try (TransactionTestSchema db = TransactionTestSchema.create(TestSchema.Options.defaults().withOwnUser());
-             InventoryTestSchema stock = InventoryTestSchema.create()) {
-            stock.seed(2, 10);
-            db.seedReplica(2, UUID.randomUUID().toString());
-            int port = ServiceProcesses.freePort();
-            ServiceHttp http = new ServiceHttp(port);
-            try (ServiceProcesses.ServiceProcess service = ServiceProcesses.service("transaction").database(db).httpPort(port)
-                    .start()) {
-                service.awaitHttp("/transactions/missing", 404, Duration.ofSeconds(30));
-                String id = http.start("failure-station");
+        try (CheckoutDeployment deployment = CheckoutDeployment.withAnalytics(2, 10, null)) {
+            deployment.startAnalytics();
+            TransactionTestSchema db = deployment.transactionSchema;
+            ServiceHttp http = deployment.transactionHttp;
+            String id = http.start("failure-station");
 
-                db.setTableUnavailable("accepted_scan", true);
-                assertError(http.scan(id, InventoryTestSchema.sku(1)), 500, "INTERNAL_ERROR");
-                var open = Json.parseObject(http.get("/transactions/" + id).body());
-                assertEquals("OPEN", open.get("status"));
-                assertEquals(0, ((Number) open.get("itemCount")).intValue());
-                assertEquals(0, ((Number) open.get("runningTotal")).doubleValue(), 0.001);
-                assertEquals(10, stock.stock(InventoryTestSchema.sku(1)));
-                assertEquals(0, db.transaction(id).orElseThrow().itemCount(), "the guarded UPDATE rolled back too");
+            db.setTableUnavailable("accepted_scan", true);
+            assertError(http.scan(id, InventoryTestSchema.sku(1)), 500, "INTERNAL_ERROR");
+            var open = Json.parseObject(http.get("/transactions/" + id).body());
+            assertEquals("OPEN", open.get("status"));
+            assertEquals(0, ((Number) open.get("itemCount")).intValue());
+            assertEquals(0, ((Number) open.get("runningTotal")).doubleValue(), 0.001);
+            assertEquals(10, deployment.inventorySchema.stock(InventoryTestSchema.sku(1)));
+            assertEquals(0, db.transaction(id).orElseThrow().itemCount(), "the guarded UPDATE rolled back too");
 
-                db.setTableUnavailable("accepted_scan", false);
-                HttpResponse<String> recovered = http.scan(id, InventoryTestSchema.sku(1));
-                assertEquals(200, recovered.statusCode(), recovered.body());
-                assertEquals(1, ((Number) Json.parseObject(recovered.body()).get("itemCount")).intValue(),
-                        "the unacknowledged Scan left nothing behind");
-                assertEquals(1, db.scans(id).size());
-            }
+            db.setTableUnavailable("accepted_scan", false);
+            HttpResponse<String> recovered = http.scan(id, InventoryTestSchema.sku(1));
+            assertEquals(200, recovered.statusCode(), recovered.body());
+            assertEquals(1, ((Number) Json.parseObject(recovered.body()).get("itemCount")).intValue(),
+                    "the unacknowledged Scan left nothing behind");
+            assertEquals(1, db.scans(id).size());
+            deployment.awaitAnalyticsHoldsEveryScan(DELIVERY);
+            assertEquals(1, deployment.analyticsSchema.storedEvents(), "only the acknowledged scan is delivered");
         }
     }
 
@@ -58,7 +53,8 @@ class TransactionRestartDurabilityTest {
     void acknowledgedOpenBasketSurvivesProcessRestartAndCompletesExactlyOnce() throws Exception {
         String sku = InventoryTestSchema.sku(1);
         String other = InventoryTestSchema.sku(2);
-        try (CheckoutDeployment deployment = CheckoutDeployment.start(5, 10)) {
+        try (CheckoutDeployment deployment = CheckoutDeployment.withAnalytics(5, 10, null)) {
+            deployment.startAnalytics();
             ServiceHttp http = deployment.transactionHttp;
             HttpResponse<String> started = http.post("/transactions", "{\"stationId\":\"restart-station\"}");
             assertEquals(201, started.statusCode(), started.body());
@@ -101,13 +97,16 @@ class TransactionRestartDurabilityTest {
             assertEquals("TRANSACTION_NOT_OPEN", Json.parseObject(duplicate.body()).get("error"));
             assertEquals(8, deployment.inventorySchema.stock(sku));
             assertEquals(9, deployment.inventorySchema.stock(other));
+            deployment.awaitAnalyticsHoldsEveryScan(DELIVERY);
+            assertEquals(3, deployment.analyticsSchema.storedEvents(), "every acknowledged scan survived the crash");
         }
     }
 
     @Test
     void publicTransactionErrorsKeepTheirStatusesAndShapes() throws Exception {
         String sku = InventoryTestSchema.sku(1);
-        try (CheckoutDeployment deployment = CheckoutDeployment.start(5, 10)) {
+        try (CheckoutDeployment deployment = CheckoutDeployment.withAnalytics(5, 10, null)) {
+            deployment.startAnalytics();
             ServiceHttp http = deployment.transactionHttp;
             assertError(http.post("/transactions", "{}"), 400, "MISSING_STATION_ID");
             assertError(http.post("/transactions", "{\"stationId\":\"\"}"), 400, "MISSING_STATION_ID");
@@ -121,6 +120,8 @@ class TransactionRestartDurabilityTest {
             assertEquals(200, http.complete(id).statusCode());
             assertError(http.scan(id, sku), 409, "TRANSACTION_NOT_OPEN");
             assertError(http.complete(id), 409, "TRANSACTION_NOT_OPEN");
+            deployment.awaitAnalyticsHoldsEveryScan(DELIVERY);
+            assertEquals(1, deployment.analyticsSchema.storedEvents(), "no rejected scan is delivered");
         }
     }
 

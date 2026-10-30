@@ -15,7 +15,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -29,7 +31,9 @@ import java.util.concurrent.TimeoutException;
  *
  * <p>{@link #deliver} sends the whole batch, then waits for every confirmation, and returns {@link Delivered}
  * only when all of them arrived. Any failed send, or confirmations still missing after {@link #CONFIRM_TIMEOUT}
- * (the producer's 30 s delivery timeout plus a margin), is {@link Uncertain}. It is the only caller of
+ * (the producer's 30 s delivery timeout plus a margin), is {@link Uncertain}. A send that fails before it is
+ * queued stops the batch at once, so with the broker down a round costs one {@code max.block.ms}, not one per
+ * row; the relay re-sends the whole batch after its backoff (006 T138). It is the only caller of
  * {@link RecordSender} besides {@code OutboxDispatcher} (FR-010). Timer {@code transaction.scan.publish}, counter
  * {@code transaction.scan.publishFailures}.</p>
  */
@@ -57,7 +61,11 @@ public final class KafkaScanEventSink implements ScanEventSink {
             }
             List<CompletableFuture<Void>> confirmations = new ArrayList<>(events.size());
             for (int i = 0; i < events.size(); i++) {
-                confirmations.add(sender.send(topic, events.get(i).transactionId(), values.get(i)));
+                CompletableFuture<Void> confirmation = sender.send(topic, events.get(i).transactionId(), values.get(i));
+                // A send that failed before it was queued, such as one blocked for max.block.ms on missing broker
+                // metadata, means the rest would fail the same way, one max.block.ms each.
+                if (confirmation.isCompletedExceptionally()) return uncertain("a send failed: " + failureOf(confirmation));
+                confirmations.add(confirmation);
             }
             CompletableFuture.allOf(confirmations.toArray(CompletableFuture[]::new))
                     .get(CONFIRM_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
@@ -89,6 +97,17 @@ public final class KafkaScanEventSink implements ScanEventSink {
         return EnvelopeCodec.encode(EventTypes.scanEventId(scan.transactionId(), scan.scanSequence()),
                 EventTypes.SCAN_ACCEPTED, scan.transactionId(), scan.transactionId(), EventTypes.TRANSACTION,
                 scan.acceptedAt().toEpochMilli(), payload);
+    }
+
+    private static Throwable failureOf(CompletableFuture<Void> failed) {
+        try {
+            failed.join();
+            return null;
+        } catch (CompletionException failure) {
+            return failure.getCause();
+        } catch (CancellationException cancelled) {
+            return cancelled;
+        }
     }
 
     private static Uncertain uncertain(String reason) {

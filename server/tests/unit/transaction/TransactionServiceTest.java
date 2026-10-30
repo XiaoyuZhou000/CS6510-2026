@@ -326,6 +326,67 @@ class TransactionServiceTest {
         assertEquals(1, inventory.requests());
     }
 
+    @Test
+    void aRejectedScanOfEveryKindCommitsNeitherABasketChangeNorAnAcceptedScan() {
+        String id = service.start(new TransactionOperations.StartCommand("station-1")).transactionId();
+        service.scan(new TransactionOperations.ScanCommand(id, "A"));
+        String closed = service.start(new TransactionOperations.StartCommand("station-2")).transactionId();
+        service.scan(new TransactionOperations.ScanCommand(closed, "B"));
+        database.complete(closed);
+        int appends = database.appends;
+
+        assertFailure(TransactionFailure.Code.NOT_FOUND,
+                () -> service.scan(new TransactionOperations.ScanCommand("missing", "A")));
+        assertFalse(database.rows.containsKey("missing"), "a 404 creates no basket");
+        assertUnchangedBy(id, () -> assertFailure(TransactionFailure.Code.UNKNOWN_SKU,
+                () -> service.scan(new TransactionOperations.ScanCommand(id, "missing"))));
+        assertUnchangedBy(closed, () -> assertFailure(TransactionFailure.Code.NOT_OPEN,
+                () -> service.scan(new TransactionOperations.ScanCommand(closed, "A"))));
+        assertUnchangedBy(id, () -> {
+            database.appendFailure = new StoreFailure("database unavailable");
+            try {
+                assertThrows(StoreFailure.class, () -> service.scan(new TransactionOperations.ScanCommand(id, "B")));
+            } finally {
+                database.appendFailure = null;
+            }
+        });
+        TransactionService empty = newService(new ProductCatalogReplica(), 100);
+        assertUnchangedBy(id, () -> assertThrows(ProductCatalogUnavailableFailure.class,
+                () -> empty.scan(new TransactionOperations.ScanCommand(id, "A"))));
+        TransactionService waiting = newService(replica, 100,
+                CheckoutOrchestrator.Settings.defaults().withResponseBudget(Duration.ofMillis(200)));
+        database.beginAttempt(id);
+        assertUnchangedBy(id, () -> assertThrows(CheckoutPendingFailure.class,
+                () -> waiting.scan(new TransactionOperations.ScanCommand(id, "B"))));
+        assertEquals(appends, database.appends, "no rejected Scan appended an accepted scan");
+    }
+
+    @Test
+    void noScanChangesStockOrSendsAnything() {
+        for (int basket = 0; basket < 3; basket++) {
+            String id = service.start(new TransactionOperations.StartCommand("station-" + basket)).transactionId();
+            for (int unit = 0; unit < 4; unit++) {
+                service.scan(new TransactionOperations.ScanCommand(id, unit % 2 == 0 ? "A" : "B"));
+            }
+            assertEquals(4, service.get(id).itemCount());
+        }
+        assertEquals(0, inventory.requests(), "Inventory saw no request, so no stock moved");
+        assertEquals(List.of(), bus.sendLog(), "Start, Scan, and Lookup put nothing on the broker");
+        assertEquals(List.of(), database.outbox.ordered(), "and recorded nothing for it to send");
+    }
+
+    /** Runs {@code rejection} and asserts that basket {@code id}'s row and accepted scans are unchanged. */
+    private void assertUnchangedBy(String id, Runnable rejection) {
+        var row = database.rows.get(id);
+        List<Integer> sequences = database.sequences(id);
+        rejection.run();
+        var after = database.rows.get(id);
+        assertEquals(row.itemCount(), after.itemCount(), "the item count is unchanged");
+        assertEquals(row.total(), after.total(), "the running total is unchanged");
+        assertEquals(row.status(), after.status());
+        assertEquals(sequences, database.sequences(id), "no accepted scan was committed");
+    }
+
     private TransactionService newService(ProductCatalogReplica catalog, int cacheEntries) {
         return newService(catalog, cacheEntries, CheckoutOrchestrator.Settings.defaults());
     }

@@ -25,7 +25,8 @@ import java.util.function.Supplier;
  *       {@code max.in.flight.requests.per.connection=5}, {@code delivery.timeout.ms=30000},
  *       {@code max.block.ms=1000}, and a per-producer {@code linger.ms}: 0 for checkout and outcome events,
  *       {@code SCAN_PRODUCER_LINGER_MS} (5) for scan and catalog batches. {@code request.timeout.ms} is 10,000,
- *       because Kafka requires {@code delivery.timeout.ms} to be at least {@code linger.ms} plus it.</li>
+ *       because Kafka requires {@code delivery.timeout.ms} to be at least {@code linger.ms} plus it. A
+ *       {@link #sender} creates its producer on the first send, so startup never depends on the broker.</li>
  *   <li><b>Consumers</b>: {@code enable.auto.commit=false}, {@code auto.offset.reset=earliest},
  *       {@code isolation.level=read_uncommitted}, {@code fetch.min.bytes=1}, {@code fetch.max.wait.ms=50},
  *       {@code max.poll.records=500}, and {@code session.timeout.ms=10000} with {@code heartbeat.interval.ms=3000},
@@ -118,8 +119,12 @@ public final class KafkaClients {
         };
     }
 
-    /** A {@link RecordSender} over a new producer with the given {@code linger.ms}. */
+    /**
+     * A {@link RecordSender} over a producer with the given {@code linger.ms}, created on its first send, so a
+     * service starts and serves whether or not the broker is reachable, or its address even resolves (FR-015).
+     */
     public static KafkaRecordSender sender(Map<String, String> environment, String clientId, int lingerMs) {
-        return new KafkaRecordSender(producer(environment, clientId, lingerMs));
+        Map<String, String> copy = Map.copyOf(environment);
+        return KafkaRecordSender.lazy(() -> producer(copy, clientId, lingerMs));
     }
 }

@@ -37,7 +37,11 @@ import java.util.concurrent.Executors;
  * settles attempts (D7). The product replica is loaded from the database first, so Scan works before the
  * catalog topic is read, and is then kept current by the catalog consumer, which replays the topic from
  * offset 0 (D9); Transaction never calls Inventory. The scan relay publishes accepted scans as {@code ScanAccepted}
- * records for Analytics (D10). Transaction calls no peer, and the broker is never awaited at startup.
+ * records for Analytics (D10). Transaction calls no peer, and the broker is never awaited at startup: the
+ * producers are created on their first send, on the dispatcher's and the relay's threads, and each consumer
+ * opens its stream on its own thread, so the HTTP server starts and serves Start, Scan, and Lookup whether or
+ * not the broker is reachable or its address resolves (FR-015). None of those requests touches a producer, the
+ * scan sink, or a consumer.
  */
 public final class TransactionMain {
     private TransactionMain() { }

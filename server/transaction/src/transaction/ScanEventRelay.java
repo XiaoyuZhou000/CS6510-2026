@@ -24,7 +24,9 @@ import java.util.concurrent.atomic.LongAdder;
  *   <li>Only after every confirmation does it set {@code published_at} on exactly those rows, in a new short
  *       transaction, then it starts the next round at once. Any other outcome leaves the rows unpublished; they
  *       are reselected and resent after a backoff from 100 ms to 5 s. A batch that cannot be encoded also
- *       raises an alarm, and nothing is ever skipped.</li>
+ *       raises an alarm, and nothing is ever skipped. During a broker outage each failed round therefore costs
+ *       about one {@code max.block.ms} on this thread and holds no pool connection, so Scan never waits on
+ *       it (FR-015).</li>
  *   <li>With nothing to send it polls every 50 ms, counting {@code transaction.relay.idlePolls}.</li>
  *   <li>{@code OUTBOX_COALESCE_MS} (default 0, off) is the CP3 coalescing switch (R23): after a partial batch
  *       the next round waits that long, so it carries more events and costs fewer marking commits. A full

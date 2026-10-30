@@ -116,7 +116,7 @@ public final class InProcessTransaction implements AutoCloseable {
             names = builder.names != null ? builder.names : KafkaTestSupport.runTopics();
             KafkaTestSupport.createCatalogTopics(names);
             bus = null;
-            sender = KafkaTestSupport.sender("test-transaction-checkout", 0);
+            sender = builder.wrapSender.apply(KafkaTestSupport.sender("test-transaction-checkout", 0));
             ownsSender = true;
             streams = KafkaTestSupport.streams("test-transaction-outcome",
                     names.group(TopicNames.TRANSACTION_CHECKOUT_OUTCOME_GROUP));
@@ -124,7 +124,7 @@ public final class InProcessTransaction implements AutoCloseable {
         } else {
             names = builder.names != null ? builder.names : TopicNames.unprefixed();
             bus = builder.bus != null ? builder.bus : InMemoryEventBus.withCatalogTopics(names, builder.seed);
-            sender = bus;
+            sender = builder.wrapSender.apply(bus);
             ownsSender = false;
             streams = bus::stream;
             catalogStreams = bus::stream;
@@ -217,6 +217,7 @@ public final class InProcessTransaction implements AutoCloseable {
         private UnaryOperator<TransactionStore> wrapTransactions = UnaryOperator.identity();
         private UnaryOperator<ScanStore> wrapScans = UnaryOperator.identity();
         private UnaryOperator<CheckoutAttemptStore> wrapAttempts = UnaryOperator.identity();
+        private UnaryOperator<RecordSender> wrapSender = UnaryOperator.identity();
         private CheckoutOrchestrator.Settings settings = CheckoutOrchestrator.Settings.defaults();
         private CheckoutOrchestrator.Timing timing = CheckoutOrchestrator.Timing.SYSTEM;
         private CheckoutRecoveryWorker.Settings recoverySettings = CheckoutRecoveryWorker.Settings.defaults();
@@ -244,6 +245,8 @@ public final class InProcessTransaction implements AutoCloseable {
         public Builder wrapTransactions(UnaryOperator<TransactionStore> wrap) { this.wrapTransactions = wrap; return this; }
         public Builder wrapScans(UnaryOperator<ScanStore> wrap) { this.wrapScans = wrap; return this; }
         public Builder wrapAttempts(UnaryOperator<CheckoutAttemptStore> wrap) { this.wrapAttempts = wrap; return this; }
+        /** Wraps the dispatcher's record sender, for example in a {@link CountingRecordSender}. */
+        public Builder wrapSender(UnaryOperator<RecordSender> wrap) { this.wrapSender = wrap; return this; }
         public Builder settings(CheckoutOrchestrator.Settings checkoutSettings) { this.settings = checkoutSettings; return this; }
         public Builder timing(CheckoutOrchestrator.Timing checkoutTiming) { this.timing = checkoutTiming; return this; }
         public Builder recovery(CheckoutRecoveryWorker.Settings settings) { this.recoverySettings = settings; return this; }

@@ -180,6 +180,16 @@ public final class CheckoutDeployment implements AutoCloseable {
     }
 
     /**
+     * Restarts Transaction and waits only until it answers HTTP, for a test that runs while the broker is stopped:
+     * no consumer group can be awaited then.
+     */
+    public void restartTransactionWithoutBroker() throws Exception {
+        closeQuietly(transaction);
+        transaction = transactionBuilder(transactionHttpPort).start();
+        transaction.awaitHttp("/transactions/missing", 404, Duration.ofSeconds(60));
+    }
+
+    /**
      * Starts one more Transaction process over the same Transaction schema on {@code httpPort}, with its own
      * relay; it is stopped with the deployment.
      */

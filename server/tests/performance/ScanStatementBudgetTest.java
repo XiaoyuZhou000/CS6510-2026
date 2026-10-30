@@ -1,9 +1,12 @@
 package performance;
 
 import database.JdbcProductReplicaStore;
+import database.JdbcRelayStore;
 import database.StoreFailure;
+import messaging.KafkaScanEventSink;
 import org.junit.jupiter.api.Test;
 import support.CountingConnections;
+import support.CountingRecordSender;
 import support.FaultingConnections;
 import support.FaultingConnections.CommitFault;
 import support.InProcessTransaction;
@@ -13,6 +16,7 @@ import support.TestEvents;
 import support.TransactionTestSchema;
 import transaction.CatalogEventHandler;
 import transaction.ProductCatalogReplica;
+import transaction.ScanEventRelay;
 import transaction.TransactionOperations;
 import transaction.TransactionService;
 
@@ -26,7 +30,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Start and Scan ordering, atomicity, and remote-call rules (strict, exact, gating) plus their measured
- * statement budgets (R22; plan.md "Key flows and statement budgets").
+ * statement budgets (R22; plan.md "Key flows and statement budgets"). A counting {@code RecordSender} under the
+ * dispatcher shows that Start, Scan, and Lookup send no record on the request thread (FR-015, 006 US2).
  */
 class ScanStatementBudgetTest {
 
@@ -34,7 +39,9 @@ class ScanStatementBudgetTest {
     void aScanIsAcknowledgedOnlyAfterItsCommitReturns() throws Exception {
         FaultingConnections faults = new FaultingConnections();
         try (TransactionTestSchema schema = seeded()) {
-            InProcessTransaction transaction = InProcessTransaction.over(schema).decorator(faults::wrap).build();
+            CountingRecordSender[] sends = new CountingRecordSender[1];
+            InProcessTransaction transaction = InProcessTransaction.over(schema).decorator(faults::wrap)
+                    .wrapSender(sender -> sends[0] = new CountingRecordSender(sender)).build();
             String id = transaction.start();
             transaction.scan(id, "SKU-000001");
 
@@ -60,6 +67,8 @@ class ScanStatementBudgetTest {
             assertEquals(commitsBefore + 1, commitsReturnedAtResult.get(), "the commit had returned before the result");
             assertEquals(2, view.itemCount());
             assertEquals(2, schema.scans(id).size());
+            assertEquals(2, transaction.service.get(id).itemCount());
+            assertNoSends(sends[0], Thread.currentThread(), scanning);
         }
     }
 
@@ -67,7 +76,9 @@ class ScanStatementBudgetTest {
     void eitherKindOfCommitFailureAcknowledgesNothing() throws Exception {
         FaultingConnections faults = new FaultingConnections();
         try (TransactionTestSchema schema = seeded()) {
-            InProcessTransaction transaction = InProcessTransaction.over(schema).decorator(faults::wrap).build();
+            CountingRecordSender[] sends = new CountingRecordSender[1];
+            InProcessTransaction transaction = InProcessTransaction.over(schema).decorator(faults::wrap)
+                    .wrapSender(sender -> sends[0] = new CountingRecordSender(sender)).build();
             String id = transaction.start();
             for (CommitFault fault : new CommitFault[]{CommitFault.failBeforeCommit(), CommitFault.failAfterCommit()}) {
                 faults.armForCurrentThread(fault);
@@ -77,6 +88,8 @@ class ScanStatementBudgetTest {
             }
             assertEquals(1, schema.scans(id).size(), "only the commit that failed after succeeding is durable");
             assertEquals(2, transaction.scan(id, "SKU-000001").itemCount(), "and the next Scan builds on it");
+            assertEquals(2, transaction.service.get(id).itemCount());
+            assertNoSends(sends[0], Thread.currentThread());
         }
     }
 
@@ -84,7 +97,9 @@ class ScanStatementBudgetTest {
     void theGuardedUpdateAndTheEventShareOneCommitAndStartAndScanMakeNoRemoteCall() throws Exception {
         CountingConnections counting = new CountingConnections();
         try (TransactionTestSchema schema = seeded()) {
-            InProcessTransaction transaction = InProcessTransaction.over(schema).decorator(counting::wrap).build();
+            CountingRecordSender[] sends = new CountingRecordSender[1];
+            InProcessTransaction transaction = InProcessTransaction.over(schema).decorator(counting::wrap)
+                    .wrapSender(sender -> sends[0] = new CountingRecordSender(sender)).build();
             assertTrue(new CatalogEventHandler(new JdbcProductReplicaStore(transaction.pool), new ProductCatalogReplica())
                     .loadDurable(), "the durable replica the catalog events left is what Scan prices from");
             String id;
@@ -107,6 +122,21 @@ class ScanStatementBudgetTest {
             assertTrue(Arrays.stream(TransactionService.class.getConstructors()[0].getParameterTypes())
                     .noneMatch(type -> type.getPackageName().equals("messaging") || type.getPackageName().equals("rpc")
                             || type.getSimpleName().contains("Inventory")), "the Scan path has no route to Inventory");
+            assertEquals(3, transaction.service.get(id).itemCount());
+            assertNoSends(sends[0], Thread.currentThread());
+
+            // The scans reach the broker only through the relay's own thread, over the same counting sender.
+            try (ScanEventRelay relay = new ScanEventRelay(new JdbcRelayStore(schema.pool()),
+                    new KafkaScanEventSink(sends[0], transaction.names), ScanEventRelay.Settings.defaults())) {
+                relay.start();
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+                while (schema.undeliveredCount() > 0) {
+                    assertTrue(System.nanoTime() < deadline, "the relay never published the scans");
+                    Thread.sleep(10);
+                }
+            }
+            assertEquals(3, sends[0].sends(), "one record per accepted scan, all sent by the relay");
+            assertNoSends(sends[0], Thread.currentThread());
         }
     }
 
@@ -114,7 +144,9 @@ class ScanStatementBudgetTest {
     void warmScanStartAndColdScanStayWithinTheirStatementBudgets() throws Exception {
         CountingConnections counting = new CountingConnections();
         try (TransactionTestSchema schema = seeded()) {
-            InProcessTransaction transaction = InProcessTransaction.over(schema).decorator(counting::wrap).build();
+            CountingRecordSender[] sends = new CountingRecordSender[1];
+            InProcessTransaction transaction = InProcessTransaction.over(schema).decorator(counting::wrap)
+                    .wrapSender(sender -> sends[0] = new CountingRecordSender(sender)).build();
             String id;
             try (CountingConnections.Scope scope = counting.scope()) {
                 id = transaction.start();
@@ -132,7 +164,9 @@ class ScanStatementBudgetTest {
                         scope.counts().setAutoCommitCalls() + scope.counts().setTransactionIsolationCalls());
             }
 
-            InProcessTransaction restarted = InProcessTransaction.over(schema).pool(transaction.pool).build();
+            CountingRecordSender[] restartedSends = new CountingRecordSender[1];
+            InProcessTransaction restarted = InProcessTransaction.over(schema).pool(transaction.pool)
+                    .wrapSender(sender -> restartedSends[0] = new CountingRecordSender(sender)).build();
             try (CountingConnections.Scope scope = counting.scope()) {
                 assertEquals(3, restarted.scan(id, "SKU-000002").itemCount());
                 StatementBudgets.assertWithin("scan.cold.extraReads", scope.counts().selects());
@@ -142,6 +176,16 @@ class ScanStatementBudgetTest {
                 restarted.scan(id, "SKU-000002");
                 assertEquals(0, scope.counts().selects(), "the cold load happens once per load");
             }
+            assertEquals(4, restarted.service.get(id).itemCount());
+            assertNoSends(sends[0], Thread.currentThread());
+            assertNoSends(restartedSends[0], Thread.currentThread());
+        }
+    }
+
+    /** Start, Scan, and Lookup sent no record on any of {@code requestThreads} (FR-015). */
+    private static void assertNoSends(CountingRecordSender sends, Thread... requestThreads) {
+        for (Thread thread : requestThreads) {
+            assertEquals(0, sends.sendsOn(thread), "Start, Scan, and Lookup send nothing on " + thread.getName());
         }
     }
 
