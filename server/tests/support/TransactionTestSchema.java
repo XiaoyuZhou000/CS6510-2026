@@ -26,6 +26,16 @@ public final class TransactionTestSchema extends TestSchema {
         return new TransactionTestSchema(options);
     }
 
+    @Override
+    protected List<String> eventTables() {
+        return List.of("outbox_event", "dead_letter_event");
+    }
+
+    /** Rows of {@code outbox_event} not yet confirmed by the broker. */
+    public long unpublishedOutboxCount() throws SQLException {
+        return queryLong("SELECT COUNT(*) FROM outbox_event WHERE published_at IS NULL");
+    }
+
     public record TransactionRow(String status, int itemCount, BigDecimal totalAmount, int attemptCount,
                                  Integer activeAttemptNumber, boolean completed) { }
 
@@ -55,7 +65,7 @@ public final class TransactionTestSchema extends TestSchema {
     public List<ScanRow> scans(String transactionId) throws SQLException {
         List<ScanRow> scans = new ArrayList<>();
         try (PreparedStatement sql = admin().prepareStatement(
-                "SELECT scan_id, scan_sequence, sku, product_name, unit_price, delivered_at FROM accepted_scan "
+                "SELECT scan_id, scan_sequence, sku, product_name, unit_price, published_at FROM accepted_scan "
                         + "WHERE transaction_id = ? ORDER BY scan_sequence")) {
             sql.setString(1, transactionId);
             try (ResultSet row = sql.executeQuery()) {
@@ -74,7 +84,7 @@ public final class TransactionTestSchema extends TestSchema {
 
     /** Outbox backlog: accepted scans not yet acknowledged by Analytics. */
     public long undeliveredCount() throws SQLException {
-        return queryLong("SELECT COUNT(*) FROM accepted_scan WHERE delivered_at IS NULL");
+        return queryLong("SELECT COUNT(*) FROM accepted_scan WHERE published_at IS NULL");
     }
 
     public List<AttemptRow> attempts(String transactionId) throws SQLException {
@@ -150,11 +160,11 @@ public final class TransactionTestSchema extends TestSchema {
         }
     }
 
-    /** The scan_id of every row whose delivered_at is set, ascending. */
+    /** The scan_id of every row whose published_at is set, ascending. */
     public List<Long> deliveredIds() throws SQLException {
         List<Long> ids = new ArrayList<>();
         try (PreparedStatement sql = admin().prepareStatement(
-                "SELECT scan_id FROM accepted_scan WHERE delivered_at IS NOT NULL ORDER BY scan_id");
+                "SELECT scan_id FROM accepted_scan WHERE published_at IS NOT NULL ORDER BY scan_id");
              ResultSet row = sql.executeQuery()) {
             while (row.next()) ids.add(row.getLong(1));
         }

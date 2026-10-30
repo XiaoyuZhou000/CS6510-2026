@@ -1,4 +1,4 @@
-package rpc;
+package time;
 
 import java.time.Duration;
 import java.util.function.LongSupplier;

@@ -22,7 +22,7 @@ class JdbcRelayStoreTest {
             long b = schema.insertScan("tx-1", 1, "SKU-000001");
             long c = schema.insertScan("tx-1", 2, "SKU-000003");
             long d = schema.insertScan("tx-2", 2, "SKU-000004");
-            schema.update("UPDATE accepted_scan SET delivered_at = NOW(3) WHERE scan_id = ?", b);
+            schema.update("UPDATE accepted_scan SET published_at = NOW(3) WHERE scan_id = ?", b);
             JdbcRelayStore store = new JdbcRelayStore(schema.pool());
 
             List<RelayStore.UndeliveredScan> undelivered = store.selectUndelivered(10);
@@ -57,7 +57,7 @@ class JdbcRelayStoreTest {
             assertEquals(3, store.countUndelivered());
             // A second relay acknowledging the same rows later keeps the first delivery time.
             assertEquals(1, store.markDelivered(List.of(ids[0], ids[1]), delivered.plusSeconds(60)));
-            assertEquals(1, schema.queryLong("SELECT COUNT(*) FROM accepted_scan WHERE scan_id = ? AND delivered_at = ?",
+            assertEquals(1, schema.queryLong("SELECT COUNT(*) FROM accepted_scan WHERE scan_id = ? AND published_at = ?",
                     ids[0], java.sql.Timestamp.from(delivered)));
         }
     }

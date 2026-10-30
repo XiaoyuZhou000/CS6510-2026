@@ -1,7 +1,7 @@
 package analytics;
 
 import database.ScanIngestStore;
-import rpc.FaultHooks;
+import faults.FaultHooks;
 
 import java.util.List;
 import java.util.Objects;

@@ -39,7 +39,7 @@ class AnalyticsIngestCrashTest {
             List<AnalyticsTestSchema.StoredEvent> beforeRestart = deployment.analyticsSchema.events();
             boolean committed = hook.equals("analytics.ingest.afterCommit");
             assertEquals(committed ? 500 : 0, beforeRestart.size(), "only a committed batch is durable at " + hook);
-            assertEquals(SCANS, deployment.transactionSchema.undeliveredCount(), "delivered_at is set only after an OK reply");
+            assertEquals(SCANS, deployment.transactionSchema.undeliveredCount(), "published_at is set only after an OK reply");
 
             deployment.startAnalytics();
             deployment.awaitAnalyticsHoldsEveryScan(Duration.ofSeconds(60));

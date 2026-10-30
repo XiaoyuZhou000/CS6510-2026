@@ -10,11 +10,11 @@ import java.util.Objects;
 
 /**
  * One SELECT per round, and after an acknowledged delivery one UPDATE and one commit (R22). The SELECT uses
- * the {@code (delivered_at, scan_id)} index and ends its unit with a rollback.
+ * the {@code (published_at, scan_id)} index and ends its unit with a rollback.
  */
 public final class JdbcRelayStore implements RelayStore {
     private static final String SELECT_UNDELIVERED = "SELECT scan_id, transaction_id, scan_sequence, sku, product_name, "
-            + "accepted_at FROM accepted_scan WHERE delivered_at IS NULL ORDER BY scan_id LIMIT ?";
+            + "accepted_at FROM accepted_scan WHERE published_at IS NULL ORDER BY scan_id LIMIT ?";
 
     private final ConnectionPool pool;
 
@@ -45,7 +45,7 @@ public final class JdbcRelayStore implements RelayStore {
         Objects.requireNonNull(deliveredAt, "deliveredAt");
         if (scanIds == null || scanIds.isEmpty()) throw new IllegalArgumentException("scanIds must not be empty");
         StringBuilder sql = new StringBuilder(80 + scanIds.size() * 3)
-                .append("UPDATE accepted_scan SET delivered_at = ? WHERE delivered_at IS NULL AND scan_id IN (");
+                .append("UPDATE accepted_scan SET published_at = ? WHERE published_at IS NULL AND scan_id IN (");
         for (int i = 0; i < scanIds.size(); i++) sql.append(i == 0 ? "?" : ", ?");
         sql.append(')');
         return JdbcUnitOfWork.inTransaction(pool, "transaction.relay.mark", connection -> {
@@ -62,7 +62,7 @@ public final class JdbcRelayStore implements RelayStore {
     public long countUndelivered() {
         return JdbcUnitOfWork.read(pool, "transaction.relay.count", connection -> {
             try (PreparedStatement select = connection.prepareStatement(
-                    "SELECT COUNT(*) FROM accepted_scan WHERE delivered_at IS NULL");
+                    "SELECT COUNT(*) FROM accepted_scan WHERE published_at IS NULL");
                  ResultSet row = select.executeQuery()) {
                 row.next();
                 return row.getLong(1);

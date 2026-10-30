@@ -82,5 +82,7 @@ SELECT 'PASS' invariant_status,
        (SELECT last_position FROM scan_sequence WHERE sequence_key = 1) last_position,
        (SELECT COUNT(*) FROM product_name) product_names,
        (SELECT COUNT(*) FROM popular_window) popular_windows,
-       (SELECT last_window_end FROM analytics_checkpoint WHERE checkpoint_key = 1) latest_window_end;
+       (SELECT last_window_end FROM analytics_checkpoint WHERE checkpoint_key = 1) latest_window_end,
+       (SELECT COUNT(*) FROM dead_letter_event) parked_events,
+       (SELECT COUNT(*) FROM consumer_offset) consumer_offsets;
 DROP PROCEDURE assert_zero;

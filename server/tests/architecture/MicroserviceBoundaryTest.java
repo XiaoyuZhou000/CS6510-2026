@@ -2,7 +2,7 @@ package architecture;
 
 import database.DatabaseConfig;
 import org.junit.jupiter.api.Test;
-import rpc.FaultHooks;
+import faults.FaultHooks;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;

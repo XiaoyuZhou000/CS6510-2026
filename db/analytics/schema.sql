@@ -7,6 +7,8 @@
 -- It names no schema and references no other service's data (R3).
 -- =============================================================================
 
+DROP TABLE IF EXISTS consumer_offset;
+DROP TABLE IF EXISTS dead_letter_event;
 DROP TABLE IF EXISTS popular_item;
 DROP TABLE IF EXISTS popular_window;
 DROP TABLE IF EXISTS analytics_checkpoint;
@@ -95,3 +97,39 @@ CREATE TABLE analytics_checkpoint (
 ) ENGINE = InnoDB;
 
 INSERT INTO analytics_checkpoint (checkpoint_key, last_window_end) VALUES (1, 0);
+
+-- Records this service's consumers could not process, parked after their retries (D6, FR-013).
+-- A parked event_id that arrives again increments park_count instead of adding a row.
+CREATE TABLE dead_letter_event (
+    dead_letter_id  BIGINT       NOT NULL AUTO_INCREMENT,
+    -- NULL only when the envelope could not be decoded.
+    event_id        VARCHAR(80)  NULL,
+    topic           VARCHAR(64)  NOT NULL,
+    partition_no    INT          NOT NULL,
+    record_offset   BIGINT       NOT NULL,
+    event_type      VARCHAR(48)  NULL,
+    schema_version  INT          NULL,
+    reason          VARCHAR(64)  NOT NULL,
+    detail          VARCHAR(500) NULL,
+    record_bytes    MEDIUMBLOB   NOT NULL,
+    first_parked_at TIMESTAMP(3) NOT NULL,
+    last_parked_at  TIMESTAMP(3) NOT NULL,
+    park_count      INT          NOT NULL DEFAULT 1,
+    PRIMARY KEY (dead_letter_id),
+    UNIQUE KEY uq_dead_letter_event_id (event_id),
+    CONSTRAINT chk_dead_letter_reason CHECK (reason IN ('UNDECODABLE', 'UNKNOWN_TYPE', 'UNSUPPORTED_VERSION',
+        'INVALID_PAYLOAD', 'PAYLOAD_MISMATCH', 'UNKNOWN_ATTEMPT', 'INTEGRITY', 'HANDLER_ERROR')),
+    CONSTRAINT chk_dead_letter_park_count CHECK (park_count >= 1)
+) ENGINE = InnoDB;
+
+-- Analytics' consumption checkpoint (D10, FR-049): the next scan-accepted offset to read per
+-- partition, written in the same ingestion transaction as the scans it covers. Broker offsets are
+-- only an optimization; a restart seeks to next_offset.
+CREATE TABLE consumer_offset (
+    topic        VARCHAR(64)  NOT NULL,
+    partition_no INT          NOT NULL,
+    next_offset  BIGINT       NOT NULL,
+    updated_at   TIMESTAMP(3) NOT NULL,
+    PRIMARY KEY (topic, partition_no),
+    CONSTRAINT chk_consumer_offset_next CHECK (next_offset >= 0)
+) ENGINE = InnoDB;

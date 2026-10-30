@@ -3,7 +3,7 @@ package inventory;
 import api.json.Json;
 import database.CheckoutOperationStore;
 import metrics.PerfMetrics;
-import rpc.FaultHooks;
+import faults.FaultHooks;
 
 import java.util.ArrayList;
 import java.util.Comparator;

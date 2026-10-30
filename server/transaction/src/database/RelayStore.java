@@ -11,11 +11,11 @@ import java.util.Objects;
  */
 public interface RelayStore {
 
-    /** Up to {@code limit} rows whose {@code delivered_at} is NULL, in {@code scan_id} order; one SELECT. */
+    /** Up to {@code limit} rows whose {@code published_at} is NULL, in {@code scan_id} order; one SELECT. */
     List<UndeliveredScan> selectUndelivered(int limit) throws StoreFailure;
 
     /**
-     * Sets {@code delivered_at} on exactly the given rows that are still undelivered, in one UPDATE and one
+     * Sets {@code published_at} on exactly the given rows that are still undelivered, in one UPDATE and one
      * commit, and returns how many rows changed. A row another relay already marked keeps its first time.
      */
     int markDelivered(List<Long> scanIds, Instant deliveredAt) throws StoreFailure;

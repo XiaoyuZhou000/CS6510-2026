@@ -59,7 +59,7 @@ class ScanEventDeliveryTest {
             assertEquals(137, deployment.transactionProcess().awaitExit(Duration.ofSeconds(30)),
                     "Transaction halts after Analytics acknowledged the batch");
             assertEquals(40, deployment.analyticsSchema.storedEvents(), "Analytics committed the batch before its OK");
-            assertEquals(40, deployment.transactionSchema.undeliveredCount(), "delivered_at was never committed");
+            assertEquals(40, deployment.transactionSchema.undeliveredCount(), "published_at was never committed");
 
             deployment.startTransaction();
             deployment.awaitAnalyticsHoldsEveryScan(DRAIN);

@@ -167,7 +167,7 @@ function Get-ServiceRow([string]$Service, [string]$Query) {
 function Get-Sample([string]$Phase) {
     $c = $credentials.transaction
     $lines = @(Invoke-MySql -MySql $mysql -User $c.User -Password $c.Password -Database $c.Database -Batch -Query (
-        "SELECT (SELECT COUNT(*) FROM accepted_scan WHERE delivered_at IS NULL), " +
+        "SELECT (SELECT COUNT(*) FROM accepted_scan WHERE published_at IS NULL), " +
         "(SELECT COUNT(*) FROM checkout_attempt WHERE state = 'PENDING'); " +
         "SHOW GLOBAL STATUS WHERE Variable_name IN " +
         "('Innodb_row_lock_waits', 'Innodb_row_lock_time', 'Com_commit', 'Innodb_log_waits')"))

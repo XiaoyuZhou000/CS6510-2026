@@ -1,6 +1,6 @@
 package support;
 
-import rpc.FaultHooks;
+import faults.FaultHooks;
 
 import java.util.LinkedHashMap;
 import java.util.Map;

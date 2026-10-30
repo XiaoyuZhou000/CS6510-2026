@@ -1,14 +1,26 @@
-<#
+﻿<#
 .SYNOPSIS
     Interleaved A/B benchmark comparison with the R22 decision rule.
 
 .DESCRIPTION
     Runs variants A and B as alternating pairs (A B, then B A, then A B, ...) to cancel linear drift.
-    Every run starts from its own full reset. Variant runs use benchmark-microservices.ps1 with the
-    variant's -ExtraEnv; with -BaselineWorktree, variant A instead runs that worktree's
-    server/benchmark-scan.ps1 with the T001 arguments. Runs are labelled <label>-a-<n> and
-    <label>-b-<n>. A variant run that is not comparable aborts the comparison, and a baseline run must
-    pass its own harness's checks.
+    Every run starts from its own full reset. Variant runs use benchmark-event-based.ps1 with the
+    variant's -ExtraEnv. Runs are labelled <label>-a-<n> and <label>-b-<n>. A variant run that is not
+    comparable aborts the comparison, and a baseline run must pass its own harness's checks.
+
+    Baselines replace variant A:
+      - -BaselineCommit <commit> (feature 006, T042; for example 8891c57, the feature 005 release):
+        variant A runs that commit's own server/benchmark-microservices.ps1 from a git worktree of
+        it, in a separate powershell.exe, with its defaults; variant B runs benchmark-event-based.ps1
+        with -VariantB. The worktree is -BaselineWorktree if given, else
+        ../cs6510-baseline-<commit> beside this repository, created with git worktree add --detach
+        when missing. Build it once before comparing (server/build.sh in the worktree); the
+        comparison refuses an unbuilt worktree. Each baseline run is copied from the worktree's
+        load-client/reports/microservices-architecture/<run label>/ to this repository's reports
+        and must be comparable by its own evidence.json. The broker keeps running, idle, during the
+        baseline runs.
+      - -BaselineWorktree alone (feature 005, T001 method): variant A runs that worktree's
+        server/benchmark-scan.ps1 with the T001 arguments.
 
     Decision rule (R22, streamlined 2026-10-22): the script runs exactly -Pairs pairs, never more, and
     classifies the result by delta, B's totalTransactions median against A's in percent. Differences
@@ -35,15 +47,16 @@
     mid-run, are moved to compare/<label>/interrupted/. compare.json records how many pairs were
     resumed, so a comparison that spans a restart is visible.
 
-    Output: load-client/reports/microservices-architecture/compare/<label>/compare.json, plus a
-    Markdown row for checkpoints.md, printed and saved as compare.md.
+    Output: load-client/reports/event-based-architecture/compare/<label>/compare.json, plus a
+    Markdown row for checkpoints.md, printed and saved as compare.md. Run directories go to
+    load-client/reports/event-based-architecture/<run label>/.
 
-    Dot-source this file (. ./benchmark-compare.ps1) to load its statistics functions without
-    running a comparison.
+    Dot-source this file (. ./benchmark-compare.ps1) to load its statistics and idle-gate functions
+    without running a comparison; benchmark-event-based.ps1 does so for its own idle gate.
 
 .EXAMPLE
-    ./benchmark-compare.ps1 -Workload stress -Label cp3-screen-tx48-80-stress -VariantB @{ TRANSACTION_DB_POOL_SIZE = '48'; TRANSACTION_DB_POOL_MAX_SIZE = '80' } -NginxBin C:\nginx\nginx.exe
-    ./benchmark-compare.ps1 -Workload stress -Label cp4-final-stress -BaselineWorktree ..\..\cs6510-cp0 -Pairs 3 -NginxBin C:\nginx\nginx.exe
+    ./benchmark-compare.ps1 -Workload stress -Label cp3-screen-flush-stress -VariantB @{ KAFKA_FLUSH_EVERY_MESSAGE = 'true' } -NginxBin C:\nginx\nginx.exe -IdleCpuCores 2.0 -BlockingProcess WardogsClient-Win64-Shipping,ROTTR
+    ./benchmark-compare.ps1 -Workload default -Label cp4-vs-cp0-default -BaselineCommit 8891c57 -NginxBin C:\nginx\nginx.exe -IdleCpuCores 2.0 -BlockingProcess WardogsClient-Win64-Shipping,ROTTR
 #>
 param(
     [ValidateSet('default', 'stress')][string]$Workload,
@@ -51,6 +64,7 @@ param(
     [hashtable]$VariantA = @{},
     [hashtable]$VariantB = @{},
     [string]$BaselineWorktree,
+    [string]$BaselineCommit,
     [ValidateRange(1, 20)][int]$Pairs = 1,
     [string]$MySqlExe,
     [string]$NginxBin,
@@ -155,17 +169,30 @@ function Get-Decision($RunsA, $RunsB) {
     }
 }
 
+# Reads the evidence.json of benchmark-event-based.ps1 (fr061 counts) or of feature 005's
+# benchmark-microservices.ps1 (fr054 counts, no harness field).
 function Read-MicroservicesRun([string]$EvidencePath) {
     $evidence = Get-Content -Raw $EvidencePath | ConvertFrom-Json
     $operations = $evidence.client.operations
+    $source = 'benchmark-microservices'
+    if ($evidence.PSObject.Properties['harness']) { $source = $evidence.harness }
+    $counts = $evidence.fr054
+    $parked = $null; $finalLag = $null
+    if ($evidence.PSObject.Properties['fr061']) {
+        $counts = $evidence.fr061
+        $parked = $counts.parkedEvents
+        $finalLag = $counts.finalConsumerLag
+    }
     $commitsPerTransaction = $null
-    $completed = $evidence.fr054.completedTransactions
+    $completed = $counts.completedTransactions
     if ($null -ne $evidence.samples.commitsDelta -and $completed -gt 0) {
         $commitsPerTransaction = [double]$evidence.samples.commitsDelta / $completed
     }
     return [pscustomobject]@{
-        source = 'benchmark-microservices'
+        source = $source
         comparable = [bool]$evidence.comparable
+        parkedEvents = $parked
+        finalConsumerLag = $finalLag
         totalTransactions = $evidence.client.totalTransactions
         scanP99Ms = $operations.SCAN_ITEM.p99Ms
         completeP99Ms = $operations.COMPLETE_TRANSACTION.p99Ms
@@ -325,15 +352,60 @@ function Format-Summary($Summary) {
     return ('{0} ({1}-{2})' -f $Summary.median, $Summary.range.min, $Summary.range.max)
 }
 
+<#
+    The worktree of the baseline commit: $Path, or ../cs6510-baseline-<commit> beside the repository.
+    A missing one is created detached at the commit; an existing one must be checked out at it. An
+    unbuilt worktree is refused. Returns its full path.
+#>
+function Initialize-BaselineWorktree([string]$Repo, [string]$Commit, [string]$Path) {
+    if ($Commit -notmatch '^[0-9a-fA-F]{7,40}$') { throw "-BaselineCommit must be a commit hash: $Commit" }
+    if (-not $Path) { $Path = Join-Path (Split-Path -Parent $Repo) "cs6510-baseline-$Commit" }
+    $Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    # git reports progress on stderr, which Windows PowerShell 5.1 turns into errors under 'Stop'.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $sha = "$(& git -C $Repo rev-parse --verify --quiet "$Commit^{commit}" 2>&1 | Select-Object -First 1)".Trim()
+        if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[0-9a-f]{40}$') { throw "Unknown baseline commit: $Commit" }
+        if (-not (Test-Path $Path)) {
+            Write-Host "Creating the baseline worktree $Path at $sha" -ForegroundColor Cyan
+            $output = @(& git -C $Repo worktree add --detach $Path $sha 2>&1 | ForEach-Object { "$_" })
+            if ($LASTEXITCODE -ne 0) { throw "git worktree add failed: $($output -join ' ')" }
+        }
+        $head = "$(& git -C $Path rev-parse HEAD 2>&1 | Select-Object -First 1)".Trim()
+        if ($LASTEXITCODE -ne 0 -or $head -ne $sha) { throw "Baseline worktree $Path is at '$head', not $Commit ($sha)" }
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    $missing = @('server/out/common.jar', 'server/out/contracts.jar', 'server/out/transaction.jar', 'server/out/inventory.jar',
+        'server/out/analytics.jar', 'server/lib/grpc') | Where-Object { -not (Test-Path (Join-Path $Path $_)) }
+    if (@($missing).Count -gt 0) {
+        throw "Baseline worktree $Path is not built (missing $(@($missing) -join ', ')); run ./build.sh in its server/ directory first"
+    }
+    return $Path
+}
+
 function Invoke-Comparison {
     $ErrorActionPreference = 'Stop'
     if (-not $Workload) { throw '-Workload default|stress is required' }
     if (-not $Label -or $Label -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw '-Label is required (letters, digits, . _ -)' }
     $server = $PSScriptRoot
     $repo = Split-Path -Parent $server
-    $reports = Join-Path $repo 'load-client/reports/microservices-architecture'
+    $reports = Join-Path $repo 'load-client/reports/event-based-architecture'
     $compareDir = Join-Path $reports "compare/$Label"
     if (Test-Path (Join-Path $compareDir 'compare.json')) { throw "Comparison already recorded: $compareDir" }
+    if ($BaselineCommit -and $VariantA.Count -gt 0) { throw '-VariantA does not apply with -BaselineCommit; the baseline runs with its defaults' }
+    # The T001 baseline harness (benchmark-scan.ps1) runs only for -BaselineWorktree without -BaselineCommit.
+    $scanBaseline = $BaselineWorktree -and -not $BaselineCommit
+    $baselineRoot = $null
+    $baselineReports = $null
+    if ($BaselineCommit) {
+        $baselineRoot = Initialize-BaselineWorktree $repo $BaselineCommit $BaselineWorktree
+        $baselineReports = Join-Path $baselineRoot 'load-client/reports/microservices-architecture'
+    } elseif ($scanBaseline) {
+        $baselineRoot = (Resolve-Path $BaselineWorktree).Path
+        $baselineReports = Join-Path $baselineRoot 'load-client/reports/transaction-optimization'
+    }
     New-Item -ItemType Directory -Force -Path $compareDir | Out-Null
     . (Join-Path $repo 'db/mysql-tools.ps1')
     $mysql = Resolve-MySqlExe -Explicit $MySqlExe
@@ -388,8 +460,8 @@ function Invoke-Comparison {
             $moved = Join-Path $compareDir "invalidated/$runLabel-attempt$attempt"
             New-Item -ItemType Directory -Force -Path (Split-Path $moved) | Out-Null
             if (Test-Path (Join-Path $reports $runLabel)) { Move-Item (Join-Path $reports $runLabel) $moved }
-            if ($BaselineWorktree) {
-                $baselineRun = Join-Path (Resolve-Path $BaselineWorktree).Path "load-client/reports/transaction-optimization/$runLabel"
+            if ($baselineReports) {
+                $baselineRun = Join-Path $baselineReports $runLabel
                 if (Test-Path $baselineRun) { Move-Item $baselineRun "$moved-baseline" }
             }
             $invalidated.Add([pscustomobject][ordered]@{ label = $runLabel; attempt = $attempt; reason = $reason
@@ -402,8 +474,50 @@ function Invoke-Comparison {
     }
 
     function Invoke-MeasuredRun([string]$Variant, [string]$runLabel) {
-        if ($Variant -eq 'A' -and $BaselineWorktree) {
-            $baselineServer = Join-Path (Resolve-Path $BaselineWorktree).Path 'server'
+        if ($Variant -eq 'A' -and $BaselineCommit) {
+            # A separate powershell.exe runs the baseline commit's own harness, so its variables,
+            # functions, and 'Stop' preference stay out of this process. It cannot prompt there, so
+            # the service passwords are put into this process's environment for the child only.
+            $baselineServer = Join-Path $baselineRoot 'server'
+            $harnessLog = Join-Path $compareDir "$runLabel-harness"
+            $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $baselineServer 'benchmark-microservices.ps1'),
+                '-Workload', $Workload, '-OutputLabel', $runLabel, '-MySqlExe', $mysql, '-JavaExe', $JavaExe)
+            if ($NginxBin) { $arguments += @('-NginxBin', $NginxBin) }
+            # Start-Process joins arguments with spaces and does not quote them, so quote each one.
+            $arguments = $arguments | ForEach-Object { '"' + $_ + '"' }
+            $restore = @{}
+            try {
+                foreach ($service in @('transaction', 'inventory', 'analytics')) {
+                    $variable = "$($service.ToUpperInvariant())_DB_PASSWORD"
+                    if ([Environment]::GetEnvironmentVariable($variable, 'Process')) { continue }
+                    $restore[$variable] = $null
+                    $value = [Environment]::GetEnvironmentVariable($variable, 'User')
+                    if (-not $value) { $value = (Get-ServiceDbCredential -Service $service).Password }
+                    [Environment]::SetEnvironmentVariable($variable, $value, 'Process')
+                }
+                $harness = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WorkingDirectory $baselineServer -WindowStyle Hidden -PassThru `
+                    -ArgumentList ($arguments -join ' ') -RedirectStandardOutput "$harnessLog-stdout.txt" -RedirectStandardError "$harnessLog-stderr.txt"
+                # Windows PowerShell 5.1 reports a null ExitCode unless the process handle is opened before exit.
+                $null = $harness.Handle
+                $harness.WaitForExit()
+            } finally {
+                foreach ($variable in $restore.Keys) { [Environment]::SetEnvironmentVariable($variable, $null, 'Process') }
+            }
+            $baselineDir = Join-Path $baselineReports $runLabel
+            if (-not (Test-Path (Join-Path $baselineDir 'evidence.json'))) {
+                # The harness's own error, for example a startup failure, is the last thing on its stderr.
+                $tail = @(Get-Content "$harnessLog-stderr.txt" -Tail 10 -ErrorAction SilentlyContinue) -join ' | '
+                throw "Baseline run $runLabel left no evidence.json (exit code $($harness.ExitCode)): $tail"
+            }
+            $copy = Join-Path $reports $runLabel
+            New-Item -ItemType Directory -Force -Path $copy | Out-Null
+            Copy-Item (Join-Path $baselineDir '*') $copy
+            $run = Read-MicroservicesRun (Join-Path $copy 'evidence.json')
+            if ($harness.ExitCode -ne 0 -or -not $run.comparable) {
+                throw "Baseline run $runLabel is not comparable (exit code $($harness.ExitCode)); the comparison is aborted"
+            }
+        } elseif ($Variant -eq 'A' -and $scanBaseline) {
+            $baselineServer = Join-Path $baselineRoot 'server'
             if (-not $env:DB_USER) { throw 'The baseline harness needs DB_USER and DB_PASSWORD' }
             # A separate powershell.exe runs the baseline harness as it ran for T001: its native tools
             # write stderr to files instead of PowerShell error records, which its own 'Stop' preference
@@ -419,7 +533,7 @@ function Invoke-Comparison {
             $null = $harness.Handle
             $harness.WaitForExit()
             if ($harness.ExitCode -ne 0) { throw "Baseline harness for $runLabel exited with code $($harness.ExitCode); see $harnessLog-stderr.txt" }
-            $baselineDir = Join-Path (Resolve-Path $BaselineWorktree).Path "load-client/reports/transaction-optimization/$runLabel/$Workload"
+            $baselineDir = Join-Path $baselineReports "$runLabel/$Workload"
             $invariants = Join-Path $baselineDir "$Workload-invariants.txt"
             if (-not (Test-Path $invariants) -or -not (Select-String -Path $invariants -Pattern 'PASS' -Quiet)) {
                 throw "Baseline run $runLabel did not pass its invariant check"
@@ -433,7 +547,7 @@ function Invoke-Comparison {
             if ($Variant -eq 'B') { $extra = $VariantB }
             $arguments = @{ Workload = $Workload; OutputLabel = $runLabel; MySqlExe = $mysql; JavaExe = $JavaExe; ExtraEnv = $extra }
             if ($NginxBin) { $arguments.NginxBin = $NginxBin }
-            & (Join-Path $server 'benchmark-microservices.ps1') @arguments | ForEach-Object { Write-Host $_ }
+            & (Join-Path $server 'benchmark-event-based.ps1') @arguments | ForEach-Object { Write-Host $_ }
             $evidencePath = Join-Path $reports "$runLabel/evidence.json"
             if (-not (Test-Path $evidencePath)) { throw "Run $runLabel left no evidence.json" }
             $run = Read-MicroservicesRun $evidencePath
@@ -446,7 +560,7 @@ function Invoke-Comparison {
     # copied report and passing invariants) is complete and the run passed its checks.
     function Test-CompletedRun([string]$Variant, [string]$RunLabel) {
         $dir = Join-Path $reports $RunLabel
-        if ($Variant -eq 'A' -and $BaselineWorktree) {
+        if ($Variant -eq 'A' -and $scanBaseline) {
             $invariants = Join-Path $dir "$Workload-invariants.txt"
             return (Test-Path (Join-Path $dir 'samples.csv')) -and (Test-Path $invariants) -and
                 (Select-String -Path $invariants -Pattern 'PASS' -Quiet) -and
@@ -460,7 +574,7 @@ function Invoke-Comparison {
     function Add-ResumedRun([string]$Variant, [int]$Number) {
         $runLabel = "$Label-$($Variant.ToLowerInvariant())-$Number"
         $dir = Join-Path $reports $runLabel
-        if ($Variant -eq 'A' -and $BaselineWorktree) { $run = Read-BaselineRun $dir }
+        if ($Variant -eq 'A' -and $scanBaseline) { $run = Read-BaselineRun $dir }
         else { $run = Read-MicroservicesRun (Join-Path $dir 'evidence.json') }
         $cores = $null
         $gate = Join-Path $dir 'idle-gate.json'
@@ -485,8 +599,7 @@ function Invoke-Comparison {
     $leftovers = @(Get-ChildItem $reports -Directory | Where-Object {
         $_.Name -match $pattern -and [int]$Matches[1] -gt $resumedPairs } |
         ForEach-Object { [pscustomobject]@{ item = $_; suffix = '' } })
-    if ($BaselineWorktree) {
-        $baselineReports = Join-Path (Resolve-Path $BaselineWorktree).Path 'load-client/reports/transaction-optimization'
+    if ($baselineReports) {
         if (Test-Path $baselineReports) {
             $leftovers += @(Get-ChildItem $baselineReports -Directory | Where-Object {
                 $_.Name -match $pattern -and [int]$Matches[1] -gt $resumedPairs } |
@@ -513,7 +626,9 @@ function Invoke-Comparison {
     foreach ($metric in $metrics) {
         $summary[$metric] = [ordered]@{ A = Get-VariantSummary $runsA $metric; B = Get-VariantSummary $runsB $metric }
     }
-    $variantADescription = if ($BaselineWorktree) { "baseline worktree $BaselineWorktree (benchmark-scan.ps1, T001 arguments)" } else { $VariantA }
+    $variantADescription = $VariantA
+    if ($BaselineCommit) { $variantADescription = "baseline commit $BaselineCommit, worktree $baselineRoot (its benchmark-microservices.ps1, defaults)" }
+    elseif ($scanBaseline) { $variantADescription = "baseline worktree $BaselineWorktree (benchmark-scan.ps1, T001 arguments)" }
     $result = [ordered]@{
         label = $Label
         workload = $Workload
@@ -529,7 +644,9 @@ function Invoke-Comparison {
         (New-Object System.Text.UTF8Encoding $false))
 
     $tx = $summary.totalTransactions
-    $describeA = if ($BaselineWorktree) { 'CP0 baseline' } else { ($VariantA.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ' }
+    $describeA = ($VariantA.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', '
+    if ($BaselineCommit) { $describeA = "CP0 baseline ($BaselineCommit)" }
+    elseif ($scanBaseline) { $describeA = 'CP0 baseline' }
     $describeB = ($VariantB.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', '
     if (-not $describeA) { $describeA = 'defaults' }
     if (-not $describeB) { $describeB = 'defaults' }

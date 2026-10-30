@@ -2,7 +2,7 @@ package database;
 
 import analytics.ProductNameMap;
 import org.junit.jupiter.api.Test;
-import rpc.FaultHooks;
+import faults.FaultHooks;
 import support.AnalyticsTestSchema;
 import support.CountingConnections;
 import support.FaultInjection;

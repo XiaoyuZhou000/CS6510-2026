@@ -1,0 +1,327 @@
+# Generated once by messaging.EventSchemaCompatibilityTest (T018, FR-014): the v1 event
+# descriptors that old consumers were built from. Never edit.
+file {
+  name: "selfcheckout/events/v1/envelope.proto"
+  package: "selfcheckout.events.v1"
+  message_type {
+    name: "EventEnvelope"
+    field {
+      name: "event_id"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "event_type"
+      number: 2
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "schema_version"
+      number: 3
+      label: LABEL_OPTIONAL
+      type: TYPE_INT32
+    }
+    field {
+      name: "routing_key"
+      number: 4
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "occurred_at_ms"
+      number: 5
+      label: LABEL_OPTIONAL
+      type: TYPE_INT64
+    }
+    field {
+      name: "correlation_id"
+      number: 6
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "producer"
+      number: 7
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "payload"
+      number: 8
+      label: LABEL_OPTIONAL
+      type: TYPE_BYTES
+    }
+  }
+  options {
+    java_package: "selfcheckout.events.v1"
+    java_multiple_files: true
+  }
+  syntax: "proto3"
+}
+file {
+  name: "selfcheckout/events/v1/catalog_events.proto"
+  package: "selfcheckout.events.v1"
+  message_type {
+    name: "CatalogItemPublished"
+    field {
+      name: "sku"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "name"
+      number: 2
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "price"
+      number: 3
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "catalog_version"
+      number: 4
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+  }
+  message_type {
+    name: "CatalogSnapshotPublished"
+    field {
+      name: "catalog_version"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "product_count"
+      number: 2
+      label: LABEL_OPTIONAL
+      type: TYPE_INT32
+    }
+  }
+  options {
+    java_package: "selfcheckout.events.v1"
+    java_multiple_files: true
+  }
+  syntax: "proto3"
+}
+file {
+  name: "selfcheckout/events/v1/checkout_events.proto"
+  package: "selfcheckout.events.v1"
+  message_type {
+    name: "AttemptId"
+    field {
+      name: "transaction_id"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "attempt_number"
+      number: 2
+      label: LABEL_OPTIONAL
+      type: TYPE_INT32
+    }
+  }
+  message_type {
+    name: "CheckoutLine"
+    field {
+      name: "sku"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "quantity"
+      number: 2
+      label: LABEL_OPTIONAL
+      type: TYPE_INT32
+    }
+  }
+  message_type {
+    name: "CheckoutRequested"
+    field {
+      name: "attempt"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".selfcheckout.events.v1.AttemptId"
+    }
+    field {
+      name: "lines"
+      number: 2
+      label: LABEL_REPEATED
+      type: TYPE_MESSAGE
+      type_name: ".selfcheckout.events.v1.CheckoutLine"
+    }
+  }
+  message_type {
+    name: "StockRestorationRequested"
+    field {
+      name: "attempt"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".selfcheckout.events.v1.AttemptId"
+    }
+  }
+  message_type {
+    name: "StockDeducted"
+    field {
+      name: "attempt"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".selfcheckout.events.v1.AttemptId"
+    }
+  }
+  message_type {
+    name: "StockRejected"
+    field {
+      name: "attempt"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".selfcheckout.events.v1.AttemptId"
+    }
+    field {
+      name: "reason"
+      number: 2
+      label: LABEL_OPTIONAL
+      type: TYPE_ENUM
+      type_name: ".selfcheckout.events.v1.RejectionReason"
+    }
+    field {
+      name: "sku"
+      number: 3
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+  }
+  message_type {
+    name: "StockDeductionRefused"
+    field {
+      name: "attempt"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".selfcheckout.events.v1.AttemptId"
+    }
+  }
+  message_type {
+    name: "StockRestored"
+    field {
+      name: "attempt"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".selfcheckout.events.v1.AttemptId"
+    }
+  }
+  message_type {
+    name: "RestorationNotNeeded"
+    field {
+      name: "attempt"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".selfcheckout.events.v1.AttemptId"
+    }
+    field {
+      name: "result"
+      number: 2
+      label: LABEL_OPTIONAL
+      type: TYPE_ENUM
+      type_name: ".selfcheckout.events.v1.RestorationResult"
+    }
+  }
+  enum_type {
+    name: "RejectionReason"
+    value {
+      name: "REJECTION_REASON_UNSPECIFIED"
+      number: 0
+    }
+    value {
+      name: "INSUFFICIENT_STOCK"
+      number: 1
+    }
+    value {
+      name: "INVALID_REQUEST"
+      number: 2
+    }
+  }
+  enum_type {
+    name: "RestorationResult"
+    value {
+      name: "RESTORATION_RESULT_UNSPECIFIED"
+      number: 0
+    }
+    value {
+      name: "NOTHING_TO_RESTORE"
+      number: 1
+    }
+    value {
+      name: "ALREADY_RESTORED"
+      number: 2
+    }
+  }
+  options {
+    java_package: "selfcheckout.events.v1"
+    java_multiple_files: true
+  }
+  syntax: "proto3"
+}
+file {
+  name: "selfcheckout/events/v1/scan_events.proto"
+  package: "selfcheckout.events.v1"
+  message_type {
+    name: "ScanAccepted"
+    field {
+      name: "transaction_id"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "scan_sequence"
+      number: 2
+      label: LABEL_OPTIONAL
+      type: TYPE_INT32
+    }
+    field {
+      name: "sku"
+      number: 3
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "product_name"
+      number: 4
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "unit_price"
+      number: 5
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+    }
+    field {
+      name: "accepted_at_ms"
+      number: 6
+      label: LABEL_OPTIONAL
+      type: TYPE_INT64
+    }
+  }
+  options {
+    java_package: "selfcheckout.events.v1"
+    java_multiple_files: true
+  }
+  syntax: "proto3"
+}

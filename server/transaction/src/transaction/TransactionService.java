@@ -2,7 +2,7 @@ package transaction;
 
 import database.ScanStore;
 import database.TransactionStore;
-import rpc.ResponseBudget;
+import time.ResponseBudget;
 import transaction.TransactionStateCache.Line;
 import transaction.TransactionStateCache.State;
 

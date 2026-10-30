@@ -2,7 +2,7 @@ package unit.common;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import rpc.FaultHooks;
+import faults.FaultHooks;
 import support.FaultInjection;
 
 import java.util.Map;

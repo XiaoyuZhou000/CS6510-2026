@@ -1,0 +1,56 @@
+# Generated once by messaging.EventSchemaCompatibilityTest from the first event classes (T018, FR-014).
+# Never edit or remove a line: changes inside v1 are additive only.
+message selfcheckout.events.v1.EventEnvelope
+message selfcheckout.events.v1.EventEnvelope field 1 event_id STRING
+message selfcheckout.events.v1.EventEnvelope field 2 event_type STRING
+message selfcheckout.events.v1.EventEnvelope field 3 schema_version INT32
+message selfcheckout.events.v1.EventEnvelope field 4 routing_key STRING
+message selfcheckout.events.v1.EventEnvelope field 5 occurred_at_ms INT64
+message selfcheckout.events.v1.EventEnvelope field 6 correlation_id STRING
+message selfcheckout.events.v1.EventEnvelope field 7 producer STRING
+message selfcheckout.events.v1.EventEnvelope field 8 payload BYTES
+message selfcheckout.events.v1.CatalogItemPublished
+message selfcheckout.events.v1.CatalogItemPublished field 1 sku STRING
+message selfcheckout.events.v1.CatalogItemPublished field 2 name STRING
+message selfcheckout.events.v1.CatalogItemPublished field 3 price STRING
+message selfcheckout.events.v1.CatalogItemPublished field 4 catalog_version STRING
+message selfcheckout.events.v1.CatalogSnapshotPublished
+message selfcheckout.events.v1.CatalogSnapshotPublished field 1 catalog_version STRING
+message selfcheckout.events.v1.CatalogSnapshotPublished field 2 product_count INT32
+message selfcheckout.events.v1.AttemptId
+message selfcheckout.events.v1.AttemptId field 1 transaction_id STRING
+message selfcheckout.events.v1.AttemptId field 2 attempt_number INT32
+message selfcheckout.events.v1.CheckoutLine
+message selfcheckout.events.v1.CheckoutLine field 1 sku STRING
+message selfcheckout.events.v1.CheckoutLine field 2 quantity INT32
+message selfcheckout.events.v1.CheckoutRequested
+message selfcheckout.events.v1.CheckoutRequested field 1 attempt MESSAGE selfcheckout.events.v1.AttemptId
+message selfcheckout.events.v1.CheckoutRequested field 2 repeated lines MESSAGE selfcheckout.events.v1.CheckoutLine
+message selfcheckout.events.v1.StockRestorationRequested
+message selfcheckout.events.v1.StockRestorationRequested field 1 attempt MESSAGE selfcheckout.events.v1.AttemptId
+message selfcheckout.events.v1.StockDeducted
+message selfcheckout.events.v1.StockDeducted field 1 attempt MESSAGE selfcheckout.events.v1.AttemptId
+message selfcheckout.events.v1.StockRejected
+message selfcheckout.events.v1.StockRejected field 1 attempt MESSAGE selfcheckout.events.v1.AttemptId
+message selfcheckout.events.v1.StockRejected field 2 reason ENUM selfcheckout.events.v1.RejectionReason
+message selfcheckout.events.v1.StockRejected field 3 sku STRING
+message selfcheckout.events.v1.StockDeductionRefused
+message selfcheckout.events.v1.StockDeductionRefused field 1 attempt MESSAGE selfcheckout.events.v1.AttemptId
+message selfcheckout.events.v1.StockRestored
+message selfcheckout.events.v1.StockRestored field 1 attempt MESSAGE selfcheckout.events.v1.AttemptId
+message selfcheckout.events.v1.RestorationNotNeeded
+message selfcheckout.events.v1.RestorationNotNeeded field 1 attempt MESSAGE selfcheckout.events.v1.AttemptId
+message selfcheckout.events.v1.RestorationNotNeeded field 2 result ENUM selfcheckout.events.v1.RestorationResult
+enum selfcheckout.events.v1.RejectionReason value 0 REJECTION_REASON_UNSPECIFIED
+enum selfcheckout.events.v1.RejectionReason value 1 INSUFFICIENT_STOCK
+enum selfcheckout.events.v1.RejectionReason value 2 INVALID_REQUEST
+enum selfcheckout.events.v1.RestorationResult value 0 RESTORATION_RESULT_UNSPECIFIED
+enum selfcheckout.events.v1.RestorationResult value 1 NOTHING_TO_RESTORE
+enum selfcheckout.events.v1.RestorationResult value 2 ALREADY_RESTORED
+message selfcheckout.events.v1.ScanAccepted
+message selfcheckout.events.v1.ScanAccepted field 1 transaction_id STRING
+message selfcheckout.events.v1.ScanAccepted field 2 scan_sequence INT32
+message selfcheckout.events.v1.ScanAccepted field 3 sku STRING
+message selfcheckout.events.v1.ScanAccepted field 4 product_name STRING
+message selfcheckout.events.v1.ScanAccepted field 5 unit_price STRING
+message selfcheckout.events.v1.ScanAccepted field 6 accepted_at_ms INT64

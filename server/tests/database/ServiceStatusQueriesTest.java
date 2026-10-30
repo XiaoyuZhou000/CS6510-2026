@@ -26,7 +26,7 @@ class ServiceStatusQueriesTest {
             assertEquals(new TransactionStatusQueries.Status(0, 0, 0, 0, 0, null, 0, null), empty);
             assertFalse(empty.pendingWork());
             assertEquals("status service=transaction pending_work=no pending_attempts=0 alarmed_attempts=0 "
-                    + "undelivered_scans=0 background_completions=0 completions_without_response=0 "
+                    + "unpublished_scans=0 background_completions=0 completions_without_response=0 "
                     + "replica_version=none replica_products=0 replica_age_seconds=none", empty.line());
 
             attempt(schema, "pending", "PENDING", "NONE", null);
@@ -40,7 +40,7 @@ class ServiceStatusQueriesTest {
             schema.insertScan("pending", 1, "SKU-000001");
             schema.insertScan("pending", 2, "SKU-000002");
             long delivered = schema.insertScan("answered", 1, "SKU-000003");
-            schema.update("UPDATE accepted_scan SET delivered_at = NOW(3) WHERE scan_id = ?", delivered);
+            schema.update("UPDATE accepted_scan SET published_at = NOW(3) WHERE scan_id = ?", delivered);
             schema.seedReplica(5, "catalog-v1");
             schema.update("UPDATE product_replica_meta SET refreshed_at = ? WHERE meta_key = 1",
                     Timestamp.from(NOW.minusSeconds(42)));
@@ -49,7 +49,7 @@ class ServiceStatusQueriesTest {
             assertEquals(new TransactionStatusQueries.Status(5, 3, 2, 1, 1, "catalog-v1", 5, Duration.ofSeconds(42)), status);
             assertTrue(status.pendingWork());
             assertEquals("status service=transaction pending_work=yes pending_attempts=5 alarmed_attempts=3 "
-                    + "undelivered_scans=2 background_completions=1 completions_without_response=1 "
+                    + "unpublished_scans=2 background_completions=1 completions_without_response=1 "
                     + "replica_version=catalog-v1 replica_products=5 replica_age_seconds=42", status.line());
         }
     }

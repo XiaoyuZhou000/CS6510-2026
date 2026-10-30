@@ -18,7 +18,7 @@ import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Outbox relay ordering (strict: {@code delivered_at} only after OK, one call per round) and its statement
+ * Outbox relay ordering (strict: {@code published_at} only after OK, one call per round) and its statement
  * budget per round (R22; contracts/scan-event-delivery.md section 2).
  */
 class RelayStatementBudgetTest {

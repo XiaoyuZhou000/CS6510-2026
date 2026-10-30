@@ -169,6 +169,19 @@ public abstract class TestSchema implements AutoCloseable {
         }
     }
 
+    /** Empties this service's event tables (006 T038): {@code outbox_event}, {@code dead_letter_event}, and so on. */
+    public void resetEventTables() throws SQLException {
+        for (String table : eventTables()) update("DELETE FROM " + table);
+    }
+
+    /** The event tables this service's {@code schema.sql} creates; {@link #resetEventTables} empties them. */
+    protected abstract List<String> eventTables();
+
+    /** Rows of {@code dead_letter_event}, the consumers' parked records (006 D6). */
+    public long parkedCount() throws SQLException {
+        return queryLong("SELECT COUNT(*) FROM dead_letter_event");
+    }
+
     protected static void bind(PreparedStatement statement, Object... parameters) throws SQLException {
         for (int i = 0; i < parameters.length; i++) statement.setObject(i + 1, parameters[i]);
     }

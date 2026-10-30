@@ -9,8 +9,8 @@ import java.util.Objects;
 
 /**
  * Transaction's operational status (FR-039; contracts/service-deployment.md): pending and alarmed checkout
- * attempts, undelivered scan events, the FR-054 completion counts, and the product replica's version and
- * age. One read-only statement on Transaction's own pool; the pending-attempt and undelivered counts use
+ * attempts, unpublished scan events, the FR-054 completion counts, and the product replica's version and
+ * age. One read-only statement on Transaction's own pool; the pending-attempt and unpublished counts use
  * their indexes.
  */
 public final class TransactionStatusQueries {
@@ -18,7 +18,7 @@ public final class TransactionStatusQueries {
             + "(SELECT COUNT(*) FROM checkout_attempt WHERE state = 'PENDING'), "
             + "(SELECT COUNT(*) FROM checkout_attempt WHERE state = 'PENDING' AND (last_error LIKE 'FAILED\\_PRECONDITION:%' "
             + "OR last_error LIKE 'INVALID\\_ARGUMENT:%' OR last_error LIKE 'INTEGRITY:%')), "
-            + "(SELECT COUNT(*) FROM accepted_scan WHERE delivered_at IS NULL), "
+            + "(SELECT COUNT(*) FROM accepted_scan WHERE published_at IS NULL), "
             + "(SELECT COUNT(*) FROM checkout_attempt WHERE state = 'COMPLETED' AND client_outcome = 'PENDING_ERROR'), "
             + "(SELECT COUNT(*) FROM checkout_attempt WHERE state = 'COMPLETED' AND client_outcome = 'NONE'), "
             + "catalog_version, product_count, refreshed_at FROM product_replica_meta WHERE meta_key = 1";
@@ -42,17 +42,17 @@ public final class TransactionStatusQueries {
      * @param replicaAge      time since the installed replica was last replaced, in whole seconds; null while
      *                        never loaded. A refresh that finds the same catalog version keeps the replica.
      */
-    public record Status(long pendingAttempts, long alarmedAttempts, long undeliveredScans, long backgroundCompletions,
+    public record Status(long pendingAttempts, long alarmedAttempts, long unpublishedScans, long backgroundCompletions,
                          long completionsWithoutResponse, String replicaVersion, int replicaProducts, Duration replicaAge) {
-        /** Recovery or delivery work remains while an attempt is pending or an event is undelivered. */
+        /** Recovery or delivery work remains while an attempt is pending or an event is unpublished. */
         public boolean pendingWork() {
-            return pendingAttempts > 0 || undeliveredScans > 0;
+            return pendingAttempts > 0 || unpublishedScans > 0;
         }
 
         public String line() {
             return "status service=transaction pending_work=" + (pendingWork() ? "yes" : "no")
                     + " pending_attempts=" + pendingAttempts + " alarmed_attempts=" + alarmedAttempts
-                    + " undelivered_scans=" + undeliveredScans + " background_completions=" + backgroundCompletions
+                    + " unpublished_scans=" + unpublishedScans + " background_completions=" + backgroundCompletions
                     + " completions_without_response=" + completionsWithoutResponse
                     + " replica_version=" + (replicaVersion == null ? "none" : replicaVersion)
                     + " replica_products=" + replicaProducts

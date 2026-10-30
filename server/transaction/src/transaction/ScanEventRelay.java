@@ -3,7 +3,7 @@ package transaction;
 import database.RelayStore;
 import metrics.LatencyHistogram;
 import metrics.PerfMetrics;
-import rpc.FaultHooks;
+import faults.FaultHooks;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.LongAdder;
  * <ul>
  *   <li>A round selects up to {@code OUTBOX_BATCH_SIZE} (500) undelivered rows in {@code scan_id} order and
  *       sends them in one {@code DeliverScanEvents} call.</li>
- *   <li>Only after OK does it set {@code delivered_at} on exactly those rows, then it starts the next round
+ *   <li>Only after OK does it set {@code published_at} on exactly those rows, then it starts the next round
  *       at once. Any other outcome leaves the rows undelivered; they are reselected and resent after a
  *       backoff from 100 ms to 5 s. INVALID_ARGUMENT also raises an alarm, and nothing is ever skipped.</li>
  *   <li>With nothing to send it polls every 50 ms, counting {@code transaction.relay.idlePolls}.</li>
@@ -30,7 +30,7 @@ import java.util.concurrent.atomic.LongAdder;
  * </ul>
  *
  * <p>No cursor is kept, so a restart resumes from the undelivered rows and a row that commits late with a
- * lower {@code scan_id} is never skipped. A crash between OK and the {@code delivered_at} commit (the test-only
+ * lower {@code scan_id} is never skipped. A crash between OK and the {@code published_at} commit (the test-only
  * hook {@code relay.afterAck}) only causes a redelivery, which Analytics counts as duplicates. Several
  * Transaction processes may deliver the same rows; Analytics' deduplication keeps every scan counted once.</p>
  */

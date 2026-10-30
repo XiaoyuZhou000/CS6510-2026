@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.UUID;
 
 /** Disposable Inventory schema ({@code inv_test_<uuid>}) from {@code db/inventory/schema.sql}. */
@@ -20,6 +21,16 @@ public final class InventoryTestSchema extends TestSchema {
 
     public static InventoryTestSchema create(Options options) throws Exception {
         return new InventoryTestSchema(options);
+    }
+
+    @Override
+    protected List<String> eventTables() {
+        return List.of("outbox_event", "dead_letter_event");
+    }
+
+    /** Rows of {@code outbox_event} not yet confirmed by the broker. */
+    public long unpublishedOutboxCount() throws SQLException {
+        return queryLong("SELECT COUNT(*) FROM outbox_event WHERE published_at IS NULL");
     }
 
     /** The seed's SKU for product {@code n}: {@code SKU-000001}... */

@@ -3,7 +3,7 @@ package database;
 import analytics.ProductNameMap;
 import metrics.LatencyHistogram;
 import metrics.PerfMetrics;
-import rpc.FaultHooks;
+import faults.FaultHooks;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;

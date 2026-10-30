@@ -11,12 +11,17 @@ import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Self-check of the R22 revision rule for {@code statement-budgets.properties}. */
+/**
+ * Self-check of the R22 revision rule for {@code statement-budgets.properties}. A raised ceiling's evidence label may
+ * name an A/B record in either feature's {@code checkpoints.md}: feature 005's microservices record or feature 006's
+ * event-based record (006 T044).
+ */
 class StatementBudgetFileTest {
     @Test
     void everyCeilingHasADesignValueAndEveryRaisedCeilingHasRecordedEvidence() throws Exception {
         StatementBudgets budgets = StatementBudgets.load();
-        String checkpoints = Files.readString(checkpointsFile());
+        List<String> checkpoints = new ArrayList<>();
+        for (Path file : checkpointsFiles()) checkpoints.add(Files.readString(file));
         List<String> problems = new ArrayList<>(problems(budgets, checkpoints));
         assertFalse(budgets.ceilingKeys().isEmpty(), "No statement budgets");
         for (String required : List.of("start.statements", "scan.warm.statements", "scan.warm.selects",
@@ -30,14 +35,18 @@ class StatementBudgetFileTest {
 
     @Test
     void theRuleRejectsMissingDesignsUnrecordedEvidenceAndExceededCeilings() {
-        String checkpoints = "| CP3 | `cp3-batch` | default | ... |";
+        List<String> checkpoints = List.of("| CP3 | `cp3-batch` | default | ... |", "| CP3 | `cp3-linger` | default | ... |");
         assertTrue(problems(budgets("a=2", "a.design=2"), checkpoints).isEmpty());
         assertTrue(problems(budgets("a=1", "a.design=2"), checkpoints).isEmpty(), "lowering needs no evidence");
         assertTrue(problems(budgets("a=3", "a.design=2", "a.evidence=cp3-batch"), checkpoints).isEmpty());
+        assertTrue(problems(budgets("a=3", "a.design=2", "a.evidence=cp3-linger"), checkpoints).isEmpty(),
+                "a label recorded in the feature 006 checkpoints.md is evidence too");
+        assertFalse(problems(budgets("a=3", "a.design=2", "a.evidence=cp3-linger"), checkpoints.subList(0, 1)).isEmpty(),
+                "a label is evidence only where it is recorded");
         assertFalse(problems(budgets("a=2"), checkpoints).isEmpty(), "a ceiling needs its design value");
         assertFalse(problems(budgets("a=3", "a.design=2"), checkpoints).isEmpty(), "a raise needs evidence");
         assertFalse(problems(budgets("a=3", "a.design=2", "a.evidence=cp3-unknown"), checkpoints).isEmpty(),
-                "the evidence label must be recorded in checkpoints.md");
+                "the evidence label must be recorded in a checkpoints.md");
         assertFalse(problems(budgets("a=2", "b.design=2"), checkpoints).isEmpty(), "no orphan design value");
 
         StatementBudgets within = budgets("a=2", "a.design=2");
@@ -46,8 +55,8 @@ class StatementBudgetFileTest {
         assertThrows(AssertionError.class, () -> within.check("unknown", 0));
     }
 
-    /** The R22 revision rule over one budgets file and the text of checkpoints.md. */
-    static List<String> problems(StatementBudgets budgets, String checkpoints) {
+    /** The R22 revision rule over one budgets file and the text of each checkpoints.md that may hold evidence. */
+    static List<String> problems(StatementBudgets budgets, List<String> checkpoints) {
         List<String> problems = new ArrayList<>();
         for (String key : budgets.allKeys()) {
             String base = key.endsWith(".design") ? key.substring(0, key.length() - ".design".length())
@@ -72,8 +81,8 @@ class StatementBudgetFileTest {
                 String label = budgets.evidence(key);
                 if (label == null) {
                     problems.add(key + "=" + ceiling + " exceeds its design value " + design + " without " + key + ".evidence");
-                } else if (!checkpoints.contains("`" + label + "`")) {
-                    problems.add(key + ".evidence=" + label + " names no A/B record in checkpoints.md");
+                } else if (checkpoints.stream().noneMatch(text -> text.contains("`" + label + "`"))) {
+                    problems.add(key + ".evidence=" + label + " names no A/B record in either checkpoints.md");
                 }
             }
         }
@@ -89,12 +98,22 @@ class StatementBudgetFileTest {
         return StatementBudgets.of(properties);
     }
 
-    private static Path checkpointsFile() {
+    /** Feature 005's and feature 006's A/B records; both are committed, so both must exist. */
+    private static List<Path> checkpointsFiles() {
         Path cwd = Path.of("").toAbsolutePath().normalize();
-        String relative = "load-client/reports/microservices-architecture/checkpoints.md";
-        for (Path candidate : List.of(cwd.resolve(relative), cwd.resolve("..").resolve(relative).normalize())) {
-            if (Files.isRegularFile(candidate)) return candidate;
+        List<Path> files = new ArrayList<>();
+        for (String relative : List.of("load-client/reports/microservices-architecture/checkpoints.md",
+                "load-client/reports/event-based-architecture/checkpoints.md")) {
+            Path found = null;
+            for (Path candidate : List.of(cwd.resolve(relative), cwd.resolve("..").resolve(relative).normalize())) {
+                if (Files.isRegularFile(candidate)) {
+                    found = candidate;
+                    break;
+                }
+            }
+            if (found == null) throw new IllegalStateException(relative + " not found from " + cwd);
+            files.add(found);
         }
-        throw new IllegalStateException(relative + " not found from " + cwd);
+        return files;
     }
 }

@@ -55,5 +55,7 @@ SELECT 'PASS' invariant_status,
        (SELECT COUNT(*) FROM checkout_operation WHERE state = 'APPLIED') applied_operations,
        (SELECT COUNT(*) FROM checkout_operation WHERE state = 'REJECTED') rejected_operations,
        (SELECT COUNT(*) FROM checkout_operation WHERE state = 'RESTORED') restored_operations,
-       (SELECT COUNT(*) FROM checkout_operation WHERE state = 'BLOCKED') blocked_operations;
+       (SELECT COUNT(*) FROM checkout_operation WHERE state = 'BLOCKED') blocked_operations,
+       (SELECT COUNT(*) FROM outbox_event WHERE published_at IS NULL) unpublished_outbox,
+       (SELECT COUNT(*) FROM dead_letter_event) parked_events;
 DROP PROCEDURE assert_zero;

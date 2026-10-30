@@ -24,6 +24,11 @@ public final class AnalyticsTestSchema extends TestSchema {
         return new AnalyticsTestSchema(options);
     }
 
+    @Override
+    protected List<String> eventTables() {
+        return List.of("dead_letter_event", "consumer_offset");
+    }
+
     public record StoredEvent(long position, String sourceTransactionId, int sourceScanSequence, String sku) { }
 
     public record Rank(int rankPos, String sku, long scanCount) { }

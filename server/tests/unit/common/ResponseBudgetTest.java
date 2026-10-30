@@ -1,7 +1,7 @@
 package unit.common;
 
 import org.junit.jupiter.api.Test;
-import rpc.ResponseBudget;
+import time.ResponseBudget;
 
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
