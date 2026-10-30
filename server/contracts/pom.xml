@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Generated gRPC contracts (R1). The only Maven module: it turns src/main/proto/**
-  into ../out/contracts.jar and copies the pinned gRPC runtime into ../lib/grpc/.
-  Everything else is still built by build.sh with javac and jar.
+  Generated contracts (005 R1, 006 D2). The only Maven module: it turns src/main/proto/**
+  (the gRPC services and the selfcheckout.events.v1 event schemas) into ../out/contracts.jar,
+  copies the pinned gRPC runtime into ../lib/grpc/, and copies the messaging runtime
+  (kafka-clients, protobuf-java, slf4j) into ../lib/messaging/. Everything else is still built by build.sh with javac and jar.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -20,6 +21,9 @@
     <!-- One pinned gRPC Java release and the protobuf release its README pairs with it. -->
     <grpc.version>1.85.1</grpc.version>
     <protobuf.version>3.25.9</protobuf.version>
+    <!-- The event broker client and its logging binding (006 D2). -->
+    <kafka.version>4.1.0</kafka.version>
+    <slf4j.version>2.0.16</slf4j.version>
   </properties>
 
   <dependencyManagement>
@@ -60,6 +64,18 @@
       <groupId>com.google.protobuf</groupId>
       <artifactId>protobuf-java</artifactId>
       <version>${protobuf.version}</version>
+    </dependency>
+    <!-- Declared before kafka-clients so its slf4j-api 2.x wins Maven's nearest-first mediation. -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>${slf4j.version}</version>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka-clients</artifactId>
+      <version>${kafka.version}</version>
     </dependency>
   </dependencies>
 
@@ -132,6 +148,19 @@
             <configuration>
               <includeScope>runtime</includeScope>
               <outputDirectory>${project.basedir}/../lib/grpc</outputDirectory>
+            </configuration>
+          </execution>
+          <!-- Until gRPC is removed this copy also repeats the gRPC jars; identical jars twice on
+               a classpath are harmless, and afterwards it holds only the messaging runtime. -->
+          <execution>
+            <id>copy-messaging-runtime</id>
+            <phase>package</phase>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
+            <configuration>
+              <includeScope>runtime</includeScope>
+              <outputDirectory>${project.basedir}/../lib/messaging</outputDirectory>
             </configuration>
           </execution>
         </executions>

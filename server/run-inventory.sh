@@ -14,5 +14,9 @@ if [ -z "$(ls lib/grpc/*.jar 2>/dev/null)" ]; then
   echo "Missing gRPC runtime in lib/grpc/; run ./build.sh inventory first" >&2
   exit 1
 fi
+if [ -z "$(ls lib/messaging/kafka-clients-*.jar 2>/dev/null)" ]; then
+  echo "Missing messaging runtime in lib/messaging/; run ./build.sh inventory first" >&2
+  exit 1
+fi
 case "$(uname -s)" in CYGWIN*|MINGW*|MSYS*) sep=';' ;; *) sep=':' ;; esac
-exec java -cp "$jar${sep}out/common.jar${sep}out/contracts.jar${sep}lib/grpc/*${sep}$connector" inventory.InventoryMain "$@"
+exec java -cp "$jar${sep}out/common.jar${sep}out/contracts.jar${sep}lib/grpc/*${sep}lib/messaging/*${sep}$connector" inventory.InventoryMain "$@"

@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Starts real service JVMs from the built artifacts ({@code server/out/*.jar}, {@code lib/grpc/*},
- * and Connector/J) for process-level crash, restart, and isolation tests (R15).
+ * {@code lib/messaging/*}, and Connector/J) for process-level crash, restart, and isolation tests (R15).
  *
  * <pre>{@code
  * try (ServiceProcesses.ServiceProcess inventory = ServiceProcesses.service("inventory")
@@ -130,6 +130,7 @@ public final class ServiceProcesses {
                     server.resolve("out/common.jar").toString(),
                     server.resolve("out/contracts.jar").toString(),
                     server.resolve("lib/grpc").toString() + File.separator + "*",
+                    server.resolve("lib/messaging").toString() + File.separator + "*",
                     server.resolve("lib/mysql-connector-j-9.0.0.jar").toString());
             String main = service + "." + Character.toUpperCase(service.charAt(0)) + service.substring(1) + "Main";
             List<String> command = new ArrayList<>();

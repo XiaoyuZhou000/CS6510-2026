@@ -21,21 +21,41 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Gates for the microservices constraints: infrastructure, durability, JDBC flags, ownership (R18-R20, R23). */
+/**
+ * Gates for the microservices constraints: infrastructure, durability, JDBC flags, ownership (R18-R20, R23),
+ * and the single Kafka broker whose client stays in messaging adapters (006 D1, D14).
+ */
 class MicroserviceBoundaryTest {
     private static final List<String> SERVICES = List.of("transaction", "inventory", "analytics");
     /** The only business components allowed to hold in-memory state such as maps (Implementation Rule 4). */
     private static final Set<String> DESIGNATED_STATE = Set.of("TransactionStateCache", "TransactionLocks",
             "ProductCatalogReplica", "SettlementRegistry", "RecoverySchedule", "CatalogCache", "ProductNameMap");
+    private static final Pattern KAFKA_REFERENCE = Pattern.compile("\\borg\\.apache\\.kafka\\.");
 
+    /** Kafka is the one broker (FR-007); a cache or a second broker product stays off the classpath. */
     @Test
-    void noCacheOrMessagingInfrastructureIsOnTheClasspath() throws Exception {
-        Pattern forbidden = Pattern.compile("(?i)redis|jedis|lettuce|kafka|rabbit|activemq");
+    void noCacheOrSecondBrokerIsOnTheClasspath() throws Exception {
+        Pattern forbidden = Pattern.compile("(?i)redis|jedis|lettuce|rabbit|activemq");
         List<String> violations = new ArrayList<>();
         try (Stream<Path> paths = Files.walk(serverRoot().resolve("lib"))) {
             paths.filter(path -> path.toString().endsWith(".jar"))
                     .filter(path -> forbidden.matcher(path.getFileName().toString()).find())
                     .forEach(path -> violations.add("Forbidden infrastructure dependency: " + path));
+        }
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    /** Kafka client types appear only in {@code common/src/messaging/} and {@code <service>/src/messaging/}. */
+    @Test
+    void kafkaClientTypesStayInMessagingAdapters() throws Exception {
+        List<String> violations = new ArrayList<>();
+        Path server = serverRoot();
+        for (Path source : productionSources()) {
+            String relative = server.relativize(source).toString().replace('\\', '/');
+            boolean adapter = relative.matches("(common|transaction|inventory|analytics)/src/messaging/.*");
+            if (!adapter && KAFKA_REFERENCE.matcher(Files.readString(source)).find()) {
+                violations.add(source + " references org.apache.kafka outside a messaging adapter");
+            }
         }
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
     }

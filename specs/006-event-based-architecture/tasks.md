@@ -52,45 +52,45 @@ These rules bind every task below.
 
 **Purpose**: Commit the governing constitution, record the baseline, add the broker, and add event contracts and the Kafka client to the build alongside the existing gRPC artifacts.
 
-- [ ] T001 Commit constitution v6.0.0 in `.specify/memory/constitution.md`:
+- [X] T001 Commit constitution v6.0.0 in `.specify/memory/constitution.md`:
   - Show the user the working-tree diff of the principles and governance text (excluding the Sync Impact Report) and get explicit approval of that exact text before committing (feature 005 Implementation Rule 5).
   - Remove the leading Sync Impact Report comment block, as Governance requires, leaving every principle unchanged.
   - Commit it alone, or together with `specs/006-event-based-architecture/` and `Event Based Architecture Requirement.txt`, before any code change of this feature.
-- [ ] T002 Run CP0 on the unmodified feature 005 implementation at commit `8891c57`, before any code change, and record it in a new `load-client/reports/event-based-architecture/checkpoints.md`:
+- [X] T002 Run CP0 on the unmodified feature 005 implementation at commit `8891c57`, before any code change, and record it in a new `load-client/reports/event-based-architecture/checkpoints.md`:
   - Build with `server/build.sh` and `load-client/build.sh`. Run `server/benchmark-microservices.ps1` with the shared-machine settings, twice with `-Workload default` (labels `cp0-default-1`, `cp0-default-2`) and once with `-Workload stress` (label `cp0-stress-1`), writing output under `load-client/reports/event-based-architecture/cp0/`.
   - Create the results table with the columns of feature 005's `load-client/reports/microservices-architecture/checkpoints.md`: checkpoint, label, workload, `totalTransactions`, change against the CP0 median of the same workload (%), Start/Scan/Complete p95/p99, Complete error count, background completions, `innodb_flush_log_at_trx_commit`, `sync_binlog`, and a link to the harness output. Add the columns `parked events` and `final consumer lag` (blank for CP0).
   - These runs are the attribution reference for CP1–CP3. The CP0-versus-CP4 comparison uses interleaved runs (T166).
-- [ ] T003 Extend `server/contracts/pom.xml` (D2), keeping every gRPC dependency and plugin goal for now:
+- [X] T003 Extend `server/contracts/pom.xml` (D2), keeping every gRPC dependency and plugin goal for now:
   - Add compile-scope `org.apache.kafka:kafka-clients:4.1.0` and runtime-scope `org.slf4j:slf4j-simple:2.0.16`, and pin `com.google.protobuf:protobuf-java` explicitly at `3.25.9`.
   - Add a second `maven-dependency-plugin` `copy-dependencies` execution (includeScope runtime) to `${project.basedir}/../lib/messaging` at `package`, next to the existing `lib/grpc` execution.
   - Add `server/contracts/src/main/resources/simplelogger.properties` with `org.slf4j.simpleLogger.defaultLogLevel=warn`, packaged into `contracts.jar`.
-- [ ] T004 Revise `server/tests/architecture/MicroserviceBoundaryTest.java` and `server/tests/architecture/LayerDependencyTest.java` so the Kafka client can land (FR-065):
+- [X] T004 Revise `server/tests/architecture/MicroserviceBoundaryTest.java` and `server/tests/architecture/LayerDependencyTest.java` so the Kafka client can land (FR-065):
   - In `MicroserviceBoundaryTest`, remove `kafka` from the forbidden-dependency pattern and keep `redis|jedis|lettuce|rabbit|activemq` forbidden (one broker product, FR-007). Add a source check that `org.apache.kafka` imports appear only under `server/common/src/messaging/` and `server/<service>/src/messaging/`. Keep the durability-setting checks unchanged.
   - In `LayerDependencyTest`, add `messaging` as an adapter layer with the same rules as `rpc` (may depend on the business layer, `events`, and the rest of `common`; the business layer never imports `messaging`), keeping `rpc` until T148.
   - Also add `events` as a shared package that the business, `database`, and `messaging` layers may import and that itself imports no `messaging`, `org.apache.kafka`, or business package, and extend the business-free check of `common.jar` and `common/src` to `events`, `messaging`, `faults`, and `time`.
   - Record both edits in the 006 ledger section (T043) with requirement FR-065: the broker ban becomes a synchronous-call ban in T146.
-- [ ] T005 [P] Copy the four design schemas verbatim from `specs/006-event-based-architecture/contracts/proto/{envelope,catalog_events,checkout_events,scan_events}.proto` to `server/contracts/src/main/proto/selfcheckout/events/v1/`, making the server copies authoritative (Constitution III). Replace the body of each spec copy with a one-line comment pointing to its server path, as feature 005 did.
-- [ ] T006 Update `server/build.sh` (D2):
+- [X] T005 [P] Copy the four design schemas verbatim from `specs/006-event-based-architecture/contracts/proto/{envelope,catalog_events,checkout_events,scan_events}.proto` to `server/contracts/src/main/proto/selfcheckout/events/v1/`, making the server copies authoritative (Constitution III). Replace the body of each spec copy with a one-line comment pointing to its server path, as feature 005 did.
+- [X] T006 Update `server/build.sh` (D2):
   - `build_contracts` also verifies that `lib/messaging/kafka-clients-4.1.0.jar` exists, and still verifies `out/contracts.jar` and `lib/grpc/`. Keep `MAVEN_OFFLINE=1` support.
   - Compile `common` and each service with `lib/messaging/*` added to the classpath after `lib/grpc/*`. Quote the wildcard and keep the Windows `;` separator.
   - Run `./build.sh` and `./build.sh inventory`, and confirm that the jars are produced.
-- [ ] T007 [P] Update `server/run-transaction.sh`, `server/run-inventory.sh`, and `server/run-analytics.sh`: fail clearly if `lib/messaging/` is missing, and add `lib/messaging/*` to the launch classpath. Keep the optional port argument.
-- [ ] T008 [P] Update `server/build-tests.sh` and `server/run-tests.sh`:
+- [X] T007 [P] Update `server/run-transaction.sh`, `server/run-inventory.sh`, and `server/run-analytics.sh`: fail clearly if `lib/messaging/` is missing, and add `lib/messaging/*` to the launch classpath. Keep the optional port argument.
+- [X] T008 [P] Update `server/build-tests.sh` and `server/run-tests.sh`:
   - Add `lib/messaging/*` to the javac and java classpaths.
   - Pass `KAFKA_TEST_BOOTSTRAP` (default `127.0.0.1:19092`), `KAFKA_TEST_CONTAINER`, and `NGINX_BIN` through as `-D` properties.
   - When `STRICT_LIVE_GATES=1`, skipped tests in the `messaging.`, `contract.`, `integration.`, and `performance.` packages fail the run, extending the existing `SERVER_BASE_URL` rule (D14).
   - Accept `PARITY_GATE=006:<gate>` and pass it as `-Dparity.gate=006:<gate>` (T043).
   - Report the classes listed in `RESTORATION_DIRECT_CLASSES` (initially `messaging.RestorationEventDirectTest`) in a separate "Direct restoration (SC-016)" section of the summary, excluded from the end-to-end Saga totals (T086).
-- [ ] T009 [P] Add `server/lib/messaging/` to `.gitignore`, next to the existing gRPC entries.
-- [ ] T010 [P] Create `deploy/kafka/compose.yaml` (D1, [broker-and-deployment.md](contracts/broker-and-deployment.md#broker-install-start-stop-reset)): service and container `cs6510-kafka`, image `apache/kafka:4.1.0`, named volume `cs6510-kafka-data` at the log directory, host port `127.0.0.1:19092`, and environment `KAFKA_NODE_ID=1`, `KAFKA_PROCESS_ROLES=broker,controller`, a single-voter controller quorum on an internal port, `PLAINTEXT` and `CONTROLLER` listeners with the advertised host listener `127.0.0.1:19092`, `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1`, `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1`, `KAFKA_AUTO_CREATE_TOPICS_ENABLE=false`, `KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE=false`, and `KAFKA_LOG_FLUSH_INTERVAL_MESSAGES=1` only when `KAFKA_FLUSH_EVERY_MESSAGE=true` (default `false`).
-- [ ] T011 Create `deploy/kafka/create-topics.ps1` (depends on T010): wait for the broker, then create idempotently through `docker exec cs6510-kafka /opt/kafka/bin/kafka-topics.sh` the four topics of the [event catalog](contracts/event-catalog.md#topics), honoring an optional `-TopicPrefix`:
+- [X] T009 [P] Add `server/lib/messaging/` to `.gitignore`, next to the existing gRPC entries.
+- [X] T010 [P] Create `deploy/kafka/compose.yaml` (D1, [broker-and-deployment.md](contracts/broker-and-deployment.md#broker-install-start-stop-reset)): service and container `cs6510-kafka`, image `apache/kafka:4.1.0`, named volume `cs6510-kafka-data` at the log directory, host port `127.0.0.1:19092`, and environment `KAFKA_NODE_ID=1`, `KAFKA_PROCESS_ROLES=broker,controller`, a single-voter controller quorum on an internal port, `PLAINTEXT` and `CONTROLLER` listeners with the advertised host listener `127.0.0.1:19092`, `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1`, `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1`, `KAFKA_AUTO_CREATE_TOPICS_ENABLE=false`, `KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE=false`, and `KAFKA_LOG_FLUSH_INTERVAL_MESSAGES=1` only when `KAFKA_FLUSH_EVERY_MESSAGE=true` (default `false`).
+- [X] T011 Create `deploy/kafka/create-topics.ps1` (depends on T010): wait for the broker, then create idempotently through `docker exec cs6510-kafka /opt/kafka/bin/kafka-topics.sh` the four topics of the [event catalog](contracts/event-catalog.md#topics), honoring an optional `-TopicPrefix`:
   - `selfcheckout.catalog.v1`: 1 partition, `cleanup.policy=compact`, `retention.ms=-1`.
   - `selfcheckout.checkout.v1` and `selfcheckout.checkout-outcome.v1`: 16 partitions, `cleanup.policy=delete`, `retention.ms=604800000`.
   - `selfcheckout.scan-accepted.v1`: 1 partition, `cleanup.policy=delete`, `retention.ms=604800000`.
   - Verify each topic's partition count and configuration afterwards, and exit nonzero on a mismatch. Save the script as UTF-8 with BOM.
-- [ ] T012 [P] Create `deploy/kafka/status.ps1`: print broker reachability, each topic's partitions and end offsets, and per-group lag for `inventory-checkout`, `transaction-checkout-outcome`, and `analytics-scan-ingest` from `kafka-consumer-groups.sh --describe`. A group that does not exist yet is reported as `absent`, not as an error. Support `-Json` for the harness (T041).
-- [ ] T013 [P] Create `deploy/kafka/reset-topics.ps1` (D13): refuse to run while any of ports 8081–8083 answers; delete and recreate the four topics through `create-topics.ps1`; then verify that every end offset is 0 and that no committed offsets remain for the three groups. It never restarts the container.
-- [ ] T014 Create `deploy/kafka/README.md` (FR-056): Docker Desktop and WSL 2 prerequisites and memory limit, start, stop, restart, status, topic creation and reset, full removal (`down -v`), the listener and volume, the configuration above, `KAFKA_FLUSH_EVERY_MESSAGE` and its residual page-cache risk on host loss (D1), and the rejected alternatives summarized from D1.
+- [X] T012 [P] Create `deploy/kafka/status.ps1`: print broker reachability, each topic's partitions and end offsets, and per-group lag for `inventory-checkout`, `transaction-checkout-outcome`, and `analytics-scan-ingest` from `kafka-consumer-groups.sh --describe`. A group that does not exist yet is reported as `absent`, not as an error. Support `-Json` for the harness (T041).
+- [X] T013 [P] Create `deploy/kafka/reset-topics.ps1` (D13): refuse to run while any of ports 8081–8083 answers; delete and recreate the four topics through `create-topics.ps1`; then verify that every end offset is 0 and that no committed offsets remain for the three groups. It never restarts the container.
+- [X] T014 Create `deploy/kafka/README.md` (FR-056): Docker Desktop and WSL 2 prerequisites and memory limit, start, stop, restart, status, topic creation and reset, full removal (`down -v`), the listener and volume, the configuration above, `KAFKA_FLUSH_EVERY_MESSAGE` and its residual page-cache risk on host loss (D1), and the rejected alternatives summarized from D1.
 
 ---
 
