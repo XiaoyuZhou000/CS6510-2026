@@ -25,9 +25,9 @@ class FaultHooksTest {
     @Test
     void parsesHaltDelayAndThrowActions() {
         Map<String, FaultHooks.Action> actions =
-                FaultHooks.parse(" relay.afterAck:halt, inventory.apply.beforeCommit:delay:250 ,analytics.ingest.afterCommit:throw");
+                FaultHooks.parse(" relay.afterConfirm:halt, inventory.apply.beforeCommit:delay:250 ,analytics.ingest.afterCommit:throw");
         assertEquals(3, actions.size());
-        assertEquals(new FaultHooks.Action(FaultHooks.Kind.HALT, 0), actions.get("relay.afterAck"));
+        assertEquals(new FaultHooks.Action(FaultHooks.Kind.HALT, 0), actions.get("relay.afterConfirm"));
         assertEquals(new FaultHooks.Action(FaultHooks.Kind.DELAY, 250), actions.get("inventory.apply.beforeCommit"));
         assertEquals(new FaultHooks.Action(FaultHooks.Kind.THROW, 0), actions.get("analytics.ingest.afterCommit"));
         assertTrue(FaultHooks.parse("").isEmpty());
@@ -61,8 +61,8 @@ class FaultHooksTest {
 
     @Test
     void faultInjectionBuildsValidSpecificationsAndRestoresTheProperty() {
-        String spec = FaultInjection.spec().halt("relay.afterAck").delay("a.b", 10).fail("c.d").build();
-        assertEquals("relay.afterAck:halt,a.b:delay:10,c.d:throw", spec);
+        String spec = FaultInjection.spec().halt("relay.afterConfirm").delay("a.b", 10).fail("c.d").build();
+        assertEquals("relay.afterConfirm:halt,a.b:delay:10,c.d:throw", spec);
         assertThrows(IllegalArgumentException.class, () -> FaultInjection.spec().fail("x").halt("x"));
         System.setProperty(FaultHooks.PROPERTY, "previous.hook:throw");
         try (FaultInjection.Armed armed = FaultInjection.spec().fail("armed.hook").armInThisJvm()) {

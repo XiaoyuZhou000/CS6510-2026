@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Replaces benchmark-microservices.ps1, keeping its steps and adding the broker:
-    1. Checks that ports 8080-8083 (and the gRPC ports 9092 and 9093, while they exist) are free,
+    1. Checks that ports 8080-8083 (and the former gRPC port 9092, until T148) are free,
        that the service artifacts exist, and that the broker answers with its four topics; builds
        load-client/ if needed.
     2. Applies -ExtraEnv to this process, so the broker restarted by the reset also sees it (for
@@ -124,9 +124,10 @@ $services = @('inventory', 'transaction')
 if (-not $SkipAnalytics) { $services += 'analytics' }
 $intervalSeconds = 10
 if ($ExtraEnv.ContainsKey('PERF_METRICS_INTERVAL_SECONDS')) { $intervalSeconds = [int]$ExtraEnv['PERF_METRICS_INTERVAL_SECONDS'] }
-# Consumer groups whose partition assignment the readiness step waits for (T112, SC-009); T126 adds
-# analytics-scan-ingest.
+# Consumer groups whose partition assignment the readiness step waits for (T112, T126, SC-009); without
+# Analytics its scan group has no member to wait for.
 $ConsumerGroups = @('inventory-checkout', 'transaction-checkout-outcome')
+if (-not $SkipAnalytics) { $ConsumerGroups += 'analytics-scan-ingest' }
 # The topic each consumer group reads (contracts/event-catalog.md "Topics").
 $groupTopics = [ordered]@{
     'inventory-checkout'           = 'selfcheckout.checkout.v1'
@@ -525,8 +526,8 @@ try {
         $gateStarted = Get-Date
     }
 
-    # 1. Ports, artifacts, and the broker. 9092 and 9093 are the gRPC ports, removed by T126/T148.
-    $occupied = Get-NetTCPConnection -LocalPort 8080, 8081, 8082, 8083, 9092, 9093 -State Listen -ErrorAction SilentlyContinue
+    # 1. Ports, artifacts, and the broker. 9092 was Inventory's gRPC port, removed by T111; T148 drops the check.
+    $occupied = Get-NetTCPConnection -LocalPort 8080, 8081, 8082, 8083, 9092 -State Listen -ErrorAction SilentlyContinue
     if ($occupied) { throw "Benchmark ports are in use: $(($occupied.LocalPort | Sort-Object -Unique) -join ', ')" }
     foreach ($artifact in @('out/common.jar', 'out/contracts.jar', 'out/transaction.jar', 'out/inventory.jar', 'out/analytics.jar', 'lib/messaging')) {
         if (-not (Test-Path (Join-Path $server $artifact))) { throw "Missing $artifact; run server/build.sh first" }
@@ -569,10 +570,11 @@ try {
     Wait-Until 'Transaction product replica at the catalog version' 60 {
         (Get-ServiceRow 'transaction' "SELECT COALESCE(catalog_version, '') FROM product_replica_meta WHERE meta_key = 1")[0] -eq $catalogVersion
     }
-    Wait-Until "partition assignment of $($ConsumerGroups -join ', ')" 90 { Test-GroupsAssigned (Get-StatusNow 'ready') }
     if (-not $SkipAnalytics) {
         Start-ReadyService 'analytics' 'Analytics popular items' { Test-Http 'http://127.0.0.1:8083/analytics/popular-items' @(200) }
     }
+    # After every consumer started, so analytics-scan-ingest has its member too (T126).
+    Wait-Until "partition assignment of $($ConsumerGroups -join ', ')" 90 { Test-GroupsAssigned (Get-StatusNow 'ready') }
     $nginxPrefix = Join-Path $env:TEMP ('cs6510-event-based-nginx-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path (Join-Path $nginxPrefix 'conf'), (Join-Path $nginxPrefix 'logs'), (Join-Path $nginxPrefix 'temp') | Out-Null
     Copy-Item (Join-Path $repo 'deploy/nginx.conf') (Join-Path $nginxPrefix 'conf/nginx.conf')

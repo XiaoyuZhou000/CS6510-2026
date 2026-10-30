@@ -11,7 +11,7 @@ import java.util.StringJoiner;
  * Builds {@code selfcheckout.faults} specifications for the hooks named in the contracts (R15).
  *
  * <pre>{@code
- * String spec = FaultInjection.spec().halt("relay.afterAck").delay("inventory.apply.beforeCommit", 3000).build();
+ * String spec = FaultInjection.spec().halt("relay.afterConfirm").delay("inventory.apply.beforeCommit", 3000).build();
  * ServiceProcesses.service("transaction").faults(spec)...;      // in a child JVM
  * try (var armed = FaultInjection.spec().fail("x").armInThisJvm()) { ... }   // in-process
  * }</pre>

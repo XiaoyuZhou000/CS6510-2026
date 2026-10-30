@@ -15,11 +15,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Ingestion with position assignment (contracts/scan-event-delivery.md section 3): at most five statements
+ * Ingestion with position assignment (contracts/scan-event-delivery.md section 3): at most six statements
  * and one commit per batch, whatever its size (R22).
  *
  * <ol>
@@ -28,8 +29,12 @@ import java.util.concurrent.atomic.LongAdder;
  *   <li>one tuple-IN SELECT of the batch's identities that are already stored;</li>
  *   <li>one batched multi-row INSERT of the new events, at {@code last_position + 1 ...} in batch order;</li>
  *   <li>one upsert of the names the {@link ProductNameMap} lacks or holds differently, only when there are any;</li>
- *   <li>the {@code scan_sequence} UPDATE, then the commit.</li>
+ *   <li>the {@code scan_sequence} UPDATE;</li>
+ *   <li>the {@code consumer_offset} upsert (FR-049), also for a batch of duplicates, then the commit.</li>
  * </ol>
+ *
+ * <p>The stored offset is overwritten, not maximized: after a recreated topic the consumer reads from the
+ * earliest offset again, and the smaller offsets it stores are the ones a restart must resume from.</p>
  *
  * <p>The name map changes only after the commit returned. Test-only hooks
  * {@code analytics.ingest.beforeCommit} and {@code analytics.ingest.afterCommit} surround the commit.</p>
@@ -40,6 +45,11 @@ public final class JdbcScanIngestStore implements ScanIngestStore {
     private static final String INSERT_EVENT = "INSERT INTO accepted_scan "
             + "(position, source_transaction_id, source_scan_sequence, sku) VALUES (?, ?, ?, ?)";
     private static final String ADVANCE_SEQUENCE = "UPDATE scan_sequence SET last_position = ? WHERE sequence_key = 1";
+    private static final String STORE_OFFSET = "INSERT INTO consumer_offset (topic, partition_no, next_offset, updated_at) "
+            + "VALUES (?, ?, ?, NOW(3)) AS incoming ON DUPLICATE KEY UPDATE next_offset = incoming.next_offset, "
+            + "updated_at = incoming.updated_at";
+    private static final String READ_OFFSET =
+            "SELECT next_offset FROM consumer_offset WHERE topic = ? AND partition_no = ?";
     private static final LatencyHistogram BATCH = PerfMetrics.timer("analytics.ingest.batch");
     private static final LongAdder STORED = PerfMetrics.counter("analytics.ingest.stored");
     private static final LongAdder DUPLICATES = PerfMetrics.counter("analytics.ingest.duplicates");
@@ -54,8 +64,9 @@ public final class JdbcScanIngestStore implements ScanIngestStore {
     }
 
     @Override
-    public IngestResult ingest(List<ScanEvent> events) {
+    public IngestResult ingest(List<ScanEvent> events, ConsumedOffset next) {
         Objects.requireNonNull(events, "events");
+        Objects.requireNonNull(next, "next");
         if (events.isEmpty() || events.size() > MAX_BATCH) {
             throw new IllegalArgumentException("A batch holds 1 to " + MAX_BATCH + " events");
         }
@@ -72,6 +83,7 @@ public final class JdbcScanIngestStore implements ScanIngestStore {
                 if (!stored.contains(event.identity())) fresh.add(event);
             }
             if (fresh.isEmpty()) {
+                storeOffset(connection, next);
                 FaultHooks.hit("analytics.ingest.beforeCommit");
                 return new Committed(0, 0, 0, Map.of());
             }
@@ -79,6 +91,7 @@ public final class JdbcScanIngestStore implements ScanIngestStore {
             Map<String, String> changedNames = names.diff(fresh);
             if (!changedNames.isEmpty()) upsertNames(connection, changedNames);
             advanceSequence(connection, last + fresh.size());
+            storeOffset(connection, next);
             FaultHooks.hit("analytics.ingest.beforeCommit");
             return new Committed(fresh.size(), last + 1, last + fresh.size(), changedNames);
         });
@@ -91,6 +104,19 @@ public final class JdbcScanIngestStore implements ScanIngestStore {
         BATCH.recordSince(started);
         FaultHooks.hit("analytics.ingest.afterCommit");
         return new IngestResult(committed.stored(), duplicates, committed.first(), committed.last());
+    }
+
+    @Override
+    public OptionalLong readNextOffset(String topic, int partition) {
+        return JdbcUnitOfWork.read(pool, "analytics.offset.read", connection -> {
+            try (PreparedStatement select = connection.prepareStatement(READ_OFFSET)) {
+                select.setString(1, topic);
+                select.setInt(2, partition);
+                try (ResultSet row = select.executeQuery()) {
+                    return row.next() ? OptionalLong.of(row.getLong(1)) : OptionalLong.empty();
+                }
+            }
+        });
     }
 
     @Override
@@ -171,6 +197,15 @@ public final class JdbcScanIngestStore implements ScanIngestStore {
         try (PreparedStatement update = connection.prepareStatement(ADVANCE_SEQUENCE)) {
             update.setLong(1, lastPosition);
             if (update.executeUpdate() != 1) throw new SQLException("scan_sequence singleton is missing");
+        }
+    }
+
+    private static void storeOffset(Connection connection, ConsumedOffset next) throws SQLException {
+        try (PreparedStatement upsert = connection.prepareStatement(STORE_OFFSET)) {
+            upsert.setString(1, next.topic());
+            upsert.setInt(2, next.partition());
+            upsert.setLong(3, next.nextOffset());
+            upsert.executeUpdate();
         }
     }
 

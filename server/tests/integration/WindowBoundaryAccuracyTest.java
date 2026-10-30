@@ -21,8 +21,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Exact overlapping windows (FR-044, FR-045) over an {@link AnalyticsTestSchema}. Bursts arrive through
- * concurrent {@code DeliverScanEvents} calls with arbitrary interleaving; boundaries fall inside bursts.
+ * Exact overlapping windows (FR-044, FR-045, FR-051, FR-052, FR-054) over an {@link AnalyticsTestSchema}. Bursts
+ * arrive as {@code ScanAccepted} records published concurrently, in arbitrary interleaving, and consumed in
+ * offset order; boundaries fall inside bursts.
  */
 public class WindowBoundaryAccuracyTest {
     @Test
@@ -109,6 +110,10 @@ public class WindowBoundaryAccuracyTest {
             assertEquals(List.of("sku7:160", "sku1:70", "sku10:70", "sku11:70", "sku12:70", "sku13:70", "sku2:70",
                     "sku3:70", "sku4:70", "sku5:70"), stored);
             assertEquals(schema.expectedRanks(1000), stored);
+            for (PopularWindowStore.StoredRank rank : analytics.windows.readLatest(10).orElseThrow().ranks()) {
+                assertEquals(InProcessAnalytics.nameOf(rank.sku()), rank.name(),
+                        "every ranked item carries the product name captured in its ScanAccepted (US4 scenario 5)");
+            }
         }
     }
 

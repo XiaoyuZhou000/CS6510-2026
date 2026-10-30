@@ -93,7 +93,11 @@ class CompositionRootTest {
                 assertFalse(source.contains("rpc."), main + " holds no rpc types");
                 assertTrue(source.contains("new CatalogPublisher("), main + " publishes its catalog through the outbox");
             } else {
-                assertTrue(source.contains("GrpcServers.start("), main + " serves gRPC through GrpcServers");
+                // Scans moved to events (006 T126): Analytics serves no gRPC and consumes ScanAccepted.
+                assertFalse(source.contains("GrpcServers"), main + " serves no gRPC");
+                assertFalse(source.contains("ServerBuilder"), main + " serves no gRPC");
+                assertFalse(source.contains("rpc."), main + " holds no rpc types");
+                assertTrue(source.contains("ScanAcceptedConsumer.create("), main + " consumes scans from the broker");
             }
             Matcher configs = Pattern.compile("DatabaseConfig\\.fromEnvironment\\(\\s*\"([A-Z]+)\",\\s*\"([a-z0-9_]+)\","
                     + "\\s*\"([a-z0-9_]+)\"").matcher(source);

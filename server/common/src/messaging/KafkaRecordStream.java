@@ -32,6 +32,7 @@ import java.util.OptionalLong;
  * </ul>
  */
 public final class KafkaRecordStream implements RecordStream {
+    private static final Duration OFFSET_LOOKUP_TIMEOUT = Duration.ofSeconds(5);
     private final Consumer<String, byte[]> consumer;
     private final String group;
     private final String name;
@@ -128,6 +129,18 @@ public final class KafkaRecordStream implements RecordStream {
     @Override
     public OptionalLong currentLag(Partition partition) {
         return consumer.currentLag(new TopicPartition(partition.topic(), partition.partition()));
+    }
+
+    @Override
+    public long beginningOffset(Partition partition) {
+        TopicPartition topicPartition = new TopicPartition(partition.topic(), partition.partition());
+        return consumer.beginningOffsets(List.of(topicPartition), OFFSET_LOOKUP_TIMEOUT).get(topicPartition);
+    }
+
+    @Override
+    public long endOffset(Partition partition) {
+        TopicPartition topicPartition = new TopicPartition(partition.topic(), partition.partition());
+        return consumer.endOffsets(List.of(topicPartition), OFFSET_LOOKUP_TIMEOUT).get(topicPartition);
     }
 
     @Override

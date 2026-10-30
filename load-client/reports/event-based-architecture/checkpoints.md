@@ -17,6 +17,9 @@ Latencies are client-side p95 / p99 in milliseconds, from the Load Client JSON r
 | CP1 | `cp1-default-1` | default | 4397 | −8.7 | 12.3 / 35.2 | 13.6 / 40.4 | 66.4 / 130.0 | 0 | 0 | 0 | 0 | 1 | 1 | [cp1-default-1](cp1-default-1/) |
 | CP1 | `cp1-default-2` | default | 4312 | −10.5 | 12.1 / 25.8 | 14.1 / 43.6 | 71.6 / 126.8 | 0 | 0 | 0 | 0 | 1 | 1 | [cp1-default-2](cp1-default-2/) |
 | CP1 | `cp1-stress-1` | stress | 10711 | −6.3 | 22.4 / 55.9 | 25.9 / 65.0 | 1724.8 / 2400.7 | 5879 | 0 | 0 | 0 | 1 | 1 | [cp1-stress-1](cp1-stress-1/) |
+| CP2 | `cp2-default-1` | default | 4021 | −16.5 | 12.7 / 26.3 | 14.5 / 44.8 | 74.6 / 138.6 | 0 | 0 | 0 | 0 | 1 | 1 | [cp2-default-1](cp2-default-1/) |
+| CP2 | `cp2-stress-1` | stress | 10847 | −5.1 | 24.7 / 62.3 | 29.4 / 72.2 | 1463.5 / 1972.0 | 5941 | 0 | 0 | 0 | 1 | 1 | [cp2-stress-1](cp2-stress-1/) |
+| CP2 | `cp2-default-2` | default | 4043 | −16.1 | 13.0 / 28.0 | 14.7 / 43.8 | 82.3 / 145.7 | 0 | 0 | 0 | 0 | 1 | 1 | [cp2-default-2](cp2-default-2/) |
 
 ## Summary
 
@@ -26,6 +29,8 @@ Latencies are client-side p95 / p99 in milliseconds, from the Load Client JSON r
 | CP0 | stress | 1 | 11427 | 11427 |
 | CP1 | default | 2 | 4354.5 (−9.6) | 4312–4397 |
 | CP1 | stress | 1 | 10711 (−6.3) | 10711 |
+| CP2 | default | 2 | 4032 (−16.3; −7.4 vs CP1) | 4021–4043 |
+| CP2 | stress | 1 | 10847 (−5.1; +1.3 vs CP1) | 10847 |
 
 ## CP0: attribution baseline (T002)
 
@@ -91,3 +96,34 @@ The second default run uses the label `cp0-default-2`, and the stress run uses `
 - A larger `OUTBOX_MARK_BATCH_MS`, to cut most of the marking commits.
 - More `CHECKOUT_CONSUMER_THREADS` for Inventory, to reduce head-of-line waits under contention.
 
+## CP2: full event-based system (T131)
+
+**Measured**: 2026-10-30, 03:52–04:02 local time. Three runs: `cp2-default-1` and `cp2-stress-1` back to back, then `cp2-default-2`, taken because the first default run fell more than 5% below CP1.
+
+**Implementation**: the working tree of phase 6 (US5) on top of commit `ab6b53a`, uncommitted, so `evidence.json` reports `gitDirty: true`. Every inter-service interaction is now an event: the checkout Saga (US1, US3), the catalog (US4), and the scans (US5). The scan relay publishes `ScanAccepted` records through `KafkaScanEventSink`, and Analytics consumes them in batches with `consumer_offset` committed in the ingestion transaction. Inventory and Analytics serve no gRPC.
+
+**Command**: `server/benchmark-event-based.ps1 -Workload default|stress -OutputLabel <label>`, with `-IdleCpuCores 2.0 -BlockingProcess WardogsClient-Win64-Shipping,ROTTR`. The readiness step now also waits for `analytics-scan-ingest`, after Analytics has started; a first attempt that waited for it before Analytics started timed out during setup and measured nothing, and its output was removed.
+
+**Environment**: as for CP1. The idle gate passed for every run, but the background load was higher than for CP1: 0.89, 0.50, and 0.76 cores against 0.44–0.45. The heaviest process was the game `Arknights` at 0.34–0.36 cores, which is not on the `-BlockingProcess` list.
+
+**Validation**:
+- Every run is `comparable: true`: the validator passed, all pending work drained, zero parked events in all three services, and zero final consumer lag. The scan group's peak lag in the 10 s samples was 20, 35, and 110 records.
+- Zero background completions and zero completions without a recorded response (FR-061).
+- The stress run's 5941 Complete errors are 409 `INSUFFICIENT_STOCK` once the hot SKU sells out, as in CP0 (7321) and CP1 (5879).
+
+### Investigation of the default drop (more than 5% below CP1)
+
+**Default, −7.4% against CP1 (two runs, 4021–4043); stress +1.3%**:
+- **The database work is unchanged**. Per run, the relay made 3043 marking commits (CP1: 3059 delivery rounds) and Analytics 3037 ingestion commits (CP1: 3059). Each ingestion adds one `consumer_offset` upsert to a transaction that already exists, so no commit was added. The Scan commit's p50 stayed at 7.6 ms.
+- **Start slowed most, although nothing in this phase touches it**. Start p50 rose from 6.8–6.9 to 8.0 ms (+16%), Scan p50 from 8.0–8.1 to 8.5–8.6 ms (+6%), and Complete p50 from 29.1–29.2 to 29.7–29.8 ms (+2%). Start is one INSERT and one commit, with no broker or relay involvement.
+- **The machine was busier**. Background CPU roughly doubled because of the game, and the broker now also carries about 700 scan records per second plus the Analytics consumer's fetches. The two cannot be separated from these runs.
+- **Stress did not drop**. It is +1.3% against CP1, and Inventory's consumer lag p95 fell from 1638 to 1378 ms. Under stress the hot SKU's row lock dominates, not CPU.
+
+**Conclusion**: no correctness regression, and no extra database work on any path. The default drop matches the higher background load, together with the broker's added scan traffic. It must be measured again on an idle machine before any cost is attributed to the scan path. CP3 (T163) and CP4 (T164–T166) run on an idle machine with the same harness.
+
+### D17 entry criteria
+
+| Option | Criterion | CP2 | Result |
+|---|---|---|---|
+| Inventory group commit | Inventory consumer lag p95 > 50 ms under stress | 1378 ms in `cp2-stress-1` (p50 410 ms) | **Met**: a candidate for the CP3 A/B (T163); not adopted here |
+| Immediate publish for scans | Visibility p99 > 5 s (SC-008) | Under 0.5 s: relay latency p99 79–133 ms, scan consumer lag p99 30–79 ms, and window publication lag p99 157–248 ms. `integration/AnalyticsVisibilityLagTest` measured 127 ms at p99. | Not met |

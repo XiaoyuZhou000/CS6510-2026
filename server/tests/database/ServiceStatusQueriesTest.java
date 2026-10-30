@@ -111,24 +111,31 @@ class ServiceStatusQueriesTest {
         try (AnalyticsTestSchema schema = AnalyticsTestSchema.create()) {
             AnalyticsStatusQueries queries = new AnalyticsStatusQueries(schema.pool());
             AnalyticsStatusQueries.Status empty = queries.read();
-            assertEquals(new AnalyticsStatusQueries.Status(0, 0), empty);
+            assertEquals(new AnalyticsStatusQueries.Status(0, 0, 0, -1), empty, "no offset is stored before the first batch");
             assertEquals(0, empty.highestEligibleBoundary());
             assertFalse(empty.pendingWork());
             assertEquals("status service=analytics pending_work=no last_position=0 last_window_end=0 "
-                    + "highest_eligible_boundary=0 unpublished_windows=0", empty.line());
+                    + "highest_eligible_boundary=0 unpublished_windows=0 parked_events=0 consumer_next_offset=-1",
+                    empty.line());
 
             schema.insertPositioned(1, 999, "SKU-000001");
             assertEquals(0, queries.read().highestEligibleBoundary(), "999 positions complete no window");
             schema.insertPositioned(1000, 1600, "SKU-000001");
             AnalyticsStatusQueries.Status behind = queries.read();
-            assertEquals(new AnalyticsStatusQueries.Status(1600, 0), behind);
+            assertEquals(new AnalyticsStatusQueries.Status(1600, 0, 0, -1), behind);
             assertEquals(1500, behind.highestEligibleBoundary());
             assertEquals(2, behind.unpublishedWindows());
             assertTrue(behind.pendingWork());
 
             schema.update("UPDATE analytics_checkpoint SET last_window_end = 1000 WHERE checkpoint_key = 1");
+            schema.update("INSERT INTO consumer_offset (topic, partition_no, next_offset, updated_at) "
+                    + "VALUES ('selfcheckout.scan-accepted.v1', 0, 1601, NOW(3))");
+            schema.update("INSERT INTO dead_letter_event (event_id, topic, partition_no, record_offset, reason, "
+                    + "record_bytes, first_parked_at, last_parked_at) VALUES ('scan:x:1', "
+                    + "'selfcheckout.scan-accepted.v1', 0, 1600, 'INVALID_PAYLOAD', x'00', NOW(3), NOW(3))");
             assertEquals("status service=analytics pending_work=yes last_position=1600 last_window_end=1000 "
-                    + "highest_eligible_boundary=1500 unpublished_windows=1", queries.read().line());
+                    + "highest_eligible_boundary=1500 unpublished_windows=1 parked_events=1 consumer_next_offset=1601",
+                    queries.read().line());
             schema.update("UPDATE analytics_checkpoint SET last_window_end = 1500 WHERE checkpoint_key = 1");
             AnalyticsStatusQueries.Status caughtUp = queries.read();
             assertFalse(caughtUp.pendingWork());

@@ -18,9 +18,9 @@ import java.util.Set;
  * catalog topic is read, and the catalog Inventory publishes at every startup is a no-op for it (D9). Either
  * service can be started with fault hooks armed (see {@link FaultInjection}) and restarted without them.
  *
- * <p>{@link #withAnalytics} adds an Analytics schema and ports; the Analytics process starts only on
- * {@link #startAnalytics}, so a test can scan while it is down. Transaction's relay always targets this
- * deployment's own Analytics port, which nobody serves until then.</p>
+ * <p>{@link #withAnalytics} adds an Analytics schema and port; the Analytics process starts only on
+ * {@link #startAnalytics}, so a test can scan while it is down. Transaction's relay publishes to this
+ * deployment's scan topic whether or not Analytics runs; the records wait there until it consumes them.</p>
  */
 public final class CheckoutDeployment implements AutoCloseable {
     /** {@code CHECKOUT_CONSUMER_THREADS} of both services unless a test overrides Transaction's. */
@@ -32,7 +32,6 @@ public final class CheckoutDeployment implements AutoCloseable {
     public final int inventoryHttpPort;
     public final int transactionHttpPort;
     public final int analyticsHttpPort;
-    public final int analyticsGrpcPort;
     public final ServiceHttp transactionHttp;
     public final ServiceHttp inventoryHttp;
     public final ServiceHttp analyticsHttp;
@@ -66,7 +65,6 @@ public final class CheckoutDeployment implements AutoCloseable {
         inventoryHttpPort = ServiceProcesses.freePort();
         transactionHttpPort = ServiceProcesses.freePort();
         analyticsHttpPort = ServiceProcesses.freePort();
-        analyticsGrpcPort = ServiceProcesses.freePort();
         transactionHttp = new ServiceHttp(transactionHttpPort);
         inventoryHttp = new ServiceHttp(inventoryHttpPort);
         analyticsHttp = new ServiceHttp(analyticsHttpPort);
@@ -195,8 +193,7 @@ public final class CheckoutDeployment implements AutoCloseable {
 
     private ServiceProcesses.Builder transactionBuilder(int httpPort) {
         ServiceProcesses.Builder builder = ServiceProcesses.service("transaction").database(transactionSchema)
-                .httpPort(httpPort).grpcTarget("analytics", analyticsGrpcPort)
-                .kafka(names);
+                .httpPort(httpPort).kafka(names);
         transactionEnvironment.forEach(builder::env);
         return builder;
     }
@@ -205,15 +202,49 @@ public final class CheckoutDeployment implements AutoCloseable {
         startAnalytics(null);
     }
 
-    /** Starts (or restarts) Analytics with metrics printed every second, and {@code faults} armed when not null. */
+    /**
+     * Starts (or restarts) Analytics with metrics printed every second. Without {@code faults} it waits until
+     * Analytics answers HTTP and its scan consumer holds the scan topic's partition. With {@code faults} armed it
+     * returns at once, because a hook may halt the process before either happens; the test awaits the outcome.
+     */
     public void startAnalytics(String faults) throws Exception {
         if (analyticsSchema == null) throw new IllegalStateException("Start the deployment withAnalytics");
+        String group = names.group(TopicNames.ANALYTICS_SCAN_INGEST_GROUP);
+        Set<String> previous = KafkaTestSupport.memberIds(group);
         closeQuietly(analytics);
         analytics = ServiceProcesses.service("analytics").database(analyticsSchema).httpPort(analyticsHttpPort)
-                .grpcPort(analyticsGrpcPort).kafka(names).perfMetrics(true).env("PERF_METRICS_INTERVAL_SECONDS", "1")
+                .kafka(names).perfMetrics(true).env("PERF_METRICS_INTERVAL_SECONDS", "1")
                 .faults(faults).start();
+        if (faults != null) return;
         analytics.awaitHttp("/analytics/popular-items", 200, Duration.ofSeconds(60));
-        analytics.awaitPort(analyticsGrpcPort, Duration.ofSeconds(30));
+        KafkaTestSupport.awaitGroupAssigned(group, names.scanAccepted(), TopicNames.Topic.SCAN_ACCEPTED.partitions(),
+                1, previous, Duration.ofSeconds(60));
+    }
+
+    /**
+     * Starts Transaction with {@code faults} armed and returns at once, for a hook that halts it before it
+     * answers HTTP, such as {@code relay.afterConfirm} with scans already waiting in the outbox.
+     */
+    public void launchTransaction(String faults) throws Exception {
+        awaitQuiet();
+        closeQuietly(transaction);
+        transaction = transactionBuilder(transactionHttpPort).faults(faults).start();
+    }
+
+    /** The records on this deployment's scan topic. */
+    public long scanTopicEnd() {
+        return KafkaTestSupport.endOffset(names.scanAccepted(), 0);
+    }
+
+    /** Waits until Transaction's relay has published every accepted scan to the broker. */
+    public void awaitScansPublished(Duration timeout) throws Exception {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (transactionSchema.undeliveredCount() > 0) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("Unpublished scans remain: " + transactionSchema.undeliveredCount() + logs());
+            }
+            Thread.sleep(50);
+        }
     }
 
     /** Kills Inventory without shutdown hooks, like a crash. */

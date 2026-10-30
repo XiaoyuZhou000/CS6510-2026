@@ -6,8 +6,8 @@ import transaction.ScanEventSink;
 import java.util.List;
 
 /**
- * A relay sink that is either down, answering every call as {@code UNAVAILABLE} like an Analytics outage, or up,
- * delegating to a real sink such as a {@code GrpcAnalyticsIngestClient} on an {@link InProcessAnalytics} channel.
+ * A relay sink that is either down, answering every batch as {@code Uncertain} like an unreachable broker, or up,
+ * delegating to a real sink such as a {@code KafkaScanEventSink} on an {@link InMemoryEventBus} or live Kafka.
  */
 public final class SwitchableScanEventSink implements ScanEventSink {
     private volatile ScanEventSink target;
@@ -26,6 +26,6 @@ public final class SwitchableScanEventSink implements ScanEventSink {
     @Override
     public DeliveryResult deliver(List<RelayStore.UndeliveredScan> events) {
         ScanEventSink current = target;
-        return current == null ? new Uncertain("UNAVAILABLE") : current.deliver(events);
+        return current == null ? new Uncertain("broker unreachable") : current.deliver(events);
     }
 }

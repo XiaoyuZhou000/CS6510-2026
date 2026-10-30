@@ -1,5 +1,6 @@
 package database;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
@@ -11,7 +12,10 @@ import java.util.Objects;
  */
 public interface RelayStore {
 
-    /** Up to {@code limit} rows whose {@code published_at} is NULL, in {@code scan_id} order; one SELECT. */
+    /**
+     * Up to {@code limit} rows whose {@code published_at} is NULL, in {@code scan_id} order; one SELECT whose
+     * connection is back in the pool when this returns, so the sends that follow hold none.
+     */
     List<UndeliveredScan> selectUndelivered(int limit) throws StoreFailure;
 
     /**
@@ -23,12 +27,14 @@ public interface RelayStore {
     /** The outbox backlog, for the {@code transaction.relay.backlog} gauge. */
     long countUndelivered() throws StoreFailure;
 
+    /** One unpublished accepted scan with the name and unit price captured when it was accepted. */
     record UndeliveredScan(long scanId, String transactionId, int scanSequence, String sku, String productName,
-                           Instant acceptedAt) {
+                           BigDecimal unitPrice, Instant acceptedAt) {
         public UndeliveredScan {
             Objects.requireNonNull(transactionId, "transactionId");
             Objects.requireNonNull(sku, "sku");
             Objects.requireNonNull(productName, "productName");
+            Objects.requireNonNull(unitPrice, "unitPrice");
             Objects.requireNonNull(acceptedAt, "acceptedAt");
         }
     }

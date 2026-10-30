@@ -194,7 +194,7 @@ class RestorationEventDirectTest {
     private static ServiceProcesses.ServiceProcess start(InventoryTestSchema schema, TopicNames topics, String faults)
             throws Exception {
         ServiceProcesses.ServiceProcess process = ServiceProcesses.service("inventory").database(schema)
-                .httpPort(freePort()).grpcPort(freePort()).kafka(topics).faults(faults)
+                .httpPort(freePort()).kafka(topics).faults(faults)
                 .start();
         process.awaitHttp("/items", 200, Duration.ofSeconds(60));
         KafkaTestSupport.awaitGroupAssigned(topics.group(TopicNames.INVENTORY_CHECKOUT_GROUP), topics.checkout(), 16, 8,

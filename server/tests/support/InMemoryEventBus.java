@@ -39,8 +39,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li><b>Fault controls</b>: duplicate the next sends, drop the next sends in transit (they fail
  *       unconfirmed), delay delivery, reorder across partitions within a poll, lose the next offset commits
  *       (so their records are redelivered after a rebalance), pause the broker (sends fail, polls return
- *       nothing, commits throw), refuse sends as a broker whose storage is full, and kill the next consumer
- *       that commits, before the commit lands.</li>
+ *       nothing, commits throw), refuse sends as a broker whose storage is full, kill the next consumer
+ *       that commits, before the commit lands, forget a group's committed offsets, and recreate a topic.</li>
  * </ul>
  *
  * <p>All randomness comes from the seed given to the constructor, so a run is reproducible.</p>
@@ -159,6 +159,27 @@ public final class InMemoryEventBus implements RecordSender {
 
     /** While full, sends fail; consumers keep reading what is stored. */
     public void refuseSends(boolean refused) { storageFull = refused; }
+
+    /** Forgets every committed offset of {@code group}, as deleting the group's offsets on a broker would. */
+    public void resetCommittedOffsets(String group) {
+        synchronized (lock) {
+            committed.remove(group);
+        }
+    }
+
+    /**
+     * Empties {@code topic} and forgets every group's committed offsets of it, as deleting and recreating the
+     * topic would. A consumer positioned beyond the new end reads from offset 0 again
+     * ({@code auto.offset.reset=earliest}).
+     */
+    public void recreateTopic(String topic) {
+        synchronized (lock) {
+            for (List<Stored> partition : log(topic).partitions) partition.clear();
+            for (Map<RecordStream.Partition, Long> offsets : committed.values()) {
+                offsets.keySet().removeIf(partition -> partition.topic().equals(topic));
+            }
+        }
+    }
 
     // ---- inspection ----
 
@@ -324,6 +345,11 @@ public final class InMemoryEventBus implements RecordSender {
                     if (paused.contains(partition)) continue;
                     List<Stored> stored = log(partition.topic()).partitions.get(partition.partition());
                     long position = positions.get(partition);
+                    if (position > stored.size()) {
+                        // Out of range, as after a recreated topic: auto.offset.reset=earliest.
+                        position = 0;
+                        positions.put(partition, 0L);
+                    }
                     List<Record> records = new ArrayList<>();
                     for (long offset = position; offset < stored.size() && records.size() < 500; offset++) {
                         Stored item = stored.get((int) offset);
@@ -418,6 +444,21 @@ public final class InMemoryEventBus implements RecordSender {
                 Long position = positions.get(partition);
                 if (position == null) return OptionalLong.empty();
                 return OptionalLong.of(log(partition.topic()).partitions.get(partition.partition()).size() - position);
+            }
+        }
+
+        @Override
+        public long beginningOffset(Partition partition) {
+            synchronized (lock) {
+                log(partition.topic());
+                return 0;
+            }
+        }
+
+        @Override
+        public long endOffset(Partition partition) {
+            synchronized (lock) {
+                return log(partition.topic()).partitions.get(partition.partition()).size();
             }
         }
 

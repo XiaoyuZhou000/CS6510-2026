@@ -9,12 +9,13 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * One SELECT per round, and after an acknowledged delivery one UPDATE and one commit (R22). The SELECT uses
- * the {@code (published_at, scan_id)} index and ends its unit with a rollback.
+ * One SELECT per round, and after a confirmed batch one UPDATE and one commit in a new short transaction (R22,
+ * D10). The SELECT uses the {@code (published_at, scan_id)} index and ends its unit with a rollback, which
+ * returns its connection to the pool before the relay sends anything.
  */
 public final class JdbcRelayStore implements RelayStore {
     private static final String SELECT_UNDELIVERED = "SELECT scan_id, transaction_id, scan_sequence, sku, product_name, "
-            + "accepted_at FROM accepted_scan WHERE published_at IS NULL ORDER BY scan_id LIMIT ?";
+            + "unit_price, accepted_at FROM accepted_scan WHERE published_at IS NULL ORDER BY scan_id LIMIT ?";
 
     private final ConnectionPool pool;
 
@@ -32,7 +33,8 @@ public final class JdbcRelayStore implements RelayStore {
                 try (ResultSet rows = select.executeQuery()) {
                     while (rows.next()) {
                         scans.add(new UndeliveredScan(rows.getLong(1), rows.getString(2), rows.getInt(3),
-                                rows.getString(4), rows.getString(5), rows.getTimestamp(6).toInstant()));
+                                rows.getString(4), rows.getString(5), rows.getBigDecimal(6),
+                                rows.getTimestamp(7).toInstant()));
                     }
                 }
             }

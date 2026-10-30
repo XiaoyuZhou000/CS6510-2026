@@ -3,12 +3,12 @@ package integration;
 import analytics.AnalyticsService;
 import database.PopularWindowStore;
 import database.StoreFailure;
-import io.grpc.StatusRuntimeException;
 import org.junit.jupiter.api.Test;
 import support.AnalyticsTestSchema;
 import support.FaultInjection;
 import support.InProcessAnalytics;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -19,8 +19,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Analytics recovery from {@code analytics_checkpoint} and the 1,000-position overlap (FR-048), over an
- * {@link AnalyticsTestSchema} seeded through ingestion. Every published window must appear exactly once and
- * equal a recomputation over the durable positions; no partial or duplicate window is ever visible.
+ * {@link AnalyticsTestSchema} seeded through {@code ScanAccepted} records that its scan consumer ingests. Every
+ * published window must appear exactly once and equal a recomputation over the durable positions; no partial or
+ * duplicate window is ever visible. An ingestion that crashes before or after its commit is read again from the
+ * broker until it is stored once (US5 scenarios 3-5).
  */
 class AnalyticsCrashRecoveryTest {
     @Test
@@ -82,13 +84,17 @@ class AnalyticsCrashRecoveryTest {
             try {
                 analytics.deliver(InProcessAnalytics.events("tx-a", 1, stream(0, 800)));
                 List<String> second = stream(800, 700);
+                long storedBefore = analytics.stored();
                 try (FaultInjection.Armed armed = FaultInjection.spec().fail("analytics.ingest.beforeCommit").armInThisJvm()) {
-                    assertThrows(StatusRuntimeException.class, () -> analytics.deliver(InProcessAnalytics.events("tx-a", 801, second)));
+                    analytics.publish(InProcessAnalytics.events("tx-a", 801, second));
+                    analytics.awaitFailures(2, Duration.ofSeconds(10));
+                    assertEquals(800, schema.lastPosition(), "the crashed batch left no position");
+                    Thread.sleep(300);
+                    assertTrue(schema.windowEnds().isEmpty(), "no window exists before 1,000 positions");
+                    assertEquals(0, analytics.consumer.parked(), "a crashed ingestion is read again, never parked");
                 }
-                assertEquals(800, schema.lastPosition(), "the crashed batch left no position");
-                Thread.sleep(300);
-                assertTrue(schema.windowEnds().isEmpty(), "no window exists before 1,000 positions");
-                assertEquals(700, analytics.deliver(InProcessAnalytics.events("tx-a", 801, second)).getStored());
+                analytics.awaitConsumed(Duration.ofSeconds(30));
+                assertEquals(700, analytics.stored() - storedBefore, "the records are read again and stored once");
                 awaitWindow(analytics, 1500);
             } finally {
                 pipeline.shutdown();
@@ -104,15 +110,23 @@ class AnalyticsCrashRecoveryTest {
             AnalyticsService pipeline = analytics.startPipeline();
             try {
                 List<String> first = stream(0, 1000);
+                long committed;
                 try (FaultInjection.Armed armed = FaultInjection.spec().fail("analytics.ingest.afterCommit").armInThisJvm()) {
-                    assertThrows(StatusRuntimeException.class, () -> analytics.deliver(InProcessAnalytics.events("tx-a", 1, first)));
+                    analytics.publish(InProcessAnalytics.events("tx-a", 1, first));
+                    analytics.awaitFailures(2, Duration.ofSeconds(10));
+                    // A poll returns at most 500 records, all of which the crashed batch committed.
+                    committed = schema.lastPosition();
+                    assertTrue(committed >= 1 && committed <= 500, "the batch committed before the crash: " + committed);
                 }
-                assertEquals(1000, schema.lastPosition(), "the batch committed before the crash");
+                analytics.awaitConsumed(Duration.ofSeconds(30));
+                assertEquals(1000, schema.lastPosition(), "the committed records were read again without new positions");
+                assertTrue(analytics.duplicates() >= committed, "every committed record read again is a duplicate");
                 awaitWindow(analytics, 1000);
+                // The relay re-sends a batch whose marking crashed: every record is a duplicate.
                 var redelivered = analytics.deliver(InProcessAnalytics.events("tx-a", 1, first));
-                assertEquals(0, redelivered.getStored());
-                assertEquals(1000, redelivered.getDuplicates());
-                assertEquals(500, analytics.deliver(InProcessAnalytics.events("tx-a", 1001, stream(1000, 500))).getStored());
+                assertEquals(0, redelivered.stored());
+                assertEquals(1000, redelivered.duplicates());
+                assertEquals(500, analytics.deliver(InProcessAnalytics.events("tx-a", 1001, stream(1000, 500))).stored());
                 awaitWindow(analytics, 1500);
             } finally {
                 pipeline.shutdown();

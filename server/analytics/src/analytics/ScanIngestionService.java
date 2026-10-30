@@ -1,56 +1,94 @@
 package analytics;
 
 import database.ScanIngestStore;
+import database.StoreFailure;
+import events.BatchEventHandler;
+import events.DecodedEvent;
+import events.EventTypes;
+import events.ParkReason;
+import events.PermanentEventFailure;
+import events.RecordStream;
+import events.TransientEventFailure;
 import faults.FaultHooks;
+import selfcheckout.events.v1.ScanAccepted;
 
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
 /**
- * {@code DeliverScanEvents} business rules (contracts/grpc-internal-contracts.md "AnalyticsIngestService"):
- * validates a delivered batch, then hands it to the ingestion transaction. The result is returned only
- * after that transaction committed, so it may be acknowledged as durable.
+ * Ingests consumed {@code ScanAccepted} batches (contracts/scan-event-delivery.md section 3, D10): validates
+ * each event, then hands the batch and the offset after its last record to the ingestion transaction, which
+ * commits both together. The consumer commits the broker offset only after this returns (FR-011).
+ *
+ * <ul>
+ *   <li>An event that breaks the contract's validation rules is a {@link PermanentEventFailure}, so it is
+ *       parked and never stored.</li>
+ *   <li>Any other failure, including a store failure or an unknown commit outcome, is transient: a valid scan is
+ *       read again until it is stored, because a parked valid scan would be missing from every window.</li>
+ * </ul>
+ *
+ * <p>Test-only fault hook {@code analytics.ingest.received}, after the poll returned and before the ingestion
+ * transaction begins.</p>
  */
-public final class ScanIngestionService {
+public final class ScanIngestionService implements BatchEventHandler {
     private final ScanIngestStore store;
 
     public ScanIngestionService(ScanIngestStore store) {
         this.store = Objects.requireNonNull(store, "store");
     }
 
-    /**
-     * Ingests one batch. A malformed batch raises {@link InvalidBatch} and stores nothing; a store
-     * failure, including an unknown commit outcome, propagates as {@code StoreFailure}.
-     */
-    public ScanIngestStore.IngestResult ingest(List<ScanIngestStore.ScanEvent> events) {
-        validate(events);
-        FaultHooks.hit("analytics.ingest.received");
-        return store.ingest(events);
+    @Override
+    public void handleBatch(List<DecodedEvent> events) {
+        ingest(events);
     }
 
-    static void validate(List<ScanIngestStore.ScanEvent> events) {
+    /** Ingests consecutive records of one partition and returns after the ingestion commit. */
+    public ScanIngestStore.IngestResult ingest(List<DecodedEvent> events) {
         if (events == null || events.isEmpty() || events.size() > ScanIngestStore.MAX_BATCH) {
-            throw new InvalidBatch("A batch must hold 1 to " + ScanIngestStore.MAX_BATCH + " events");
+            throw new IllegalArgumentException("A batch holds 1 to " + ScanIngestStore.MAX_BATCH + " events");
         }
-        for (int index = 0; index < events.size(); index++) {
-            ScanIngestStore.ScanEvent event = events.get(index);
-            text(event.transactionId(), 40, "transaction_id", index);
-            if (event.scanSequence() < 1) throw new InvalidBatch("Event " + index + ": scan_sequence must be at least 1");
-            text(event.sku(), 20, "sku", index);
-            text(event.productName(), 100, "product_name", index);
+        List<ScanIngestStore.ScanEvent> scans = new ArrayList<>(events.size());
+        for (DecodedEvent event : events) scans.add(scanOf(event));
+        DecodedEvent last = events.getLast();
+        ScanIngestStore.ConsumedOffset next = new ScanIngestStore.ConsumedOffset(last.topic(), last.partition(),
+                last.offset() + 1);
+        try {
+            FaultHooks.hit("analytics.ingest.received");
+            return store.ingest(scans, next);
+        } catch (StoreFailure failure) {
+            throw failure;
+        } catch (RuntimeException failure) {
+            throw new TransientEventFailure("Ingesting " + scans.size() + " scans failed; they are read again", failure);
         }
     }
 
-    private static void text(String value, int maximum, String field, int index) {
+    /** Where the consumer resumes {@code partition}: the stored next offset, or 0 before the first batch. */
+    public long nextOffset(RecordStream.Partition partition) {
+        return store.readNextOffset(partition.topic(), partition.partition()).orElse(0L);
+    }
+
+    static ScanIngestStore.ScanEvent scanOf(DecodedEvent event) {
+        if (event.type() != EventTypes.SCAN_ACCEPTED) {
+            throw invalid(event, "the scan topic carries only ScanAccepted, not " + event.type().typeName());
+        }
+        ScanAccepted scan = event.payload(ScanAccepted.class);
+        text(event, scan.getTransactionId(), 40, "transaction_id");
+        if (scan.getScanSequence() < 1) throw invalid(event, "scan_sequence must be at least 1");
+        text(event, scan.getSku(), 20, "sku");
+        text(event, scan.getProductName(), 100, "product_name");
+        return new ScanIngestStore.ScanEvent(scan.getTransactionId(), scan.getScanSequence(), scan.getSku(),
+                scan.getProductName(), Instant.ofEpochMilli(scan.getAcceptedAtMs()));
+    }
+
+    private static void text(DecodedEvent event, String value, int maximum, String field) {
         if (value == null || value.isBlank() || value.length() > maximum) {
-            throw new InvalidBatch("Event " + index + ": " + field + " must be 1 to " + maximum + " characters");
+            throw invalid(event, field + " must be 1 to " + maximum + " characters");
         }
     }
 
-    /** A batch that breaks the contract's validation rules; it is never retried as is. */
-    public static final class InvalidBatch extends RuntimeException {
-        public InvalidBatch(String message) {
-            super(message);
-        }
+    private static PermanentEventFailure invalid(DecodedEvent event, String detail) {
+        return new PermanentEventFailure(ParkReason.INVALID_PAYLOAD, "Event " + event.eventId() + ": " + detail);
     }
 }

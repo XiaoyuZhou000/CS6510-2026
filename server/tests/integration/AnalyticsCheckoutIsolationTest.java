@@ -3,7 +3,6 @@ package integration;
 import analytics.AnalyticsService;
 import database.JdbcRelayStore;
 import org.junit.jupiter.api.Test;
-import rpc.GrpcAnalyticsIngestClient;
 import support.AnalyticsTestSchema;
 import support.InProcessAnalytics;
 import support.InProcessInventory;
@@ -24,8 +23,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import static support.PipelineTestSupport.awaitOrFail;
 
 /**
- * Failing Analytics persistence cannot disturb concurrent Scan and Complete traffic (FR-049). Events reach
- * Analytics through Transaction's relay and Analytics' ingestion, never through a shared table.
+ * Failing Analytics persistence cannot disturb concurrent Scan and Complete traffic (FR-048, FR-049). Events reach
+ * Analytics through Transaction's relay, its {@code KafkaScanEventSink}, the broker (here the in-memory bus), and
+ * Analytics' scan consumer, never through a shared table.
  */
 class AnalyticsCheckoutIsolationTest {
     private static final String SKU = "SKU-000001";
@@ -44,8 +44,8 @@ class AnalyticsCheckoutIsolationTest {
             transactions.seedReplica(2, stock.seed(2, 2_000));
             InProcessTransaction checkout = InProcessTransaction.over(transactions).pool(8, 32)
                     .bus(inventory.bus, inventory.names).build();
-            ScanEventRelay relay = new ScanEventRelay(new JdbcRelayStore(checkout.pool),
-                    new GrpcAnalyticsIngestClient(analytics.channel(), Duration.ofSeconds(5)), ScanEventRelay.Settings.defaults());
+            ScanEventRelay relay = new ScanEventRelay(new JdbcRelayStore(checkout.pool), analytics.sink(),
+                    ScanEventRelay.Settings.defaults());
             relay.start();
             AnalyticsService pipeline = analytics.startPipeline(analyticsStore);
             try {

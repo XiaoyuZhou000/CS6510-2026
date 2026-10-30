@@ -54,6 +54,12 @@ public interface RecordStream extends AutoCloseable {
     /** Records between {@link #position} and the partition's end, if the stream knows it without a broker call. */
     OptionalLong currentLag(Partition partition);
 
+    /** The offset of the first record still in {@code partition}'s log. */
+    long beginningOffset(Partition partition);
+
+    /** The offset the next record appended to {@code partition} will receive. */
+    long endOffset(Partition partition);
+
     Collection<Partition> assignment();
 
     /** Makes a blocked or the next {@link #poll} return at once; the only method safe from another thread. */

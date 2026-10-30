@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -38,15 +39,21 @@ import java.util.function.ToLongFunction;
  *   <li><b>Stall alarm</b>: a record in transient retry for longer than 60 s is logged with its topic,
  *       partition, offset, and age once per status interval and reported by {@link #stalledPartitions}.</li>
  *   <li><b>Modes</b>: group mode runs {@code N} threads with one stream each; manual-assignment mode runs one
- *       thread that seeks each partition to a supplied offset (0 for the catalog, a stored offset for
- *       Analytics).</li>
+ *       thread that seeks each partition to a supplied offset (0 for the catalog).</li>
+ *   <li><b>Batch group mode</b> ({@link #batchGroup}, Analytics' scan ingestion, D10): the consumer's own
+ *       database is the authority for its progress (FR-049). On every assignment each partition seeks to the
+ *       stored offset, whatever the group's committed offset; a stored offset beyond the log end (a recreated
+ *       topic) raises an alarm and reads from the earliest offset. Each poll's records of one partition go to
+ *       the {@link BatchEventHandler} as one batch; a record that does not decode splits the batch, and when a
+ *       batch fails its records are tried one at a time under the rules above, so only the failing record
+ *       waits or is parked.</li>
  * </ul>
  *
  * <p>A stream failure ends that stream; the thread opens a new one after a backoff, so a consumer survives
  * broker restarts. Test-only fault hook {@code consumer.afterHandlerCommit}, between the handler's return
  * and the offset commit, unless {@link Settings#faultHooks} is off. Timers {@code consumer.<name>.lag} (record timestamp to handler start) and
- * {@code consumer.<name>.handler}, counter {@code consumer.<name>.parked}, gauge
- * {@code consumer.<name>.lagRecords} ({@link #lag}).</p>
+ * {@code consumer.<name>.handler} (per record, or per batch in batch mode), counters {@code consumer.<name>.parked}
+ * and {@code consumer.<name>.offsetResets}, gauge {@code consumer.<name>.lagRecords} ({@link #lag}).</p>
  */
 public final class ConsumerLoop implements AutoCloseable {
     /**
@@ -98,18 +105,22 @@ public final class ConsumerLoop implements AutoCloseable {
     private final ToLongFunction<RecordStream.Partition> startOffset;
     private final Supplier<RecordStream> streams;
     private final EventHandler handler;
+    /** Null except in batch group mode, where {@link #handler} hands it batches of one record. */
+    private final BatchEventHandler batchHandler;
     private final DeadLetterStore deadLetters;
     private final Settings settings;
     private final List<Worker> workers = new ArrayList<>();
     private final LatencyHistogram lagTimer;
     private final LatencyHistogram handlerTimer;
     private final LongAdder parkedCounter;
+    private final LongAdder offsetResetCounter;
+    private final AtomicLong offsetResets = new AtomicLong();
     private volatile boolean running;
 
     private ConsumerLoop(String service, String name, String group, List<String> topics,
                          List<RecordStream.Partition> manualPartitions, ToLongFunction<RecordStream.Partition> startOffset,
-                         Supplier<RecordStream> streams, EventHandler handler, DeadLetterStore deadLetters,
-                         Settings settings) {
+                         Supplier<RecordStream> streams, EventHandler handler, BatchEventHandler batchHandler,
+                         DeadLetterStore deadLetters, Settings settings) {
         this.service = Objects.requireNonNull(service, "service");
         this.name = Objects.requireNonNull(name, "name");
         this.group = group;
@@ -118,19 +129,34 @@ public final class ConsumerLoop implements AutoCloseable {
         this.startOffset = startOffset;
         this.streams = Objects.requireNonNull(streams, "streams");
         this.handler = Objects.requireNonNull(handler, "handler");
+        this.batchHandler = batchHandler;
         this.deadLetters = Objects.requireNonNull(deadLetters, "deadLetters");
         this.settings = Objects.requireNonNull(settings, "settings");
         this.lagTimer = PerfMetrics.timer("consumer." + name + ".lag");
         this.handlerTimer = PerfMetrics.timer("consumer." + name + ".handler");
         this.parkedCounter = PerfMetrics.counter("consumer." + name + ".parked");
+        this.offsetResetCounter = PerfMetrics.counter("consumer." + name + ".offsetResets");
         PerfMetrics.gauge("consumer." + name + ".lagRecords", this::lag);
     }
 
     /** Group mode: {@code settings.threads()} members of {@code group} reading {@code topic}. */
     public static ConsumerLoop group(String service, String group, String topic, Supplier<RecordStream> streams,
                                      EventHandler handler, DeadLetterStore deadLetters, Settings settings) {
-        return new ConsumerLoop(service, group, group, List.of(topic), null, null, streams, handler, deadLetters,
+        return new ConsumerLoop(service, group, group, List.of(topic), null, null, streams, handler, null, deadLetters,
                 settings);
+    }
+
+    /**
+     * Batch group mode: one member of {@code group} reading {@code topic}, which seeks every assigned partition
+     * to {@code storedOffset}'s offset and hands each poll's records of a partition to {@code handler} together.
+     */
+    public static ConsumerLoop batchGroup(String service, String group, String topic,
+                                          ToLongFunction<RecordStream.Partition> storedOffset,
+                                          Supplier<RecordStream> streams, BatchEventHandler handler,
+                                          DeadLetterStore deadLetters, Settings settings) {
+        Objects.requireNonNull(handler, "handler");
+        return new ConsumerLoop(service, group, group, List.of(topic), null, Objects.requireNonNull(storedOffset),
+                streams, event -> handler.handleBatch(List.of(event)), handler, deadLetters, settings.withThreads(1));
     }
 
     /** Manual-assignment mode: one thread reads {@code partitions}, each from {@code startOffset}'s offset. */
@@ -138,7 +164,7 @@ public final class ConsumerLoop implements AutoCloseable {
                                       ToLongFunction<RecordStream.Partition> startOffset, Supplier<RecordStream> streams,
                                       EventHandler handler, DeadLetterStore deadLetters, Settings settings) {
         return new ConsumerLoop(service, name, null, null, List.copyOf(partitions), Objects.requireNonNull(startOffset),
-                streams, handler, deadLetters, settings.withThreads(1));
+                streams, handler, null, deadLetters, settings.withThreads(1));
     }
 
     public synchronized void start() {
@@ -207,6 +233,11 @@ public final class ConsumerLoop implements AutoCloseable {
         return total;
     }
 
+    /** Assignments, in batch group mode, whose stored offset lay beyond the log end and were read from the earliest. */
+    public long offsetResets() {
+        return offsetResets.get();
+    }
+
     /** The result of one attempt at a record. */
     private record Outcome(ParkingPolicy.Verdict verdict, String eventId, String eventType, Integer schemaVersion) {
         boolean succeeded() { return verdict == null; }
@@ -259,10 +290,16 @@ public final class ConsumerLoop implements AutoCloseable {
                         retryDue(current);
                         List<RecordStream.Record> records = current.poll(pollTimeout());
                         Set<RecordStream.Partition> waiting = new HashSet<>(retries.keySet());
-                        for (RecordStream.Record record : records) {
-                            RecordStream.Partition partition = record.position();
-                            if (waiting.contains(partition)) continue;
-                            if (!process(current, record)) waiting.add(partition);
+                        if (batchHandler != null) {
+                            for (List<RecordStream.Record> run : byPartition(records).values()) {
+                                if (!waiting.contains(run.getFirst().position())) processBatch(current, run);
+                            }
+                        } else {
+                            for (RecordStream.Record record : records) {
+                                RecordStream.Partition partition = record.position();
+                                if (waiting.contains(partition)) continue;
+                                if (!process(current, record)) waiting.add(partition);
+                            }
                         }
                         commit(current, false);
                         observe(current);
@@ -309,7 +346,82 @@ public final class ConsumerLoop implements AutoCloseable {
 
         @Override
         public void onAssigned(Collection<RecordStream.Partition> partitions) {
-            // Positions come from the group's committed offsets; nothing else to restore.
+            // Plain group mode reads from the group's committed offsets; batch mode from the stored ones.
+            if (startOffset == null) return;
+            for (RecordStream.Partition partition : partitions) seekStored(stream, partition);
+        }
+
+        private void seekStored(RecordStream current, RecordStream.Partition partition) {
+            long stored = startOffset.applyAsLong(partition);
+            long end = current.endOffset(partition);
+            if (stored <= end) {
+                current.seek(partition, stored);
+                return;
+            }
+            long earliest = current.beginningOffset(partition);
+            offsetResets.incrementAndGet();
+            offsetResetCounter.increment();
+            System.err.println("[" + service + "] ALARM Consumer " + name + " stored offset " + stored + " of "
+                    + partition.topic() + "-" + partition.partition() + " is beyond the log end " + end
+                    + " (was the topic recreated?); reading from the earliest offset " + earliest);
+            current.seek(partition, earliest);
+        }
+
+        /**
+         * Batch mode: hands {@code run}, one poll's records of one partition, to the batch handler in as few
+         * batches as possible. A record that does not decode ends the batch before it and is tried alone; when a
+         * batch fails, its records are tried one at a time, so only the failing record waits or is parked.
+         */
+        private void processBatch(RecordStream current, List<RecordStream.Record> run) {
+            int index = 0;
+            while (index < run.size()) {
+                List<DecodedEvent> events = new ArrayList<>();
+                int end = index;
+                for (; end < run.size(); end++) {
+                    RecordStream.Record record = run.get(end);
+                    try {
+                        events.add(EnvelopeCodec.decode(record.value(), record.key())
+                                .at(record.topic(), record.partition(), record.offset()));
+                    } catch (EventDecodeException undecodable) {
+                        break;
+                    }
+                }
+                if (!events.isEmpty()) {
+                    if (attemptBatch(run.subList(index, end), events)) {
+                        processed.put(run.getFirst().position(), run.get(end - 1).offset() + 1);
+                    } else {
+                        for (int single = index; single < end; single++) {
+                            if (!process(current, run.get(single))) return;
+                        }
+                    }
+                    index = end;
+                }
+                if (index < run.size()) {
+                    if (!process(current, run.get(index))) return;
+                    index++;
+                }
+            }
+        }
+
+        /** True when the batch handler committed {@code events}, the decoded {@code records}. */
+        private boolean attemptBatch(List<RecordStream.Record> records, List<DecodedEvent> events) {
+            long now = System.currentTimeMillis();
+            for (RecordStream.Record record : records) {
+                lagTimer.record(TimeUnit.MILLISECONDS.toNanos(Math.max(0, now - record.timestampMs())));
+            }
+            try {
+                long started = System.nanoTime();
+                batchHandler.handleBatch(events);
+                handlerTimer.record(System.nanoTime() - started);
+                if (settings.faultHooks()) FaultHooks.hit("consumer.afterHandlerCommit");
+                return true;
+            } catch (RuntimeException failure) {
+                if (running) {
+                    System.err.println("[" + service + "] Consumer " + name + " batch of " + events.size()
+                            + " records failed; trying them one at a time: " + failure);
+                }
+                return false;
+            }
         }
 
         @Override
@@ -494,6 +606,15 @@ public final class ConsumerLoop implements AutoCloseable {
             }
             stalled = List.copyOf(current0);
         }
+    }
+
+    /** {@code records} grouped by partition, each partition's records in poll order. */
+    private static Map<RecordStream.Partition, List<RecordStream.Record>> byPartition(List<RecordStream.Record> records) {
+        Map<RecordStream.Partition, List<RecordStream.Record>> runs = new LinkedHashMap<>();
+        for (RecordStream.Record record : records) {
+            runs.computeIfAbsent(record.position(), ignored -> new ArrayList<>()).add(record);
+        }
+        return runs;
     }
 
     private static void sleep(Duration duration) {

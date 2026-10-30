@@ -187,7 +187,7 @@ class MicroserviceBoundaryTest {
         String previous = System.getProperty(FaultHooks.PROPERTY);
         System.clearProperty(FaultHooks.PROPERTY);
         try {
-            for (String hook : List.of("inventory.apply.beforeCommit", "inventory.restore.afterCommit", "relay.afterAck",
+            for (String hook : List.of("inventory.apply.beforeCommit", "inventory.restore.afterCommit", "relay.afterConfirm",
                     "analytics.ingest.received", "analytics.ingest.beforeCommit", "analytics.ingest.afterCommit")) {
                 assertDoesNotThrow(() -> FaultHooks.hit(hook), hook);
             }

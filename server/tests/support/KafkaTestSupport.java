@@ -157,6 +157,38 @@ public final class KafkaTestSupport {
         fail("Consumer group " + group + " never caught up on " + topic + ": " + last);
     }
 
+    /** The offset the next record appended to {@code topic}'s {@code partition} will receive. */
+    public static long endOffset(String topic, int partition) {
+        try (Admin admin = admin()) {
+            var key = new org.apache.kafka.common.TopicPartition(topic, partition);
+            return admin.listOffsets(Map.of(key, org.apache.kafka.clients.admin.OffsetSpec.latest())).all()
+                    .get(10, TimeUnit.SECONDS).get(key).offset();
+        } catch (Exception failure) {
+            throw new AssertionError("Reading the end offset of " + topic + "-" + partition + " failed: " + failure, failure);
+        }
+    }
+
+    /** The offset {@code group} committed for {@code topic}'s {@code partition}, or -1 when it committed none. */
+    public static long committedOffset(String group, String topic, int partition) {
+        try (Admin admin = admin()) {
+            var offset = admin.listConsumerGroupOffsets(group).partitionsToOffsetAndMetadata().get(10, TimeUnit.SECONDS)
+                    .get(new org.apache.kafka.common.TopicPartition(topic, partition));
+            return offset == null ? -1 : offset.offset();
+        } catch (Exception failure) {
+            throw new AssertionError("Reading " + group + "'s committed offset failed: " + failure, failure);
+        }
+    }
+
+    /** Sets {@code group}'s committed offset of {@code topic}'s {@code partition}; the group must have no live member. */
+    public static void alterCommittedOffset(String group, String topic, int partition, long offset) {
+        try (Admin admin = admin()) {
+            admin.alterConsumerGroupOffsets(group, Map.of(new org.apache.kafka.common.TopicPartition(topic, partition),
+                    new org.apache.kafka.clients.consumer.OffsetAndMetadata(offset))).all().get(10, TimeUnit.SECONDS);
+        } catch (Exception failure) {
+            throw new AssertionError("Altering " + group + "'s committed offset failed: " + failure, failure);
+        }
+    }
+
     /** The member IDs of {@code group} now; empty when it has none or cannot be described. */
     public static java.util.Set<String> memberIds(String group) {
         try (Admin admin = admin()) {

@@ -21,9 +21,11 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Analytics ingestion's atomicity and acknowledgement order (strict) and its statement budget, which does not
- * grow with the batch (R22; contracts/scan-event-delivery.md section 3).
+ * grow with the batch (R22; contracts/scan-event-delivery.md section 3): feature 005's statements plus one
+ * {@code consumer_offset} upsert in the same commit (FR-049).
  */
 class AnalyticsIngestStatementBudgetTest {
+    private static final AtomicLong OFFSETS = new AtomicLong();
 
     @Test
     void eventsPositionsAndSequenceShareOneCommitThatPrecedesTheResult() throws Exception {
@@ -35,7 +37,8 @@ class AnalyticsIngestStatementBudgetTest {
             Thread ingesting = Thread.ofPlatform().start(() -> {
                 faults.armForCurrentThread(CommitFault.delay(300));
                 try {
-                    ScanIngestStore.IngestResult stored = store.ingest(events("tx-1", 1, 100, 5));
+                    ScanIngestStore.IngestResult stored = store.ingest(events("tx-1", 1, 100, 5),
+                            new ScanIngestStore.ConsumedOffset("selfcheckout.scan-accepted.v1", 0, 100));
                     commitsReturnedAtResult.set(faults.commitsReturned());
                     result.complete(stored);
                 } catch (Throwable failure) {
@@ -48,11 +51,14 @@ class AnalyticsIngestStatementBudgetTest {
             assertEquals(0, schema.lastPosition());
             assertEquals(100, result.get(10, TimeUnit.SECONDS).stored());
             ingesting.join(5_000);
-            assertEquals(1, faults.commitsStarted(), "one commit covers events, positions, names, and scan_sequence");
+            assertEquals(1, faults.commitsStarted(),
+                    "one commit covers events, positions, names, scan_sequence, and consumer_offset");
             assertEquals(1, commitsReturnedAtResult.get(), "the commit returned before the result");
             assertEquals(100, schema.storedEvents());
             assertEquals(100, schema.lastPosition());
             assertEquals(5, schema.queryLong("SELECT COUNT(*) FROM product_name"));
+            assertEquals(100, schema.queryLong("SELECT next_offset FROM consumer_offset WHERE partition_no = 0"),
+                    "the next offset is durable when the result exists");
         }
     }
 
@@ -73,14 +79,14 @@ class AnalyticsIngestStatementBudgetTest {
                 assertEquals(1, warm.commits());
                 StatementBudgets.assertWithin("analytics.ingest.statements", warm.statements());
                 StatementBudgets.assertWithin("analytics.ingest.commits", warm.commits());
-                StatementBudgets.assertWithin("analytics.ingest.warmNameWrites", warm.inserts() - 1);
-                assertEquals(1, warm.inserts(), "a warm batch inserts its events and no name");
+                StatementBudgets.assertWithin("analytics.ingest.warmNameWrites", warm.inserts() - 2);
+                assertEquals(2, warm.inserts(), "a warm batch inserts its events and its offset, and no name");
                 transaction++;
             }
             CountingConnections.Counts duplicates = measure(counting, store, events("warm-0", 1, 1, 20));
             StatementBudgets.assertWithin("analytics.ingest.statements", duplicates.statements());
             assertEquals(1, duplicates.commits(), "a batch of duplicates still ends in its one commit");
-            assertEquals(0, duplicates.inserts() + duplicates.updates(), "and writes nothing");
+            assertEquals(1, duplicates.inserts() + duplicates.updates(), "and writes only its consumer_offset");
             schema.assertPositionsContiguous();
         }
     }
@@ -88,9 +94,14 @@ class AnalyticsIngestStatementBudgetTest {
     private static CountingConnections.Counts measure(CountingConnections counting, JdbcScanIngestStore store,
                                                       List<ScanIngestStore.ScanEvent> batch) {
         try (CountingConnections.Scope scope = counting.scope()) {
-            store.ingest(batch);
+            store.ingest(batch, offset(batch.size()));
             return scope.counts();
         }
+    }
+
+    /** The next offset after {@code records} more consumed records of partition 0. */
+    private static ScanIngestStore.ConsumedOffset offset(int records) {
+        return new ScanIngestStore.ConsumedOffset("selfcheckout.scan-accepted.v1", 0, OFFSETS.addAndGet(records));
     }
 
     private static JdbcScanIngestStore store(AnalyticsTestSchema schema) throws Exception {

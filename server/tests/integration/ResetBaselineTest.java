@@ -63,7 +63,6 @@ public final class ResetBaselineTest {
         }
         assertExactDatabaseBaseline();
 
-        int analyticsGrpc = ServiceProcesses.freePort();
         // The catalog reaches Transaction through Inventory's events (006 D9), on topics of this run only.
         KafkaTestSupport.requireBroker();
         TopicNames names = KafkaTestSupport.runTopics();
@@ -87,13 +86,12 @@ public final class ResetBaselineTest {
             assertEquals(List.of(), Json.parseObject(lowStock.body()).get("alerts"), "No SKU starts at or below 50");
 
             try (ServiceProcesses.ServiceProcess transaction = ServiceProcesses.service("transaction")
-                     .database(credentials.get("transaction")).httpPort(ServiceProcesses.freePort()).kafka(names)
-                     .grpcTarget("analytics", analyticsGrpc).start()) {
+                     .database(credentials.get("transaction")).httpPort(ServiceProcesses.freePort()).kafka(names).start()) {
                 transaction.awaitHttp("/transactions/missing", 404, Duration.ofSeconds(60));
                 awaitReplicaLoaded(transaction, Duration.ofSeconds(60));
                 try (ServiceProcesses.ServiceProcess analytics = ServiceProcesses.service("analytics")
                          .database(credentials.get("analytics")).httpPort(ServiceProcesses.freePort())
-                         .grpcPort(analyticsGrpc).start()) {
+                         .kafka(names).start()) {
                     analytics.awaitHttp("/analytics/popular-items", 200, Duration.ofSeconds(60));
                     for (ServiceProcesses.ServiceProcess fresh : List.of(inventory, transaction, analytics)) {
                         assertTrue(fresh.isAlive(), "The freshly started " + fresh.service() + " must remain running");

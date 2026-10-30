@@ -14,25 +14,28 @@ import java.util.Objects;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * The outbox relay (contracts/scan-event-delivery.md section 2, R10): one daemon thread per Transaction
- * process delivers accepted scans to Analytics at least once. Scan never waits for it.
+ * The scan relay (contracts/scan-event-delivery.md section 2, R10, D10): one daemon thread per Transaction
+ * process publishes accepted scans as {@code ScanAccepted} records at least once. Scan never waits for it.
  *
  * <ul>
- *   <li>A round selects up to {@code OUTBOX_BATCH_SIZE} (500) undelivered rows in {@code scan_id} order and
- *       sends them in one {@code DeliverScanEvents} call.</li>
- *   <li>Only after OK does it set {@code published_at} on exactly those rows, then it starts the next round
- *       at once. Any other outcome leaves the rows undelivered; they are reselected and resent after a
- *       backoff from 100 ms to 5 s. INVALID_ARGUMENT also raises an alarm, and nothing is ever skipped.</li>
+ *   <li>A round selects up to {@code OUTBOX_BATCH_SIZE} (500) unpublished rows in {@code scan_id} order on a
+ *       connection it releases before sending, then hands them to the {@link ScanEventSink}, which sends every
+ *       row and waits for all confirmations without holding a connection.</li>
+ *   <li>Only after every confirmation does it set {@code published_at} on exactly those rows, in a new short
+ *       transaction, then it starts the next round at once. Any other outcome leaves the rows unpublished; they
+ *       are reselected and resent after a backoff from 100 ms to 5 s. A batch that cannot be encoded also
+ *       raises an alarm, and nothing is ever skipped.</li>
  *   <li>With nothing to send it polls every 50 ms, counting {@code transaction.relay.idlePolls}.</li>
  *   <li>{@code OUTBOX_COALESCE_MS} (default 0, off) is the CP3 coalescing switch (R23): after a partial batch
- *       the next round waits that long, so it carries more events and costs fewer delivery commits. A full
+ *       the next round waits that long, so it carries more events and costs fewer marking commits. A full
  *       batch still starts the next round at once.</li>
  * </ul>
  *
- * <p>No cursor is kept, so a restart resumes from the undelivered rows and a row that commits late with a
- * lower {@code scan_id} is never skipped. A crash between OK and the {@code published_at} commit (the test-only
- * hook {@code relay.afterAck}) only causes a redelivery, which Analytics counts as duplicates. Several
- * Transaction processes may deliver the same rows; Analytics' deduplication keeps every scan counted once.</p>
+ * <p>No cursor is kept, so a restart resumes from the unpublished rows and a row that commits late with a
+ * lower {@code scan_id} is never skipped. A crash between the confirmations and the {@code published_at}
+ * commit (the test-only hook {@code relay.afterConfirm}) only re-sends the batch, which Analytics counts as
+ * duplicates. Several Transaction processes may publish the same rows; Analytics' deduplication keeps every
+ * scan counted once.</p>
  */
 public final class ScanEventRelay implements AutoCloseable {
     public static final int DEFAULT_BATCH_SIZE = 500;
@@ -43,7 +46,6 @@ public final class ScanEventRelay implements AutoCloseable {
     private static final LatencyHistogram BATCH = PerfMetrics.timer("transaction.relay.batch");
     private static final LatencyHistogram LATENCY = PerfMetrics.timer("transaction.relay.latency");
     private static final LongAdder EVENTS = PerfMetrics.counter("transaction.relay.events");
-    private static final LongAdder DUPLICATES = PerfMetrics.counter("transaction.relay.duplicates");
     private static final LongAdder IDLE_POLLS = PerfMetrics.counter("transaction.relay.idlePolls");
     private static final LongAdder FAILURES = PerfMetrics.counter("transaction.relay.failures");
     private static final LongAdder INVALID = PerfMetrics.counter("transaction.relay.invalidBatches");
@@ -104,8 +106,8 @@ public final class ScanEventRelay implements AutoCloseable {
     }
 
     /**
-     * One round: select, deliver, and, only after OK, mark delivered. Exposed for tests; the relay thread
-     * calls it in a loop. It never throws.
+     * One round: select, publish, and, only after every confirmation, mark published. Exposed for tests; the
+     * relay thread calls it in a loop. It never throws.
      */
     public Round runOnce() {
         long started = System.nanoTime();
@@ -113,7 +115,7 @@ public final class ScanEventRelay implements AutoCloseable {
         try {
             batch = store.selectUndelivered(settings.batchSize());
         } catch (RuntimeException failure) {
-            return failed("selecting undelivered scans failed: " + failure.getMessage());
+            return failed("selecting unpublished scans failed: " + failure.getMessage());
         }
         if (batch.isEmpty()) {
             IDLE_POLLS.increment();
@@ -124,32 +126,31 @@ public final class ScanEventRelay implements AutoCloseable {
         if (result instanceof ScanEventSink.InvalidBatch invalid) {
             INVALID.increment();
             if (!alarmed) {
-                System.err.println("[transaction] ALARM: Analytics refused an outbox batch as invalid; it stays "
-                        + "undelivered and is retried: " + invalid.detail());
+                System.err.println("[transaction] ALARM: a scan batch cannot be encoded as ScanAccepted; it stays "
+                        + "unpublished and is retried: " + invalid.detail());
             }
             alarmed = true;
             return failed(null);
         }
-        if (!(result instanceof ScanEventSink.Delivered delivered)) {
-            return failed("Analytics delivery was not acknowledged: " + ((ScanEventSink.Uncertain) result).status());
+        if (result instanceof ScanEventSink.Uncertain uncertain) {
+            return failed("publishing was not confirmed: " + uncertain.reason());
         }
         alarmed = false;
-        Instant acknowledged = Instant.now();
+        Instant confirmed = Instant.now();
         try {
-            FaultHooks.hit("relay.afterAck");
+            FaultHooks.hit("relay.afterConfirm");
             List<Long> ids = new ArrayList<>(batch.size());
             for (RelayStore.UndeliveredScan scan : batch) ids.add(scan.scanId());
-            store.markDelivered(ids, acknowledged);
+            store.markDelivered(ids, confirmed);
         } catch (RuntimeException failure) {
-            // Analytics holds the batch; it is resent and counted as duplicates.
-            return failed("recording delivery failed: " + failure.getMessage());
+            // The broker holds the batch; it is re-sent and Analytics counts it as duplicates.
+            return failed("recording publication failed: " + failure.getMessage());
         }
         for (RelayStore.UndeliveredScan scan : batch) {
-            LATENCY.record(Math.max(0, Duration.between(scan.acceptedAt(), acknowledged).toNanos()));
+            LATENCY.record(Math.max(0, Duration.between(scan.acceptedAt(), confirmed).toNanos()));
         }
         lastBatchFull = batch.size() >= settings.batchSize();
         EVENTS.add(batch.size());
-        DUPLICATES.add(delivered.duplicates());
         BATCH.recordSince(started);
         recovered();
         return Round.DELIVERED;
@@ -209,14 +210,14 @@ public final class ScanEventRelay implements AutoCloseable {
     private Round failed(String message) {
         FAILURES.increment();
         if (!failing && message != null && running) {
-            System.err.println("[transaction] Outbox relay " + message + "; backing off and retrying");
+            System.err.println("[transaction] Scan relay " + message + "; backing off and retrying");
         }
         failing = true;
         return Round.FAILED;
     }
 
     private void recovered() {
-        if (failing && running) System.out.println("[transaction] Outbox relay delivering again");
+        if (failing && running) System.out.println("[transaction] Scan relay publishing again");
         failing = false;
         backoff = settings.minBackoff();
     }

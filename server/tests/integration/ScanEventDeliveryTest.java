@@ -3,8 +3,8 @@ package integration;
 import org.junit.jupiter.api.Test;
 import support.CheckoutDeployment;
 import support.FaultInjection;
-import support.GrpcTestSupport;
 import support.ServiceHttp;
+import support.ServiceProcesses;
 
 import java.net.http.HttpResponse;
 import java.time.Duration;
@@ -17,9 +17,10 @@ import java.util.concurrent.Future;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * At-least-once delivery from Transaction's outbox to Analytics across real processes (US5 scenarios 3, 4, 6,
- * and 8; US2 scenario 3; contracts/scan-event-delivery.md sections 2 and 7). Each test ends with every accepted
- * scan stored in Analytics exactly once, at contiguous positions.
+ * At-least-once delivery of accepted scans from Transaction's outbox through the broker to Analytics across real
+ * processes (US5 scenarios 3, 4, 6, and 8; US2 scenario 3; contracts/scan-event-delivery.md sections 2 and 7). The
+ * relay publishes whether or not Analytics runs; the records wait in the scan topic. Each test ends with every
+ * accepted scan stored in Analytics exactly once, at contiguous positions.
  */
 class ScanEventDeliveryTest {
     private static final Duration DRAIN = Duration.ofSeconds(60);
@@ -32,8 +33,8 @@ class ScanEventDeliveryTest {
             String paid = deployment.transactionHttp.start("outage-2");
             scan(deployment.transactionHttp, paid, 4);
             assertEquals(200, deployment.transactionHttp.complete(paid).statusCode(), "Complete never waits for Analytics");
-            Thread.sleep(500);
-            assertEquals(34, deployment.transactionSchema.undeliveredCount(), "undelivered rows accumulate durably");
+            deployment.awaitScansPublished(DRAIN);
+            assertEquals(34, deployment.scanTopicEnd(), "the scans wait durably in the topic while Analytics is down");
 
             deployment.startAnalytics();
             deployment.awaitAnalyticsHoldsEveryScan(DRAIN);
@@ -41,8 +42,9 @@ class ScanEventDeliveryTest {
 
             deployment.stopAnalytics();
             scan(deployment.transactionHttp, id, 20);
-            Thread.sleep(500);
-            assertEquals(20, deployment.transactionSchema.undeliveredCount());
+            deployment.awaitScansPublished(DRAIN);
+            assertEquals(54, deployment.scanTopicEnd());
+            assertEquals(34, deployment.analyticsSchema.storedEvents(), "nothing is consumed while Analytics is down");
             deployment.startAnalytics();
             deployment.awaitAnalyticsHoldsEveryScan(DRAIN);
             assertEquals(54, deployment.analyticsSchema.storedEvents());
@@ -50,33 +52,39 @@ class ScanEventDeliveryTest {
     }
 
     @Test
-    void haltAfterAcknowledgementBeforeMarkingIsRedeliveredAndCountedOnce() throws Exception {
-        String halt = FaultInjection.spec().halt("relay.afterAck").build();
-        try (CheckoutDeployment deployment = CheckoutDeployment.withAnalytics(5, 1_000, halt)) {
-            String id = deployment.transactionHttp.start("ack-halt");
-            scan(deployment.transactionHttp, id, 40);
+    void haltAfterConfirmationBeforeMarkingIsResentAndCountedOnce() throws Exception {
+        try (CheckoutDeployment deployment = CheckoutDeployment.withAnalytics(5, 1_000, null)) {
             deployment.startAnalytics();
-            assertEquals(137, deployment.transactionProcess().awaitExit(Duration.ofSeconds(30)),
-                    "Transaction halts after Analytics acknowledged the batch");
-            assertEquals(40, deployment.analyticsSchema.storedEvents(), "Analytics committed the batch before its OK");
+            deployment.stopTransaction();
+            // Forty scans committed while Transaction was down, so one relay batch carries them all.
+            deployment.transactionSchema.insertOpenTransaction("confirm-halt");
+            deployment.transactionSchema.insertScans("confirm-halt", 1, 40, n -> "SKU-00000" + (n % 5 + 1));
+            deployment.launchTransaction(FaultInjection.spec().halt("relay.afterConfirm").build());
+            assertEquals(137, deployment.transactionProcess().awaitExit(Duration.ofSeconds(60)),
+                    "Transaction halts after the broker confirmed the batch");
             assertEquals(40, deployment.transactionSchema.undeliveredCount(), "published_at was never committed");
+            awaitStored(deployment, 40);
+            assertEquals(40, deployment.scanTopicEnd(), "the broker holds the confirmed batch");
 
             deployment.startTransaction();
             deployment.awaitAnalyticsHoldsEveryScan(DRAIN);
-            assertEquals(40, deployment.analyticsSchema.lastPosition(), "the redelivery added no position");
+            assertEquals(80, deployment.scanTopicEnd(), "the restarted relay sent the batch again");
+            assertEquals(40, deployment.analyticsSchema.lastPosition(), "the re-sent records added no position");
             awaitCounter(deployment, "analytics.ingest.duplicates", 40);
         }
     }
 
     @Test
-    void transactionCrashAfterScanCommitsBeforeDeliveryDeliversAfterRestart() throws Exception {
+    void transactionCrashAfterScanCommitsBeforePublicationPublishesAfterRestart() throws Exception {
         try (CheckoutDeployment deployment = CheckoutDeployment.withAnalytics(5, 1_000, null)) {
-            String id = deployment.transactionHttp.start("crash-before-delivery");
-            scan(deployment.transactionHttp, id, 25);
             deployment.killTransaction();
+            // Twenty-five scans whose commit preceded the crash; the crashed relay never published them.
+            deployment.transactionSchema.insertOpenTransaction("crash-before-publication");
+            deployment.transactionSchema.insertScans("crash-before-publication", 1, 25, n -> "SKU-00000" + (n % 5 + 1));
             deployment.startAnalytics();
             Thread.sleep(500);
             assertEquals(0, deployment.analyticsSchema.storedEvents());
+            assertEquals(0, deployment.scanTopicEnd());
             assertEquals(25, deployment.transactionSchema.undeliveredCount());
             deployment.startTransaction();
             deployment.awaitAnalyticsHoldsEveryScan(DRAIN);
@@ -108,11 +116,11 @@ class ScanEventDeliveryTest {
         }
     }
 
-    /** Constitution II: two Transaction processes on one schema; both relays may deliver the same rows. */
+    /** Constitution II: two Transaction processes on one schema; both relays may publish the same rows. */
     @Test
     void twoTransactionProcessesOnOneSchemaStillCountEveryScanOnce() throws Exception {
         try (CheckoutDeployment deployment = CheckoutDeployment.withAnalytics(5, 1_000, null)) {
-            int secondPort = GrpcTestSupport.freePort();
+            int secondPort = ServiceProcesses.freePort();
             deployment.startExtraTransaction(secondPort);
             ServiceHttp second = new ServiceHttp(secondPort);
             List<String> ids = new ArrayList<>();
@@ -133,9 +141,9 @@ class ScanEventDeliveryTest {
                 }
                 for (Future<?> station : work) station.get();
             }
-            Thread.sleep(300);
-            assertEquals(240, deployment.transactionSchema.undeliveredCount());
-            // Both relays now find the same 240 undelivered rows and race to deliver them.
+            // Both relays poll the same undelivered rows; a row either selects may be published twice.
+            deployment.awaitScansPublished(DRAIN);
+            assertTrue(deployment.scanTopicEnd() >= 240, "every scan is in the topic at least once");
             deployment.startAnalytics();
             deployment.awaitAnalyticsHoldsEveryScan(DRAIN);
             assertEquals(240, deployment.analyticsSchema.storedEvents());
@@ -150,6 +158,15 @@ class ScanEventDeliveryTest {
         for (int n = 0; n < count; n++) {
             HttpResponse<String> response = http.scan(id, "SKU-00000" + (n % 5 + 1));
             assertEquals(200, response.statusCode(), response.body());
+        }
+    }
+
+    private static void awaitStored(CheckoutDeployment deployment, long events) throws Exception {
+        long deadline = System.nanoTime() + DRAIN.toNanos();
+        while (deployment.analyticsSchema.storedEvents() < events) {
+            if (System.nanoTime() > deadline) fail("Analytics stored only " + deployment.analyticsSchema.storedEvents()
+                    + System.lineSeparator() + deployment.logs());
+            Thread.sleep(100);
         }
     }
 

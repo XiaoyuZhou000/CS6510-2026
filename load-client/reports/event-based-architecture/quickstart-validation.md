@@ -13,6 +13,18 @@ Outcomes of the scenarios in `specs/006-event-based-architecture/quickstart.md` 
 | Outbox rows afterwards | Every row has `published_at` | Transaction 2 rows, Inventory 2 rows, 0 unpublished in either; 0 parked |
 | Transaction's log | No checkout RPC | No `applyCheckout` |
 
+## Scenario E: Analytics outage (T129, US5)
+
+**Run**: 2026-10-30, 03:13–03:15 local time, on the benchmark machine, with the native broker. `db/reset-baseline.ps1` reset the schemas and topics. Inventory, Transaction, and Analytics then started from the built jars, and Nginx from `deploy/nginx.conf`. The unchanged Load Client ran its default workload (`java -cp out Main`, 10 stations, 60 s) through the gateway on port 8080. Scans now reach Analytics only as `ScanAccepted` records on `selfcheckout.scan-accepted.v1`.
+
+| Step | Expected | Observed |
+|---|---|---|
+| Analytics killed 20.1 s into the run (a forced stop) | Scan and Complete keep working | Analytics had stored 15,032 positions, with window 15,000 published |
+| 15 s with Analytics down | Scans keep being published; Analytics' windows stay at the last one | The topic grew to 28,238 records; Analytics stayed at window 15,000 |
+| Analytics restarted 35.9 s into the run | It resumes from `consumer_offset` and catches up | It resumed from offset 15,065 |
+| End of the run | No Scan or Complete errors | 4,501 Starts, 47,146 Scans, and 4,501 Completes, all with zero errors; p99 30.1, 40.8, and 113.0 ms |
+| After the run | Windows catch up to the highest boundary (SC-007) | Within 0.1 s of the client's end: every scan published, 47,146 positions for 47,146 distinct identities, checkpoint at 47,000 (the highest eligible boundary), zero parked events, stored next offset 47,146 |
+
 ## Scenario F: fault hooks (T099, US3)
 
 `integration/CheckoutEventFaultTest` and `messaging/ConsumerCrashAfterCommitTest` passed against the live broker with service processes (2026-10-29).

@@ -88,17 +88,6 @@ public final class ServiceProcesses {
             return this;
         }
 
-        public Builder grpcPort(int port) {
-            environment.put(prefix() + "_GRPC_PORT", Integer.toString(port));
-            return this;
-        }
-
-        /** {@code ANALYTICS_GRPC_TARGET} for the Transaction Service, until scans move to events (T126). */
-        public Builder grpcTarget(String peer, int port) {
-            environment.put(peer.toUpperCase(java.util.Locale.ROOT) + "_GRPC_TARGET", "127.0.0.1:" + port);
-            return this;
-        }
-
         public Builder env(String key, String value) {
             environment.put(key, value);
             return this;
@@ -128,11 +117,6 @@ public final class ServiceProcesses {
         }
 
         public ServiceProcess start() throws IOException {
-            if (service.equals("transaction")) {
-                // A peer target nobody listens on unless the test wires one: a test Transaction must never
-                // deliver scans to the running deployment's Analytics (9093).
-                environment.putIfAbsent("ANALYTICS_GRPC_TARGET", "127.0.0.1:" + freePort());
-            }
             environment.putIfAbsent("KAFKA_BOOTSTRAP", KafkaTestSupport.bootstrap());
             environment.putIfAbsent(events.TopicNames.PREFIX_VARIABLE, KafkaTestSupport.runTopics().prefix());
             Path server = serverRoot();

@@ -18,8 +18,10 @@ import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Outbox relay ordering (strict: {@code published_at} only after OK, one call per round) and its statement
- * budget per round (R22; contracts/scan-event-delivery.md section 2).
+ * Scan relay ordering (strict: {@code published_at} only after every broker confirmation, one batch send per
+ * round) and its final shape per round of up to 500 rows (R22, D10; contracts/scan-event-delivery.md section 2):
+ * a SELECT on a connection released before sending, a batch send holding no connection, then one UPDATE of
+ * {@code published_at} and a commit in a new short transaction.
  */
 class RelayStatementBudgetTest {
 
@@ -29,23 +31,23 @@ class RelayStatementBudgetTest {
             List<Long> undeliveredDuringCall = Collections.synchronizedList(new ArrayList<>());
             RecordingSink sink = new RecordingSink(batch -> {
                 undeliveredDuringCall.add(count(schema));
-                return new ScanEventSink.Uncertain("UNAVAILABLE");
+                return new ScanEventSink.Uncertain("broker unreachable");
             });
             ScanEventRelay relay = new ScanEventRelay(new JdbcRelayStore(schema.pool()), sink, ScanEventRelay.Settings.defaults());
 
             assertEquals(ScanEventRelay.Round.FAILED, relay.runOnce());
-            sink.answer = batch -> new ScanEventSink.InvalidBatch("malformed");
+            sink.answer = batch -> new ScanEventSink.InvalidBatch("cannot be encoded");
             assertEquals(ScanEventRelay.Round.FAILED, relay.runOnce());
-            assertEquals(30, schema.undeliveredCount(), "a failed or refused call marks nothing");
+            assertEquals(30, schema.undeliveredCount(), "an unconfirmed or unencodable batch marks nothing");
             assertTrue(schema.deliveredIds().isEmpty());
 
             sink.answer = batch -> {
                 undeliveredDuringCall.add(count(schema));
-                return new ScanEventSink.Delivered(batch.size(), 0);
+                return new ScanEventSink.Delivered(batch.size());
             };
             assertEquals(ScanEventRelay.Round.DELIVERED, relay.runOnce());
             assertEquals(List.of(30L, 30L), undeliveredDuringCall, "every row is still undelivered while the call runs");
-            assertEquals(0, schema.undeliveredCount(), "after OK the rows sent are marked delivered");
+            assertEquals(0, schema.undeliveredCount(), "after every confirmation the rows sent are marked published");
             assertEquals(3, sink.calls.size());
             assertEquals(sink.calls.get(0), sink.calls.get(2), "the same rows are resent after a failure");
             assertEquals(ScanEventRelay.Round.IDLE, relay.runOnce());
@@ -56,7 +58,12 @@ class RelayStatementBudgetTest {
     @Test
     void oneRoundMakesExactlyOneDeliverCallForUpTo500Events() throws Exception {
         try (TransactionTestSchema schema = outbox(1_200)) {
-            RecordingSink sink = new RecordingSink(batch -> new ScanEventSink.Delivered(batch.size(), 0));
+            List<Integer> activeDuringSend = Collections.synchronizedList(new ArrayList<>());
+            var pool = schema.pool();
+            RecordingSink sink = new RecordingSink(batch -> {
+                activeDuringSend.add(pool.occupancy().active());
+                return new ScanEventSink.Delivered(batch.size());
+            });
             ScanEventRelay relay = new ScanEventRelay(new JdbcRelayStore(schema.pool()), sink, ScanEventRelay.Settings.defaults());
             for (int round = 0; round < 3; round++) assertEquals(ScanEventRelay.Round.DELIVERED, relay.runOnce());
             assertEquals(ScanEventRelay.Round.IDLE, relay.runOnce());
@@ -67,6 +74,7 @@ class RelayStatementBudgetTest {
             Collections.sort(sorted);
             assertEquals(sorted, sent, "rows are sent in scan_id order");
             assertEquals(1_200, sent.stream().distinct().count());
+            assertEquals(List.of(0, 0, 0), activeDuringSend, "the batch send holds no pool connection");
             assertEquals(0, schema.undeliveredCount());
         }
     }
@@ -75,7 +83,7 @@ class RelayStatementBudgetTest {
     void statementsAndCommitsPerRoundStayWithinBudget() throws Exception {
         CountingConnections counting = new CountingConnections();
         try (TransactionTestSchema schema = outbox(TransactionTestSchema.Options.defaults().decorator(counting::wrap), 800)) {
-            RecordingSink sink = new RecordingSink(batch -> new ScanEventSink.Delivered(batch.size(), 0));
+            RecordingSink sink = new RecordingSink(batch -> new ScanEventSink.Delivered(batch.size()));
             ScanEventRelay relay = new ScanEventRelay(new JdbcRelayStore(schema.pool()), sink, ScanEventRelay.Settings.defaults());
             for (int round = 0; round < 2; round++) {
                 try (CountingConnections.Scope scope = counting.scope()) {

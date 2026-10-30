@@ -88,8 +88,7 @@ class ScanWithoutPeersTest {
 
     private static ServiceProcesses.ServiceProcess startTransaction(TransactionTestSchema schema, int httpPort,
                                                                     TopicNames names) throws Exception {
-        return ServiceProcesses.service("transaction").database(schema).httpPort(httpPort).kafka(names)
-                .grpcTarget("analytics", ServiceProcesses.freePort()).start();
+        return ServiceProcesses.service("transaction").database(schema).httpPort(httpPort).kafka(names).start();
     }
 
     private static void awaitReplica(TransactionTestSchema schema, ServiceProcesses.ServiceProcess transaction)

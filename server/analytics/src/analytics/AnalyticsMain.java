@@ -6,28 +6,34 @@ import database.ConnectionPool;
 import database.DatabaseConfig;
 import database.AnalyticsStatusQueries;
 import database.JdbcAcceptedScanReader;
+import database.JdbcDeadLetterStore;
 import database.JdbcPopularWindowStore;
 import database.JdbcScanIngestStore;
+import events.ConsumerLoop;
+import events.ParkingPolicy;
+import events.TopicNames;
+import messaging.KafkaClients;
+import messaging.ScanAcceptedConsumer;
 import metrics.MetricsReporter;
 import metrics.StatusReporter;
-import rpc.AnalyticsIngestGrpcService;
-import rpc.GrpcServers;
 
 import java.net.InetSocketAddress;
 import java.time.Duration;
+import java.util.Map;
 import java.util.concurrent.Executors;
 
 /**
- * Independent Analytics Service entry point: popular items over HTTP on its private port, and
- * AnalyticsIngestService over gRPC for Transaction's outbox relay. The pipeline is prewarmed and polling
- * before the gRPC server accepts deliveries.
+ * Independent Analytics Service entry point: popular items over HTTP on its private port, and the
+ * {@code analytics-scan-ingest} consumer of Transaction's {@code ScanAccepted} events (D10). Analytics serves
+ * no gRPC and calls no peer. The pipeline is prewarmed and polling before the consumer starts, and the broker
+ * is never awaited at startup.
  */
 public final class AnalyticsMain {
     private AnalyticsMain() { }
 
     public static void main(String[] args) throws Exception {
+        Map<String, String> environment = System.getenv();
         int port = args.length > 0 ? Integer.parseInt(args[0]) : intEnv("ANALYTICS_PORT", 8083);
-        int grpcPort = intEnv("ANALYTICS_GRPC_PORT", 9093);
         DatabaseConfig config = DatabaseConfig.fromEnvironment("ANALYTICS", "cs6510_analytics",
                 "cs6510_analytics_svc", 10, 10);
         ConnectionPool pool;
@@ -38,35 +44,37 @@ public final class AnalyticsMain {
             throw failure;
         }
         AnalyticsService service = null;
-        GrpcServers.Running grpc = null;
         try {
             ProductNameMap names = new ProductNameMap();
             JdbcScanIngestStore ingest = new JdbcScanIngestStore(pool, names);
             names.loadFrom(ingest);
             JdbcPopularWindowStore windows = new JdbcPopularWindowStore(pool);
             service = new AnalyticsService(windows, new JdbcAcceptedScanReader(pool));
-            grpc = GrpcServers.start(grpcPort, new AnalyticsIngestGrpcService(new ScanIngestionService(ingest)));
+            TopicNames topics = TopicNames.fromEnvironment(environment);
+            ConsumerLoop scans = ScanAcceptedConsumer.create(topics, ScanAcceptedConsumer.kafkaStreams(environment, topics),
+                    new ScanIngestionService(ingest), new JdbcDeadLetterStore(pool, "analytics.deadLetter"),
+                    ConsumerLoop.Settings.defaults().withPolicy(ParkingPolicy.fromEnvironment(environment)));
             HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
             server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
             server.createContext("/analytics/popular-items", new AnalyticsHttpHandler(service));
             MetricsReporter reporter = MetricsReporter.start("analytics");
             AnalyticsStatusQueries statusQueries = new AnalyticsStatusQueries(pool);
-            StatusReporter status = StatusReporter.start("analytics", () -> statusQueries.read().line());
+            StatusReporter status = StatusReporter.start("analytics",
+                    () -> statusQueries.read().line() + " scan_consumer_lag=" + scans.lag());
             AnalyticsService running = service;
-            GrpcServers.Running grpcServer = grpc;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 server.stop(5);
-                grpcServer.stop(Duration.ofSeconds(5));
+                scans.stop(Duration.ofSeconds(5));
                 running.shutdown();
                 status.stop();
                 reporter.stop();
                 pool.close();
             }));
             server.start();
-            System.out.println("Analytics Service listening on port " + port + " (gRPC " + grpcPort + ", "
-                    + names.size() + " product names loaded)");
+            scans.start();
+            System.out.println("Analytics Service listening on port " + port + " (broker "
+                    + KafkaClients.bootstrap(environment) + ", " + names.size() + " product names loaded)");
         } catch (Exception failure) {
-            if (grpc != null) grpc.stop(Duration.ofSeconds(1));
             if (service != null) service.shutdown();
             pool.close();
             throw failure;

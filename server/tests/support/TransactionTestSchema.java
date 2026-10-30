@@ -160,6 +160,29 @@ public final class TransactionTestSchema extends TestSchema {
         }
     }
 
+    /**
+     * Inserts {@code count} undelivered accepted_scan rows of {@code transactionId}, at sequences
+     * {@code firstSequence, firstSequence + 1, ...} and price 1.00, in one multi-row INSERT on the admin
+     * connection; {@code sku} gives each row's SKU from its index {@code 0..count-1}.
+     */
+    public void insertScans(String transactionId, int firstSequence, int count, java.util.function.IntFunction<String> sku)
+            throws SQLException {
+        StringBuilder sql = new StringBuilder("INSERT INTO accepted_scan "
+                + "(transaction_id, scan_sequence, sku, product_name, unit_price, accepted_at) VALUES ");
+        for (int i = 0; i < count; i++) sql.append(i == 0 ? "(?, ?, ?, ?, 1.00, NOW(3))" : ", (?, ?, ?, ?, 1.00, NOW(3))");
+        try (PreparedStatement insert = admin().prepareStatement(sql.toString())) {
+            int parameter = 1;
+            for (int i = 0; i < count; i++) {
+                String rowSku = sku.apply(i);
+                insert.setString(parameter++, transactionId);
+                insert.setInt(parameter++, firstSequence + i);
+                insert.setString(parameter++, rowSku);
+                insert.setString(parameter++, "Name of " + rowSku);
+            }
+            insert.executeUpdate();
+        }
+    }
+
     /** The scan_id of every row whose published_at is set, ascending. */
     public List<Long> deliveredIds() throws SQLException {
         List<Long> ids = new ArrayList<>();

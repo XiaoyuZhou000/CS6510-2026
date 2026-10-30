@@ -63,7 +63,7 @@ class ScanEventRelayCoalescingTest {
 
         MemoryStore(int count) {
             for (int i = 1; i <= count; i++) {
-                rows.add(new UndeliveredScan(i, "tx-" + i, 1, "SKU-1", "Apple", Instant.now()));
+                rows.add(new UndeliveredScan(i, "tx-" + i, 1, "SKU-1", "Apple", java.math.BigDecimal.ONE, Instant.now()));
             }
         }
 
@@ -88,7 +88,7 @@ class ScanEventRelayCoalescingTest {
     private static final class OkSink implements ScanEventSink {
         @Override
         public DeliveryResult deliver(List<RelayStore.UndeliveredScan> events) {
-            return new Delivered(events.size(), 0);
+            return new Delivered(events.size());
         }
     }
 }

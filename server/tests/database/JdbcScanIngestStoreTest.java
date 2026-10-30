@@ -13,29 +13,68 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Position assignment at ingestion (R11; contracts/scan-event-delivery.md sections 3 and 4). Migrates
  * {@code JdbcScanMaterializerTest}: the materializer is gone, and its guarantees (consecutive positions under
- * the singleton lock, the checkpoint advancing in the same commit, crash safety) now belong to ingestion.
+ * the singleton lock, the checkpoint advancing in the same commit, crash safety) now belong to ingestion. The
+ * same commit also stores the scan topic's next offset in {@code consumer_offset} (FR-049, D10), or nothing.
  */
 class JdbcScanIngestStoreTest {
+    private static final String TOPIC = "selfcheckout.scan-accepted.v1";
+    /** Offsets of the consumed records: every batch continues where the previous one of this JVM ended. */
+    private static final AtomicLong OFFSETS = new AtomicLong();
+
+    @Test
+    void theIngestionCommitStoresTheNextOffsetEvenForABatchOfDuplicates() throws Exception {
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create()) {
+            JdbcScanIngestStore store = store(schema.pool());
+            assertEquals(OptionalLong.empty(), store.readNextOffset(TOPIC, 0), "no offset before the first batch");
+            store.ingest(events("tx-1", 1, 3, "sku1"), new ScanIngestStore.ConsumedOffset(TOPIC, 0, 3));
+            assertEquals(OptionalLong.of(3), store.readNextOffset(TOPIC, 0));
+            assertEquals(new ScanIngestStore.IngestResult(0, 3, 0, 0),
+                    store.ingest(events("tx-1", 1, 3, "sku1"), new ScanIngestStore.ConsumedOffset(TOPIC, 0, 6)));
+            assertEquals(OptionalLong.of(6), store.readNextOffset(TOPIC, 0), "a redelivery still moves the offset");
+            assertEquals(3, schema.lastPosition(), "and adds no position");
+            // After a recreated topic the consumer reads from offset 0 again; the smaller offset replaces the old one.
+            store.ingest(events("tx-2", 1, 2, "sku1"), new ScanIngestStore.ConsumedOffset(TOPIC, 0, 2));
+            assertEquals(OptionalLong.of(2), store.readNextOffset(TOPIC, 0));
+            assertEquals(OptionalLong.empty(), store.readNextOffset(TOPIC, 1), "offsets are per partition");
+            assertEquals(1, schema.queryLong("SELECT COUNT(*) FROM consumer_offset"));
+        }
+    }
+
+    @Test
+    void parkedRecordsOffsetsAreIncludedInTheNextStoredOffset() throws Exception {
+        try (AnalyticsTestSchema schema = AnalyticsTestSchema.create()) {
+            JdbcScanIngestStore store = store(schema.pool());
+            store.ingest(events("tx-1", 1, 3, "sku1"), new ScanIngestStore.ConsumedOffset(TOPIC, 0, 3));
+            // Offset 3 was parked; the record at offset 4 is the next batch.
+            store.ingest(events("tx-1", 4, 4, "sku1"), new ScanIngestStore.ConsumedOffset(TOPIC, 0, 5));
+            assertEquals(OptionalLong.of(5), store.readNextOffset(TOPIC, 0),
+                    "a restart resumes after the parked record, never at it");
+            assertEquals(4, schema.lastPosition());
+            schema.assertPositionsContiguous();
+        }
+    }
 
     @Test
     void positionsAreUniqueContiguousFromOneAndImmutable() throws Exception {
         try (AnalyticsTestSchema schema = AnalyticsTestSchema.create()) {
             JdbcScanIngestStore store = store(schema.pool());
-            assertEquals(new ScanIngestStore.IngestResult(3, 0, 1, 3), store.ingest(events("tx-1", 1, 3, "sku1")));
+            assertEquals(new ScanIngestStore.IngestResult(3, 0, 1, 3), ingest(store, events("tx-1", 1, 3, "sku1")));
             List<AnalyticsTestSchema.StoredEvent> first = schema.events();
-            assertEquals(new ScanIngestStore.IngestResult(2, 1, 4, 5), store.ingest(events("tx-1", 3, 5, "sku2")));
+            assertEquals(new ScanIngestStore.IngestResult(2, 1, 4, 5), ingest(store, events("tx-1", 3, 5, "sku2")));
             List<AnalyticsTestSchema.StoredEvent> all = schema.events();
             assertEquals(first, all.subList(0, 3), "stored positions never change");
             schema.assertPositionsContiguous();
@@ -50,12 +89,13 @@ class JdbcScanIngestStoreTest {
             ProductNameMap names = new ProductNameMap();
             JdbcScanIngestStore store = new JdbcScanIngestStore(schema.pool(), names);
             faults.armForCurrentThread(FaultingConnections.CommitFault.failBeforeCommit());
-            StoreFailure failure = assertThrows(StoreFailure.class, () -> store.ingest(events("tx-1", 1, 4, "sku1")));
+            StoreFailure failure = assertThrows(StoreFailure.class, () -> ingest(store, events("tx-1", 1, 4, "sku1")));
             assertTrue(failure.commitOutcomeUnknown(), "a failed commit is reported as an unknown outcome");
             assertEquals(0, schema.lastPosition());
             assertEquals(0, schema.storedEvents());
             assertNull(schema.productName("sku1"));
             assertNull(names.name("sku1"), "the name map changes only after a commit");
+            assertEquals(0, schema.queryLong("SELECT COUNT(*) FROM consumer_offset"), "the offset rolls back with the batch");
         }
     }
 
@@ -64,13 +104,14 @@ class JdbcScanIngestStoreTest {
         try (AnalyticsTestSchema schema = AnalyticsTestSchema.create()) {
             JdbcScanIngestStore store = store(schema.pool());
             try (FaultInjection.Armed armed = FaultInjection.spec().fail("analytics.ingest.beforeCommit").armInThisJvm()) {
-                assertThrows(FaultHooks.InjectedFault.class, () -> store.ingest(events("tx-1", 1, 5, "sku1")));
+                assertThrows(FaultHooks.InjectedFault.class, () -> ingest(store, events("tx-1", 1, 5, "sku1")));
             }
             assertEquals(0, schema.lastPosition());
             assertEquals(0, schema.storedEvents());
-            assertEquals(3, store.ingest(events("tx-1", 1, 3, "sku1")).stored());
-            assertEquals(2, store.ingest(events("tx-1", 1, 5, "sku1")).stored());
-            assertEquals(0, store.ingest(events("tx-1", 1, 5, "sku1")).stored());
+            assertEquals(0, schema.queryLong("SELECT COUNT(*) FROM consumer_offset"), "no offset survives the crash");
+            assertEquals(3, ingest(store, events("tx-1", 1, 3, "sku1")).stored());
+            assertEquals(2, ingest(store, events("tx-1", 1, 5, "sku1")).stored());
+            assertEquals(0, ingest(store, events("tx-1", 1, 5, "sku1")).stored());
             assertEquals(5, schema.lastPosition());
             assertEquals(5, schema.queryLong("SELECT COUNT(DISTINCT position) FROM accepted_scan"));
             assertEquals(1, schema.queryLong("SELECT MIN(position) FROM accepted_scan"));
@@ -83,18 +124,19 @@ class JdbcScanIngestStoreTest {
         try (AnalyticsTestSchema schema = AnalyticsTestSchema.create(); ExecutorService workers = Executors.newFixedThreadPool(2)) {
             JdbcScanIngestStore store = store(schema.pool());
             try (FaultInjection.Armed armed = FaultInjection.spec().fail("analytics.ingest.afterCommit").armInThisJvm()) {
-                assertThrows(FaultHooks.InjectedFault.class, () -> store.ingest(events("tx-1", 1, 4, "sku1")));
+                assertThrows(FaultHooks.InjectedFault.class, () -> ingest(store, events("tx-1", 1, 4, "sku1")));
             }
             assertEquals(4, schema.lastPosition());
+            assertEquals(1, schema.queryLong("SELECT COUNT(*) FROM consumer_offset"), "the offset committed with the batch");
             List<AnalyticsTestSchema.StoredEvent> firstFour = schema.events();
             assertEquals(4, firstFour.size());
             List<Callable<Integer>> retries = List.of(
-                    () -> store.ingest(events("tx-1", 1, 12, "sku1")).stored(),
-                    () -> store.ingest(events("tx-1", 1, 12, "sku1")).stored());
+                    () -> ingest(store, events("tx-1", 1, 12, "sku1")).stored(),
+                    () -> ingest(store, events("tx-1", 1, 12, "sku1")).stored());
             int stored = 0;
             for (Future<Integer> retry : workers.invokeAll(retries)) stored += retry.get();
             assertEquals(8, stored, "only the eight new identities are stored, once");
-            assertEquals(0, store.ingest(events("tx-1", 1, 12, "sku1")).stored());
+            assertEquals(0, ingest(store, events("tx-1", 1, 12, "sku1")).stored());
             assertEquals(12, schema.lastPosition());
             assertEquals(firstFour, schema.events().subList(0, 4), "positions of the committed batch never move");
             assertEquals(12, schema.queryLong("SELECT COUNT(DISTINCT position) FROM accepted_scan"));
@@ -107,9 +149,9 @@ class JdbcScanIngestStoreTest {
     void eventDeliveredLateAfterHigherNumberedEventsTakesTheNextPositionWithoutGap() throws Exception {
         try (AnalyticsTestSchema schema = AnalyticsTestSchema.create()) {
             JdbcScanIngestStore store = store(schema.pool());
-            store.ingest(List.of(event("tx-b", 1, "sku2"), event("tx-b", 2, "sku2")));
+            ingest(store, List.of(event("tx-b", 1, "sku2"), event("tx-b", 2, "sku2")));
             // tx-a's first scan committed in Transaction before tx-b's but reaches Analytics afterwards.
-            assertEquals(new ScanIngestStore.IngestResult(1, 0, 3, 3), store.ingest(List.of(event("tx-a", 1, "sku1"))));
+            assertEquals(new ScanIngestStore.IngestResult(1, 0, 3, 3), ingest(store, List.of(event("tx-a", 1, "sku1"))));
             List<AnalyticsTestSchema.StoredEvent> stored = schema.events();
             assertEquals(new AnalyticsTestSchema.StoredEvent(3, "tx-a", 1, "sku1"), stored.get(2));
             schema.assertPositionsContiguous();
@@ -129,7 +171,7 @@ class JdbcScanIngestStoreTest {
                     go.await();
                     int stored = 0;
                     for (int batch = 0; batch < 20; batch++) {
-                        stored += store.ingest(events(transactionId, batch * 10 + 1, batch * 10 + 10, "sku" + batch % 3)).stored();
+                        stored += ingest(store, events(transactionId, batch * 10 + 1, batch * 10 + 10, "sku" + batch % 3)).stored();
                     }
                     return stored;
                 });
@@ -156,13 +198,13 @@ class JdbcScanIngestStoreTest {
             Callable<Integer> first = () -> {
                 go.await();
                 int stored = 0;
-                for (int batch = 0; batch < 30; batch++) stored += one.ingest(events("tx", batch * 50 + 1, batch * 50 + 50, "sku1")).stored();
+                for (int batch = 0; batch < 30; batch++) stored += ingest(one, events("tx", batch * 50 + 1, batch * 50 + 50, "sku1")).stored();
                 return stored;
             };
             Callable<Integer> second = () -> {
                 go.await();
                 int stored = 0;
-                for (int batch = 0; batch < 30; batch++) stored += two.ingest(events("tx", batch * 50 + 26, batch * 50 + 75, "sku2")).stored();
+                for (int batch = 0; batch < 30; batch++) stored += ingest(two, events("tx", batch * 50 + 26, batch * 50 + 75, "sku2")).stored();
                 return stored;
             };
             Future<Integer> a = workers.submit(first);
@@ -174,8 +216,8 @@ class JdbcScanIngestStoreTest {
             assertEquals(1_525, identities.size());
             schema.assertPositionsContiguous();
             List<AnalyticsTestSchema.StoredEvent> sample = schema.events();
-            assertEquals(0, one.ingest(events("tx", 1, 1_000, "sku1")).stored());
-            assertEquals(0, two.ingest(events("tx", 501, 1_500, "sku2")).stored());
+            assertEquals(0, ingest(one, events("tx", 1, 1_000, "sku1")).stored());
+            assertEquals(0, ingest(two, events("tx", 501, 1_500, "sku2")).stored());
             assertEquals(sample, schema.events(), "positions are immutable whichever instance sees a redelivery");
         }
     }
@@ -184,7 +226,7 @@ class JdbcScanIngestStoreTest {
     void restartReloadsTheNameMapAndRewritesNoExistingName() throws Exception {
         try (AnalyticsTestSchema schema = AnalyticsTestSchema.create()) {
             JdbcScanIngestStore before = store(schema.pool());
-            before.ingest(List.of(event("tx-1", 1, "sku1"), event("tx-1", 2, "sku2"), event("tx-1", 3, "sku3")));
+            ingest(before, List.of(event("tx-1", 1, "sku1"), event("tx-1", 2, "sku2"), event("tx-1", 3, "sku3")));
             schema.update("UPDATE product_name SET updated_at = '2001-01-01 00:00:00.000'");
 
             CountingConnections counting = new CountingConnections();
@@ -194,14 +236,20 @@ class JdbcScanIngestStoreTest {
             assertEquals(3, reloaded.size());
             assertEquals("Item 2", reloaded.name("sku2"));
             try (CountingConnections.Scope scope = counting.scope()) {
-                after.ingest(List.of(event("tx-2", 1, "sku1"), event("tx-2", 2, "sku3")));
-                assertEquals(1, scope.counts().inserts(), "only the events are inserted; no name is written");
+                ingest(after, List.of(event("tx-2", 1, "sku1"), event("tx-2", 2, "sku3")));
+                assertEquals(2, scope.counts().inserts(),
+                        "only the events and the consumer_offset upsert are inserted; no name is written");
             }
             assertEquals(0, schema.queryLong("SELECT COUNT(*) FROM product_name WHERE updated_at <> '2001-01-01 00:00:00.000'"));
             Map<String, String> names = new HashMap<>();
             for (String sku : List.of("sku1", "sku2", "sku3")) names.put(sku, schema.productName(sku));
             assertEquals(Map.of("sku1", "Item 1", "sku2", "Item 2", "sku3", "Item 3"), names);
         }
+    }
+
+    /** Ingests {@code events} as the next consumed records of partition 0. */
+    private static ScanIngestStore.IngestResult ingest(JdbcScanIngestStore store, List<ScanIngestStore.ScanEvent> events) {
+        return store.ingest(events, new ScanIngestStore.ConsumedOffset(TOPIC, 0, OFFSETS.addAndGet(events.size())));
     }
 
     private static JdbcScanIngestStore store(ConnectionPool pool) {
