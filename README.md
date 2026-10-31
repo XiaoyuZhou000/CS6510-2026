@@ -22,6 +22,10 @@ self-checkout-project/
     └── run.sh
 ```
 
+## Architecture diagram (event-based, feature 006)
+
+The current deployment is three microservices behind an Nginx gateway, each with its own MySQL schema. The services exchange domain events only through a Kafka broker. The diagram is [docs/architecture/event-based-architecture.md](docs/architecture/event-based-architecture.md), which GitHub renders from Mermaid. An exported copy is [docs/architecture/event-based-architecture.svg](docs/architecture/event-based-architecture.svg). The benchmark evidence is in [load-client/reports/event-based-architecture/](load-client/reports/event-based-architecture/README.md).
+
 ## The API contract (`spec/self-checkout-openapi.yaml`)
 
 This is what every weekly implementation must satisfy, regardless of its

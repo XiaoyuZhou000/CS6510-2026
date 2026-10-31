@@ -365,14 +365,16 @@ function Initialize-BaselineWorktree([string]$Repo, [string]$Commit, [string]$Pa
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $sha = "$(& git -C $Repo rev-parse --verify --quiet "$Commit^{commit}" 2>&1 | Select-Object -First 1)".Trim()
+        # Collect all output before taking the first line: Select-Object -First 1 in the pipeline stops git early,
+        # and $LASTEXITCODE then reads -1.
+        $sha = "$(@(& git -C $Repo rev-parse --verify --quiet "$Commit^{commit}" 2>&1)[0])".Trim()
         if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[0-9a-f]{40}$') { throw "Unknown baseline commit: $Commit" }
         if (-not (Test-Path $Path)) {
             Write-Host "Creating the baseline worktree $Path at $sha" -ForegroundColor Cyan
             $output = @(& git -C $Repo worktree add --detach $Path $sha 2>&1 | ForEach-Object { "$_" })
             if ($LASTEXITCODE -ne 0) { throw "git worktree add failed: $($output -join ' ')" }
         }
-        $head = "$(& git -C $Path rev-parse HEAD 2>&1 | Select-Object -First 1)".Trim()
+        $head = "$(@(& git -C $Path rev-parse HEAD 2>&1)[0])".Trim()
         if ($LASTEXITCODE -ne 0 -or $head -ne $sha) { throw "Baseline worktree $Path is at '$head', not $Commit ($sha)" }
     } finally {
         $ErrorActionPreference = $previous
