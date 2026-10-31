@@ -368,15 +368,15 @@ These rules bind every task below.
 
 ### Tests for User Story 6 ⚠️ write first; they must fail before implementation
 
-- [ ] T140 [P] [US6] Create `server/tests/integration/BrokerConditionErrorMappingTest.java` ([public-http-and-routing.md](contracts/public-http-and-routing.md), FR-016, FR-024): for each internal condition in the mapping table, the response status and `{error, message}` body match the established contract, and no body contains `kafka`, `topic`, `offset`, `partition`, `broker`, or any event type name (case-insensitive).
-- [ ] T141 [P] [US6] Adapt `server/tests/integration/GatewayServiceOutageTest.java` (US6 scenario 2, *Availability and Failure Behavior*): with the broker stopped, then each service stopped, every route behaves as specified (gateway 502 for the stopped owner; Complete 500 within 10 s after pre-checks when the broker or Inventory is down; other routes unaffected).
-- [ ] T142 [P] [US6] Adapt `server/tests/integration/DatabaseOutageContractTest.java`: when a service's own database is unavailable, its database-dependent routes return 500 without acknowledging writes, and its consumers commit no offsets until the database returns; other services keep working.
+- [X] T140 [P] [US6] Create `server/tests/integration/BrokerConditionErrorMappingTest.java` ([public-http-and-routing.md](contracts/public-http-and-routing.md), FR-016, FR-024): for each internal condition in the mapping table, the response status and `{error, message}` body match the established contract, and no body contains `kafka`, `topic`, `offset`, `partition`, `broker`, or any event type name (case-insensitive).
+- [X] T141 [P] [US6] Adapt `server/tests/integration/GatewayServiceOutageTest.java` (US6 scenario 2, *Availability and Failure Behavior*): with the broker stopped, then each service stopped, every route behaves as specified (gateway 502 for the stopped owner; Complete 500 within 10 s after pre-checks when the broker or Inventory is down; other routes unaffected).
+- [X] T142 [P] [US6] Adapt `server/tests/integration/DatabaseOutageContractTest.java`: when a service's own database is unavailable, its database-dependent routes return 500 without acknowledging writes, and its consumers commit no offsets until the database returns; other services keep working.
 
 ### Implementation for User Story 6
 
-- [ ] T143 [US6] Review `server/transaction/src/api/ApiErrorMapper.java`, `server/transaction/src/transaction/CheckoutPendingFailure.java`, and `server/transaction/src/transaction/ProductCatalogUnavailableFailure.java` so every new failure path maps to the existing 500 `INTERNAL_ERROR` body with an existing message; fix any path that leaks a messaging detail (makes T140 pass).
-- [ ] T144 [US6] Verify the public contract: `architecture/PipelineArchitectureTest`'s hashes for `spec/self-checkout-openapi.yaml` and `load-client/src/**` pass unchanged; `git diff 8891c57 -- spec/self-checkout-openapi.yaml load-client/src deploy/nginx.conf` is empty; `SERVER_BASE_URL=http://localhost:8080 ./run-tests.sh contract` passes; a 20 s unchanged Load Client run through the gateway completes with zero errors (SC-001).
-- [ ] T145 [US6] Run T140–T142 until they pass, then pass the US6 gate `PARITY_GATE=006:US6 ./run-tests.sh`; fill `Verified at`.
+- [X] T143 [US6] Review `server/transaction/src/api/ApiErrorMapper.java`, `server/transaction/src/transaction/CheckoutPendingFailure.java`, and `server/transaction/src/transaction/ProductCatalogUnavailableFailure.java` so every new failure path maps to the existing 500 `INTERNAL_ERROR` body with an existing message; fix any path that leaks a messaging detail (makes T140 pass).
+- [X] T144 [US6] Verify the public contract: `architecture/PipelineArchitectureTest`'s hashes for `spec/self-checkout-openapi.yaml` and `load-client/src/**` pass unchanged; `git diff 8891c57 -- spec/self-checkout-openapi.yaml load-client/src deploy/nginx.conf` is empty; `SERVER_BASE_URL=http://localhost:8080 ./run-tests.sh contract` passes; a 20 s unchanged Load Client run through the gateway completes with zero errors (SC-001).
+- [X] T145 [US6] Run T140–T142 until they pass, then pass the US6 gate `PARITY_GATE=006:US6 ./run-tests.sh`; fill `Verified at`.
 
 **Checkpoint**: Clients cannot tell that a broker exists.
 

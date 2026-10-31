@@ -3,12 +3,14 @@ package integration;
 import org.junit.jupiter.api.Test;
 import support.CheckoutDeployment;
 import support.InventoryTestSchema;
+import support.KafkaTestSupport;
 import support.ServiceHttp;
 import support.TransactionTestSchema;
 
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -19,6 +21,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * route map (US4). A stopped service makes only its own routes answer the gateway's 502; a reachable service
  * reports an Inventory outage on Complete as 500 INTERNAL_ERROR within the client's 10 s timeout, and the
  * pending attempt settles once Inventory returns (spec Availability and Failure Behavior, FR-017, FR-030).
+ * With the live broker stopped (US6 scenario 2, {@code KAFKA_TEST_BROKER_CONTROL=1}), every route but Complete
+ * serves as before, Complete keeps its pre-check answers and otherwise answers 500 within 10 s, and the
+ * pending attempt settles once the broker returns (FR-016, FR-024).
  *
  * <p>{@code PublicRoutingIsolationTest} keeps covering raw-URI forwarding with stand-in owners.</p>
  */
@@ -107,6 +112,56 @@ class GatewayServiceOutageTest {
         }
     }
 
+    @Test
+    void withTheBrokerStoppedOnlyCompleteAnswers500AndTheAttemptSettlesAfterItReturns() throws Exception {
+        KafkaTestSupport.requireBrokerControl();
+        try (CheckoutDeployment deployment = CheckoutDeployment.withAnalytics(3, 100, null)) {
+            deployment.startAnalytics();
+            try (PublicRouterTestSupport router = PublicRouterTestSupport.start(deployment.transactionHttpPort,
+                    deployment.inventoryHttpPort, deployment.analyticsHttpPort)) {
+                ServiceHttp gateway = new ServiceHttp(router.baseUrl());
+                String completedBefore = gateway.start("broker-before");
+                assertEquals(200, gateway.scan(completedBefore, SKU).statusCode());
+                assertEquals(200, gateway.complete(completedBefore).statusCode());
+                assertEquals(99, deployment.inventorySchema.stock(SKU));
+
+                String id;
+                KafkaTestSupport.stopBroker();
+                try {
+                    assertEquals(200, gateway.get("/items").statusCode(), "/items");
+                    assertEquals(200, gateway.get("/inventory/low-stock").statusCode(), "/inventory/low-stock");
+                    assertEquals(200, gateway.get("/analytics/popular-items").statusCode(), "/analytics/popular-items");
+                    assertError(gateway.complete("missing-transaction"), 404, "TRANSACTION_NOT_FOUND");
+                    assertError(gateway.complete(completedBefore), 409, "TRANSACTION_NOT_OPEN");
+                    assertError(gateway.complete(gateway.start("broker-empty")), 409, "EMPTY_BASKET");
+
+                    id = gateway.start("broker-down");
+                    assertEquals(200, gateway.scan(id, SKU).statusCode(), "Scan needs no broker");
+                    assertEquals(200, gateway.scan(id, SKU).statusCode());
+                    assertEquals("OPEN", ServiceHttp.json(gateway.lookup(id)).get("status"));
+                    long started = System.nanoTime();
+                    HttpResponse<String> during = gateway.complete(id);
+                    long elapsed = System.nanoTime() - started;
+                    assertError(during, 500, "INTERNAL_ERROR");
+                    assertEquals("Internal server error", ServiceHttp.json(during).get("message"));
+                    assertTrue(elapsed < TimeUnit.SECONDS.toNanos(10),
+                            "Complete answered after " + TimeUnit.NANOSECONDS.toMillis(elapsed) + " ms");
+                    assertEquals("OPEN", ServiceHttp.json(gateway.lookup(id)).get("status"));
+                    assertEquals(1, pendingAttempts(deployment, id), "the attempt stays pending");
+                    assertEquals(99, deployment.inventorySchema.stock(SKU), "no stock effect during the outage");
+                } finally {
+                    KafkaTestSupport.startBroker();
+                }
+                awaitCompleted(deployment, id);
+                Map<String, Object> settled = ServiceHttp.json(gateway.lookup(id));
+                assertEquals("COMPLETED", settled.get("status"), "a 500 was not a cancellation");
+                assertEquals(97, deployment.inventorySchema.stock(SKU));
+                assertError(gateway.complete(id), 409, "TRANSACTION_NOT_OPEN");
+                deployment.awaitAnalyticsHoldsEveryScan(Duration.ofSeconds(180));
+            }
+        }
+    }
+
     private static void assertOwnersServe(ServiceHttp gateway, List<String> owners, CheckoutDeployment deployment)
             throws Exception {
         for (String owner : owners) {
@@ -152,6 +207,10 @@ class GatewayServiceOutageTest {
         for (String leak : List.of("grpc", "Grpc", "UNAVAILABLE", "DEADLINE", "SQL", "jdbc", "cs6510")) {
             assertFalse(response.body().contains(leak), "leaked " + leak + ": " + response.body());
         }
+        String body = response.body().toLowerCase(Locale.ROOT);
+        for (String leak : List.of("kafka", "topic", "offset", "partition", "broker", "stock", "checkout")) {
+            assertFalse(body.contains(leak), "leaked " + leak + ": " + response.body());
+        }
     }
 
     private static long pendingAttempts(CheckoutDeployment deployment, String id) throws Exception {
@@ -175,7 +234,8 @@ class GatewayServiceOutageTest {
     }
 
     private static void awaitCompleted(CheckoutDeployment deployment, String id) throws Exception {
-        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        // Up to three minutes: after a broker restart the consumer groups rejoin before the outcome flows.
+        long deadline = System.nanoTime() + Duration.ofSeconds(180).toNanos();
         while (true) {
             List<TransactionTestSchema.AttemptRow> attempts = deployment.transactionSchema.attempts(id);
             if (attempts.stream().anyMatch(row -> row.state().equals("COMPLETED"))) return;

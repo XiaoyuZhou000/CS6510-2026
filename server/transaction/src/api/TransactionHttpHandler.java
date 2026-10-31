@@ -9,11 +9,15 @@ import transaction.TransactionOperations;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Matcher;
 
-/** HTTP-only translation for the transaction lifecycle and lookup routes. */
+/**
+ * HTTP-only translation for the transaction lifecycle and lookup routes. Only a request the client got wrong
+ * (unreadable JSON, a malformed path, a field outside its limits) is answered 400 INVALID_REQUEST, decided before
+ * the business contract is called; every failure from behind it maps through {@link ApiErrorMapper}, so an
+ * internal {@code IllegalArgumentException} is a 500 like any other and never echoes its message (FR-016, FR-024).
+ */
 public final class TransactionHttpHandler implements HttpHandler {
     private final TransactionOperations transactions;
 
@@ -34,23 +38,23 @@ public final class TransactionHttpHandler implements HttpHandler {
                 }
                 matcher = HttpSupport.TRANSACTIONS_ITEMS.matcher(path);
                 if (matcher.matches()) {
-                    scan(exchange, HttpSupport.pathVar(matcher));
+                    scan(exchange, pathVar(matcher));
                     return;
                 }
                 matcher = HttpSupport.TRANSACTIONS_COMPLETE.matcher(path);
                 if (matcher.matches()) {
-                    complete(exchange, HttpSupport.pathVar(matcher));
+                    complete(exchange, pathVar(matcher));
                     return;
                 }
             } else if ("GET".equals(method)) {
                 matcher = HttpSupport.TRANSACTIONS_BY_ID.matcher(path);
                 if (matcher.matches()) {
-                    get(exchange, HttpSupport.pathVar(matcher));
+                    get(exchange, pathVar(matcher));
                     return;
                 }
             }
             exchange.sendResponseHeaders(405, -1);
-        } catch (IllegalArgumentException invalidRequest) {
+        } catch (InvalidRequest invalidRequest) {
             HttpSupport.respondError(exchange, 400, "INVALID_REQUEST", invalidRequest.getMessage());
         } catch (RuntimeException failure) {
             ApiErrorMapper.ApiError error = ApiErrorMapper.map(failure);
@@ -61,15 +65,14 @@ public final class TransactionHttpHandler implements HttpHandler {
     private void start(HttpExchange exchange) throws IOException {
         long requestStart = System.nanoTime();
         try {
-            Map<String, Object> body = HttpSupport.readJsonBody(exchange);
-            String stationId = Json.getString(body, "stationId");
+            String stationId = parsed(() -> Json.getString(HttpSupport.readJsonBody(exchange), "stationId"));
             if (stationId == null || stationId.isBlank()) {
                 HttpSupport.respondError(exchange, 400, ApiErrors.MISSING_STATION_ID,
                         "stationId is required and must not be blank");
                 return;
             }
-            HttpSupport.respond(exchange, 201, serialize(transactions.start(
-                    new TransactionOperations.StartCommand(stationId))));
+            TransactionOperations.StartCommand command = parsed(() -> new TransactionOperations.StartCommand(stationId));
+            HttpSupport.respond(exchange, 201, serialize(transactions.start(command)));
         } finally {
             PerfMetrics.record("transaction.http.start", System.nanoTime() - requestStart);
         }
@@ -78,13 +81,14 @@ public final class TransactionHttpHandler implements HttpHandler {
     private void scan(HttpExchange exchange, String transactionId) throws IOException {
         long requestStart = System.nanoTime();
         try {
-            String sku = Json.getString(HttpSupport.readJsonBody(exchange), "sku");
+            String sku = parsed(() -> Json.getString(HttpSupport.readJsonBody(exchange), "sku"));
             if (sku == null || sku.isBlank()) {
                 HttpSupport.respondError(exchange, 400, "MISSING_SKU", "sku is required and must not be blank");
                 return;
             }
-            HttpSupport.respond(exchange, 200, serialize(transactions.scan(
-                    new TransactionOperations.ScanCommand(transactionId, sku))));
+            TransactionOperations.ScanCommand command =
+                    parsed(() -> new TransactionOperations.ScanCommand(transactionId, sku));
+            HttpSupport.respond(exchange, 200, serialize(transactions.scan(command)));
         } finally {
             PerfMetrics.record("transaction.http.scan", System.nanoTime() - requestStart);
         }
@@ -106,6 +110,31 @@ public final class TransactionHttpHandler implements HttpHandler {
             HttpSupport.respond(exchange, 200, serialize(transactions.get(transactionId)));
         } finally {
             PerfMetrics.record("transaction.http.get", System.nanoTime() - requestStart);
+        }
+    }
+
+    private static String pathVar(Matcher matcher) throws IOException {
+        return parsed(() -> HttpSupport.pathVar(matcher));
+    }
+
+    /** Reads or validates client input; an {@code IllegalArgumentException} here is the client's error. */
+    private static <T> T parsed(RequestInput<T> input) throws IOException {
+        try {
+            return input.read();
+        } catch (IllegalArgumentException invalid) {
+            throw new InvalidRequest(invalid);
+        }
+    }
+
+    @FunctionalInterface
+    private interface RequestInput<T> {
+        T read() throws IOException;
+    }
+
+    /** Client input that failed to parse or validate: the only failure answered 400 INVALID_REQUEST. */
+    private static final class InvalidRequest extends RuntimeException {
+        InvalidRequest(IllegalArgumentException cause) {
+            super(cause.getMessage(), cause);
         }
     }
 

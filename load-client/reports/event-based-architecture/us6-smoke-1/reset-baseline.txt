@@ -1,0 +1,71 @@
+﻿Resetting the broker...
+Broker stopped (pid 16208).
+Formatted C:\Users\18422\AppData\Local\Temp\cs6510-kafka\kafka_2.13-4.1.0\cs6510-data\kraft-logs
+Broker started (pid 46908, flush: broker default (page cache), data: C:\Users\18422\AppData\Local\Temp\cs6510-kafka\kaf
+ka_2.13-4.1.0\cs6510-data).
+selfcheckout.catalog.v1: 1 partitions, cleanup.policy=compact, retention.ms=-1
+selfcheckout.checkout.v1: 16 partitions, cleanup.policy=delete, retention.ms=604800000
+selfcheckout.checkout-outcome.v1: 16 partitions, cleanup.policy=delete, retention.ms=604800000
+selfcheckout.scan-accepted.v1: 1 partitions, cleanup.policy=delete, retention.ms=604800000
+All topics match the event catalog.
+Broker reset: four empty topics, and no consumer group or committed offset.
+Resetting the service schemas...
+Resetting inventory schema 'cs6510_inventory' on 127.0.0.1:3307 as 'cs6510_inventory_svc'...
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\inventory\schema.sql
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\inventory\seed.sql
++---------------+----------------+-------------+---------------------+--------------------------------------+
+| catalog_items | inventory_rows | total_units | checkout_operations | catalog_version                      |
++---------------+----------------+-------------+---------------------+--------------------------------------+
+|          2000 |           2000 |    20000000 |                   0 | 2346dd19-d4b8-11f1-a54d-00fffb1eae59 |
++---------------+----------------+-------------+---------------------+--------------------------------------+
+inventory schema reset.
+Resetting transaction schema 'cs6510_transaction' on 127.0.0.1:3307 as 'cs6510_transaction_svc'...
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\transaction\schema.sql
++--------------+----------------+-------------------+------------------+-----------------+
+| transactions | accepted_scans | checkout_attempts | replica_products | replica_version |
++--------------+----------------+-------------------+------------------+-----------------+
+|            0 |              0 |                 0 |                0 | NULL            |
++--------------+----------------+-------------------+------------------+-----------------+
+transaction schema reset.
+Resetting analytics schema 'cs6510_analytics' on 127.0.0.1:3307 as 'cs6510_analytics_svc'...
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\analytics\schema.sql
++----------------+---------------+---------------+-----------------+-----------------+
+| accepted_scans | last_position | product_names | popular_windows | last_window_end |
++----------------+---------------+---------------+-----------------+-----------------+
+|              0 |             0 |             0 |               0 |               0 |
++----------------+---------------+---------------+-----------------+-----------------+
+analytics schema reset.
+Baseline:
+  catalog rows                     2000
+  inventory rows                   2000
+  stock units                      20000000
+  transactions                     0
+  Transaction accepted_scan rows   0
+  Analytics accepted_scan rows     0
+  Analytics last_position          0
+All three service schemas are at the baseline.
+Baseline:
+  products                                         2000
+  stock rows                                       2000
+  stock units                                      20000000
+  Inventory checkout operations                    0
+  Inventory outbox rows                            0
+  Inventory parked events                          0
+  transactions                                     0
+  Transaction checkout attempts                    0
+  Transaction accepted scans                       0
+  Transaction outbox rows                          0
+  Transaction parked events                        0
+  Analytics accepted scans                         0
+  Analytics last_position                          0
+  Analytics parked events                          0
+  Analytics stored consumer offsets                0
+  selfcheckout.catalog.v1 partitions               1
+  selfcheckout.catalog.v1 end offsets              0
+  selfcheckout.checkout.v1 partitions              16
+  selfcheckout.checkout.v1 end offsets             0
+  selfcheckout.checkout-outcome.v1 partitions      16
+  selfcheckout.checkout-outcome.v1 end offsets     0
+  selfcheckout.scan-accepted.v1 partitions         1
+  selfcheckout.scan-accepted.v1 end offsets        0
+The broker and all three service schemas are at the baseline.

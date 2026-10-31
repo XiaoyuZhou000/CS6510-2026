@@ -2,6 +2,16 @@
 
 Outcomes of the scenarios in `specs/006-event-based-architecture/quickstart.md` §5, recorded as each user story's tasks run them. Scenarios not listed yet belong to later stories.
 
+## Public contract smoke (T144, US6)
+
+**Run**: 2026-10-30, 16:18–16:25 local time, on the benchmark machine, with the native broker. This is quickstart section 3.
+
+| Check | Expected | Observed |
+|---|---|---|
+| `git diff 8891c57 -- spec/self-checkout-openapi.yaml load-client/src deploy/nginx.conf` | Empty | Empty |
+| The unchanged Load Client for 20 s through the gateway: `benchmark-event-based.ps1 -Workload smoke -OutputLabel us6-smoke-1`, which runs `java -cp out Main --duration=20` after `db/reset-baseline.ps1` | Zero errors (SC-001) | 1,406 Starts, 14,870 Scans, and 1,406 Completes, all with zero errors; validator passed, drained, 0 parked events, 0 final lag (`us6-smoke-1/`; a smoke run is never `comparable`) |
+| `SERVER_BASE_URL=http://localhost:8080 ./run-tests.sh contract`, with Inventory, Transaction, and Analytics started from the built jars and Nginx from `deploy/nginx.conf` | Every contract test passes | 25 tests, 0 failed, 0 skipped |
+
 ## Scenario A: Saga success and insufficient stock (T078, US1)
 
 **Run**: 2026-10-29, on the benchmark machine. The broker ran natively (Kafka 4.1.0, flush at the broker default). `db/reset-baseline.ps1` reset the schemas and topics. Then Inventory, Transaction, and Analytics started from the built jars, and Nginx from `deploy/nginx.conf`. Every request below went through the gateway on port 8080.
