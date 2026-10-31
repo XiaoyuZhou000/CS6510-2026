@@ -1,0 +1,141 @@
+T171 release suite, 2026-10-31 05:18-05:39 local time, phase 11 of feature 006 (specs/006-event-based-architecture).
+Command, from server/ after ./build-tests.sh:
+  KAFKA_TEST_BOOTSTRAP=127.0.0.1:19092 KAFKA_TEST_BROKER_CONTROL=1 STRICT_LIVE_GATES=1 SERVER_BASE_URL=http://localhost:8080 NGINX_BIN=<nginx.exe> ./run-tests.sh
+Against a live deployment: db/reset-baseline.ps1, then Inventory, Transaction, and Analytics from the built jars and Nginx from deploy/nginx.conf;
+native Kafka 4.1.0 broker at 127.0.0.1:19092. Source: commit 0eaf47e plus the uncommitted phase 11 notes. Exit code 0 (the strict live-skip check passed).
+JUnit XML: server/out/test-results/run-20261031051837-2022 (git-ignored).
+
+Summary (excluding direct restoration): 504 tests, 501 passed, 0 failed, 3 skipped
+Skipped by design: integration.ResetBaselineTest#resetProducesExactBaselineForFreshServer and #resetBaselineEmptiesEveryTopicAndSchema (destructive,
+opt-in with -DRUN_RESET_BASELINE_TEST=true), and architecture.CoverageParityLedgerTest#parityGateHasNoPendingOrUnverifiedRows (runs only with
+PARITY_GATE; PARITY_GATE=006:final passed separately in T170).
+
+Passing classes (passed/total):
+  architecture.ArchitectureDiagramConsistencyTest  4/4
+  architecture.CompositionRootTest  5/5
+  architecture.CoverageParityLedgerTest  2/3  (1 skipped)
+  architecture.LayerDependencyTest  6/6
+  architecture.MicroserviceBoundaryTest  12/12
+  architecture.OutboxOnlyPublishTest  3/3
+  architecture.PipelineArchitectureTest  4/4
+  contract.ItemsEndpointTest  4/4
+  contract.LowStockEndpointTest  2/2
+  contract.PopularItemsEndpointTest  3/3
+  contract.TransactionLifecycleTest  13/13
+  contract.TransactionLookupTest  3/3
+  database.ConnectionPoolGrowthTest  1/1
+  database.ConnectionPoolSessionTest  8/8
+  database.InventoryReadAdaptersTest  3/3
+  database.JdbcAcceptedScanReaderTest  3/3
+  database.JdbcCheckoutAttemptStoreTest  9/9
+  database.JdbcCheckoutOperationStoreTest  8/8
+  database.JdbcDeadLetterStoreTest  3/3
+  database.JdbcOutboxStoreTest  5/5
+  database.JdbcPopularWindowStoreTest  5/5
+  database.JdbcProductReplicaStoreTest  3/3
+  database.JdbcRelayStoreTest  3/3
+  database.JdbcScanIngestStoreTest  10/10
+  database.JdbcScanStoreTest  6/6
+  database.JdbcTransactionStoreTest  4/4
+  database.ServiceStatusQueriesTest  3/3
+  integration.AnalyticsBacklogIsolationTest  1/1
+  integration.AnalyticsCheckoutIsolationTest  1/1
+  integration.AnalyticsCrashRecoveryTest  6/6
+  integration.AnalyticsIngestCrashTest  3/3
+  integration.AnalyticsOffsetAuthorityTest  2/2
+  integration.AnalyticsVisibilityLagTest  1/1
+  integration.BackgroundCompletionAccountingTest  2/2
+  integration.BoundedWaitTest  4/4
+  integration.BrokerConditionErrorMappingTest  6/6
+  integration.CatalogReplicationTest  6/6
+  integration.CheckoutBrokerOutageTest  3/3
+  integration.CheckoutEventFaultTest  1/1
+  integration.CheckoutIntegrityAlarmTest  2/2
+  integration.CheckoutMessageFaultTest  2/2
+  integration.CheckoutMessagesOnlyTest  2/2
+  integration.CheckoutSagaTest  5/5
+  integration.CompletionDurabilityTest  1/1
+  integration.ConcurrentCompletionTest  1/1
+  integration.DatabaseIsolationTest  3/3
+  integration.DatabaseOutageContractTest  2/2
+  integration.DuplicateCompletionTest  2/2
+  integration.DurableBasketTest  3/3
+  integration.GatewayServiceOutageTest  3/3
+  integration.IndependentServiceDeploymentTest  2/2
+  integration.InventoryServiceIsolationTest  1/1
+  integration.PublicRoutingIsolationTest  2/2
+  integration.ResetBaselineTest  1/3  (2 skipped)
+  integration.RestartDuringWorkloadTest  2/2
+  integration.ScanCompletionConvergenceTest  1/1
+  integration.ScanEventDeliveryTest  5/5
+  integration.ScanWithoutBrokerTest  3/3
+  integration.ScanWithoutPeersTest  1/1
+  integration.StockConservationTest  1/1
+  integration.TransactionRestartDurabilityTest  3/3
+  integration.WindowBoundaryAccuracyTest  3/3
+  messaging.BrokerRestartCheckoutTest  2/2
+  messaging.BrokerRestartScanTest  2/2
+  messaging.CatalogEventContractTest  2/2
+  messaging.CheckoutEventContractTest  1/1
+  messaging.ConsumerCrashAfterCommitTest  1/1
+  messaging.EventSchemaCompatibilityTest  3/3
+  messaging.KafkaTransportLiveTest  5/5
+  messaging.ScanEventContractTest  2/2
+  performance.AmbiguousCommitReconcileTest  5/5
+  performance.AnalyticsIngestStatementBudgetTest  2/2
+  performance.CacheEvictionRaceTest  2/2
+  performance.CacheRebuildAfterRestartTest  1/1
+  performance.CompleteStatementBudgetTest  4/4
+  performance.HeldConnectionDuringWaitTest  2/2
+  performance.HeldResourcesDuringEventWaitTest  2/2
+  performance.InventoryApplyStatementBudgetTest  1/1
+  performance.MultiInstanceTransactionTest  9/9
+  performance.OutcomeHandlerStatementBudgetTest  1/1
+  performance.RelayStatementBudgetTest  3/3
+  performance.ScanStatementBudgetTest  4/4
+  performance.StatementBudgetFileTest  2/2
+  performance.TransactionCacheCorrectnessTest  4/4
+  unit.AnalyticsRecorderRecoveryTest  3/3
+  unit.JsonRoundTripTest  1/1
+  unit.LowStockThresholdResolutionTest  2/2
+  unit.RingBufferWindowMathTest  3/3
+  unit.analytics.AnalyticsBoundaryIsolationTest  3/3
+  unit.analytics.AnalyticsForcedShutdownTest  2/2
+  unit.analytics.AnalyticsLifecycleTest  2/2
+  unit.analytics.AnalyticsLogTest  5/5
+  unit.analytics.AnalyticsServiceTest  5/5
+  unit.analytics.AnalyticsWorkerFailureTest  3/3
+  unit.analytics.ConcurrentAnalyticsIngestionTest  1/1
+  unit.analytics.PersistenceFilterTest  2/2
+  unit.analytics.PipelineMessageTest  3/3
+  unit.analytics.RankingFilterTest  3/3
+  unit.analytics.ScanIngestionServiceTest  4/4
+  unit.analytics.WindowFilterTest  5/5
+  unit.api.AnalyticsHttpHandlerTest  4/4
+  unit.api.StoreQueryHttpHandlerTest  4/4
+  unit.api.TransactionHttpHandlerTest  6/6
+  unit.common.BatchConsumerLoopTest  6/6
+  unit.common.ConsumerLoopTest  11/11
+  unit.common.EnvelopeCodecTest  8/8
+  unit.common.FaultHooksTest  5/5
+  unit.common.InMemoryEventBusTest  9/9
+  unit.common.OutboxDispatcherTest  13/13
+  unit.common.PerfMetricsTest  5/5
+  unit.common.ResponseBudgetTest  3/3
+  unit.common.StatusReporterTest  2/2
+  unit.inventory.CheckoutRequestHandlerTest  11/11
+  unit.transaction.CatalogEventHandlerTest  9/9
+  unit.transaction.CheckoutOrchestratorTest  15/15
+  unit.transaction.CheckoutOutcomeHandlerTest  9/9
+  unit.transaction.CheckoutRecoveryWorkerTest  9/9
+  unit.transaction.ProductCatalogReplicaTest  3/3
+  unit.transaction.ScanEventRelayCoalescingTest  3/3
+  unit.transaction.SettlementRegistryResponderTest  5/5
+  unit.transaction.StoreQueryServiceTest  3/3
+  unit.transaction.TransactionBoundaryIsolationTest  2/2
+  unit.transaction.TransactionLocksTest  5/5
+  unit.transaction.TransactionServiceTest  16/16
+  unit.transaction.TransactionStateCacheTest  6/6
+
+Direct restoration results (SC-016), reported apart from the end-to-end Saga results:
+  messaging.RestorationEventDirectTest  5/5
