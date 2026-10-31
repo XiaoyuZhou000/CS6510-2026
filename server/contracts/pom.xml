@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Generated contracts (005 R1, 006 D2). The only Maven module: it turns src/main/proto/**
-  (the gRPC services and the selfcheckout.events.v1 event schemas) into ../out/contracts.jar,
-  copies the pinned gRPC runtime into ../lib/grpc/, and copies the messaging runtime
-  (kafka-clients, protobuf-java, slf4j) into ../lib/messaging/. Everything else is still built by build.sh with javac and jar.
+  (the selfcheckout.events.v1 event schemas) into ../out/contracts.jar and copies the messaging
+  runtime (kafka-clients, protobuf-java, slf4j) into ../lib/messaging/. Everything else is built by
+  build.sh with javac and jar. gRPC was removed by feature 006 (FR-006).
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -18,48 +18,14 @@
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>21</maven.compiler.release>
-    <!-- One pinned gRPC Java release and the protobuf release its README pairs with it. -->
-    <grpc.version>1.85.1</grpc.version>
+    <!-- The protobuf release of the event schemas (unchanged from the gRPC era, 006 D2). -->
     <protobuf.version>3.25.9</protobuf.version>
     <!-- The event broker client and its logging binding (006 D2). -->
     <kafka.version>4.1.0</kafka.version>
     <slf4j.version>2.0.16</slf4j.version>
   </properties>
 
-  <dependencyManagement>
-    <dependencies>
-      <dependency>
-        <groupId>io.grpc</groupId>
-        <artifactId>grpc-bom</artifactId>
-        <version>${grpc.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
-      </dependency>
-    </dependencies>
-  </dependencyManagement>
-
-  <!--
-    The grpc-java 1.85.1 README lists no annotations dependency for generated code:
-    generated stubs carry io.grpc.stub.annotations.GrpcGenerated from grpc-stub, so no
-    provided-scope javax.annotation artifact is needed on Java 9+.
-  -->
   <dependencies>
-    <dependency>
-      <groupId>io.grpc</groupId>
-      <artifactId>grpc-protobuf</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.grpc</groupId>
-      <artifactId>grpc-stub</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.grpc</groupId>
-      <artifactId>grpc-netty-shaded</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.grpc</groupId>
-      <artifactId>grpc-inprocess</artifactId>
-    </dependency>
     <dependency>
       <groupId>com.google.protobuf</groupId>
       <artifactId>protobuf-java</artifactId>
@@ -95,9 +61,8 @@
         <artifactId>protobuf-maven-plugin</artifactId>
         <version>0.6.1</version>
         <configuration>
+          <!-- os-maven-plugin only picks protoc's platform classifier; no protoc plugin runs. -->
           <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
-          <pluginId>grpc-java</pluginId>
-          <pluginArtifact>io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${os.detected.classifier}</pluginArtifact>
           <!-- Windows hands protoc its command line in the ANSI code page, which loses non-ASCII
                characters in the checkout path; an argument file keeps the paths intact. -->
           <useArgumentFile>true</useArgumentFile>
@@ -106,7 +71,6 @@
           <execution>
             <goals>
               <goal>compile</goal>
-              <goal>compile-custom</goal>
             </goals>
           </execution>
         </executions>
@@ -139,19 +103,6 @@
         <artifactId>maven-dependency-plugin</artifactId>
         <version>3.11.0</version>
         <executions>
-          <execution>
-            <id>copy-grpc-runtime</id>
-            <phase>package</phase>
-            <goals>
-              <goal>copy-dependencies</goal>
-            </goals>
-            <configuration>
-              <includeScope>runtime</includeScope>
-              <outputDirectory>${project.basedir}/../lib/grpc</outputDirectory>
-            </configuration>
-          </execution>
-          <!-- Until gRPC is removed this copy also repeats the gRPC jars; identical jars twice on
-               a classpath are harmless, and afterwards it holds only the messaging runtime. -->
           <execution>
             <id>copy-messaging-runtime</id>
             <phase>package</phase>

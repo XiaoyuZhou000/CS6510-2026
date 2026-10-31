@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -77,27 +78,31 @@ class CompositionRootTest {
         assertTrue(facade.contains("shutdownTimeoutMillis <= 0"));
     }
 
+    /**
+     * Each {@code *Main} wires its own dispatcher, consumers, and stores over its own pool and holds no rpc or gRPC
+     * type (006 FR-006, Implementation Rule 4); it reads only its own database settings and starts its metrics and
+     * status reporting.
+     */
     @Test
-    void eachMainOwnsItsGrpcRoleConfigurationMetricsAndStatus() throws Exception {
+    void eachMainWiresItsDispatcherConsumersStoresConfigurationMetricsAndStatus() throws Exception {
+        Map<String, List<String>> wiring = Map.of(
+                "transaction", List.of("new OutboxDispatcher(", "new JdbcOutboxStore(pool", "new JdbcDeadLetterStore(pool",
+                        "CheckoutOutcomeConsumer.create(", "CatalogConsumer.create(", "new ScanEventRelay(",
+                        "new KafkaScanEventSink(", "new CheckoutRecoveryWorker("),
+                "inventory", List.of("new OutboxDispatcher(", "new JdbcOutboxStore(pool", "new JdbcDeadLetterStore(pool",
+                        "CheckoutEventConsumer.create(", "new CatalogPublisher("),
+                "analytics", List.of("new JdbcDeadLetterStore(pool", "new JdbcScanIngestStore(pool",
+                        "ScanAcceptedConsumer.create("));
         for (String domain : List.of("transaction", "inventory", "analytics")) {
             Path main = mainSource(domain);
             String source = Files.readString(main);
             String prefix = domain.toUpperCase(java.util.Locale.ROOT);
-            if (domain.equals("transaction")) {
-                assertFalse(source.contains("GrpcServers"), main + " is a gRPC client only");
-                assertFalse(source.contains("ServerBuilder"), main + " is a gRPC client only");
-            } else if (domain.equals("inventory")) {
-                // The catalog moved to events (006 T111): Inventory serves no gRPC and calls no peer.
-                assertFalse(source.contains("GrpcServers"), main + " serves no gRPC");
-                assertFalse(source.contains("ServerBuilder"), main + " serves no gRPC");
-                assertFalse(source.contains("rpc."), main + " holds no rpc types");
-                assertTrue(source.contains("new CatalogPublisher("), main + " publishes its catalog through the outbox");
-            } else {
-                // Scans moved to events (006 T126): Analytics serves no gRPC and consumes ScanAccepted.
-                assertFalse(source.contains("GrpcServers"), main + " serves no gRPC");
-                assertFalse(source.contains("ServerBuilder"), main + " serves no gRPC");
-                assertFalse(source.contains("rpc."), main + " holds no rpc types");
-                assertTrue(source.contains("ScanAcceptedConsumer.create("), main + " consumes scans from the broker");
+            for (String forbidden : List.of("GrpcServers", "GrpcChannels", "ServerBuilder", "ManagedChannel", "io.grpc", "rpc.")) {
+                assertFalse(source.contains(forbidden), main + " holds no rpc or gRPC type: " + forbidden);
+            }
+            for (String wired : wiring.get(domain)) assertTrue(source.contains(wired), main + " wires " + wired);
+            if (domain.equals("analytics")) {
+                assertFalse(source.contains("OutboxDispatcher"), main + " produces no event, so it has no dispatcher");
             }
             Matcher configs = Pattern.compile("DatabaseConfig\\.fromEnvironment\\(\\s*\"([A-Z]+)\",\\s*\"([a-z0-9_]+)\","
                     + "\\s*\"([a-z0-9_]+)\"").matcher(source);
@@ -111,6 +116,55 @@ class CompositionRootTest {
             assertTrue(source.contains("new " + status + "(pool"), main + " reads its status with its own pool");
             assertTrue(source.contains("status.stop()"), main + " stops its status summary on shutdown");
         }
+    }
+
+    /**
+     * Each shutdown hook stops HTTP, then the consumers (final {@code commitSync}), then the dispatcher (final
+     * mark), then the background workers, then the producers, then the pool
+     * (contracts/broker-and-deployment.md "Start, stop, restart", 006 T157). Analytics has no dispatcher or producer.
+     */
+    @Test
+    void eachMainShutsDownInTheContractOrder() throws Exception {
+        Map<String, List<List<String>>> stages = Map.of(
+                "transaction", List.of(List.of("server.stop("), List.of("outcomes.stop(", "catalogConsumer.stop("),
+                        List.of("dispatcher.stop("),
+                        List.of("recovery.close()", "relay.close()", "status.stop()", "reporter.stop()"),
+                        List.of("checkoutSender.close()", "scanSender.close()"), List.of("pool.close()")),
+                "inventory", List.of(List.of("server.stop("), List.of("checkoutConsumer.stop("), List.of("dispatcher.stop("),
+                        List.of("status.stop()", "reporter.stop()"), List.of("outcomes.close()", "catalogRecords.close()"),
+                        List.of("pool.close()")),
+                "analytics", List.of(List.of("server.stop("), List.of("scans.stop("),
+                        List.of("running.shutdown()", "status.stop()", "reporter.stop()"), List.of("pool.close()")));
+        for (String domain : List.of("transaction", "inventory", "analytics")) {
+            Path main = mainSource(domain);
+            String hook = shutdownHook(Files.readString(main), main);
+            int previousLast = -1;
+            String previousStage = "start";
+            for (List<String> stage : stages.get(domain)) {
+                int first = Integer.MAX_VALUE;
+                int last = -1;
+                for (String call : stage) {
+                    int at = hook.indexOf(call);
+                    assertTrue(at >= 0, main + "'s shutdown hook calls " + call);
+                    assertEquals(at, hook.lastIndexOf(call), main + "'s shutdown hook calls " + call + " once");
+                    first = Math.min(first, at);
+                    last = Math.max(last, at);
+                }
+                assertTrue(first > previousLast, main + " shuts down " + stage + " after " + previousStage);
+                previousLast = last;
+                previousStage = stage.toString();
+            }
+        }
+    }
+
+    /** The body of the {@code Runtime.addShutdownHook(new Thread(() -> { ... }))} lambda. */
+    private static String shutdownHook(String source, Path main) {
+        String opening = "addShutdownHook(new Thread(() -> {";
+        int start = source.indexOf(opening);
+        assertTrue(start >= 0, main + " registers a shutdown hook lambda");
+        int end = source.indexOf("}));", start);
+        assertTrue(end > start, main + "'s shutdown hook ends with }));");
+        return source.substring(start + opening.length(), end);
     }
 
     private static boolean isBusinessInterface(Class<?> type) {

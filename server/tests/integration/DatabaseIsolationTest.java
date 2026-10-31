@@ -28,7 +28,9 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * Database isolation (SC-008, R3): a service's credentials reach only its own schema. Each disposable user is
  * granted exactly what {@code db/bootstrap.sql} grants a service user, so every read or change of another
- * service's tables fails with MySQL error 1142, while the owner can reset and fully use its own schema.
+ * service's tables fails with MySQL error 1142, while the owner can reset and fully use its own schema. Every
+ * table is probed, so the event tables ({@code outbox_event}, {@code dead_letter_event}, {@code consumer_offset})
+ * are covered with the 005 tables (006 US7 scenario 2, SC-011).
  */
 class DatabaseIsolationTest {
     private static final int TABLE_ACCESS_DENIED = 1142;
@@ -48,6 +50,39 @@ class DatabaseIsolationTest {
                     "INSERT INTO %s.product_name (sku, name) VALUES ('SKU-ISOLATION', 'x')",
                     "UPDATE %s.scan_sequence SET last_position = last_position WHERE sequence_key = 1",
                     "DELETE FROM %s.product_name WHERE sku = 'SKU-ISOLATION'"));
+
+    /**
+     * Every table each schema script creates, including the event tables (006 FR-004, SC-011): a read probe and a
+     * delete that would match no row, so only the privilege check can fail and nothing changes even if it does not.
+     */
+    private static final Map<String, List<String>> TABLES = new LinkedHashMap<>();
+    /** The event tables each schema must hold (data-model): outbox, dead letters, and Analytics' offsets. */
+    private static final Map<String, List<String>> EVENT_TABLES = Map.of(
+            "transaction", List.of("outbox_event", "dead_letter_event"),
+            "inventory", List.of("outbox_event", "dead_letter_event"),
+            "analytics", List.of("dead_letter_event", "consumer_offset"));
+
+    private static synchronized List<String> tables(String service) throws Exception {
+        if (!TABLES.containsKey(service)) {
+            String schema = Files.readString(SqlScripts.dbFile(service + "/schema.sql"), StandardCharsets.UTF_8);
+            Matcher table = Pattern.compile("(?i)CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?`?([a-z_]+)`?").matcher(schema);
+            List<String> found = new ArrayList<>();
+            while (table.find()) found.add(table.group(1));
+            assertTrue(found.containsAll(EVENT_TABLES.get(service)), service + "/schema.sql creates " + found);
+            TABLES.put(service, List.copyOf(found));
+        }
+        return TABLES.get(service);
+    }
+
+    /** {@link #PROBES} plus a read and a no-op delete of every table of {@code service}'s schema. */
+    private static List<String> probes(String service) throws Exception {
+        List<String> probes = new ArrayList<>(PROBES.get(service));
+        for (String table : tables(service)) {
+            probes.add("SELECT COUNT(*) FROM %s.`" + table + "`");
+            probes.add("DELETE FROM %s.`" + table + "` WHERE 1 = 0");
+        }
+        return probes;
+    }
 
     @Test
     void bootstrapGrantsEachServiceUserItsOwnSchemaOnly() throws Exception {
@@ -92,7 +127,7 @@ class DatabaseIsolationTest {
                 try (Connection connection = connect(own.host(), own.port(), own.name(), own.user(), own.password())) {
                     for (String other : SERVICES) {
                         if (other.equals(owner)) continue;
-                        for (String probe : PROBES.get(other)) {
+                        for (String probe : probes(other)) {
                             String sql = String.format(probe, "`" + schemas.get(other).name() + "`");
                             violations.addAll(expectDenied(connection, owner, sql));
                         }
@@ -108,7 +143,7 @@ class DatabaseIsolationTest {
                     // The per-service reset runs with only the owner's credentials (R13).
                     SqlScripts.run(connection, SqlScripts.dbFile(owner + "/schema.sql"));
                     if (owner.equals("inventory")) SqlScripts.run(connection, SqlScripts.dbFile("inventory/seed.sql"));
-                    for (String probe : PROBES.get(owner)) {
+                    for (String probe : probes(owner)) {
                         try (Statement statement = connection.createStatement()) {
                             statement.execute(String.format(probe, "`" + own.name() + "`"));
                         }
@@ -131,7 +166,7 @@ class DatabaseIsolationTest {
                 for (String other : SERVICES) {
                     if (other.equals(owner)) continue;
                     String schema = "`" + LiveSchemas.credentials(other).name() + "`";
-                    for (String probe : PROBES.get(other)) {
+                    for (String probe : probes(other)) {
                         violations.addAll(expectDenied(connection, owner, String.format(probe, schema)));
                     }
                 }

@@ -118,36 +118,10 @@ class LayerDependencyTest {
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
     }
 
-    /** gRPC and generated {@code contracts.*} types stay in rpc adapters and composition roots (R2). */
-    @Test
-    void grpcAndGeneratedContractsStayInRpcPackagesAndCompositionRoots() throws Exception {
-        Path server = serverRoot();
-        List<String> violations = new ArrayList<>();
-        int rpcSources = 0;
-        for (String owner : List.of("common", "transaction", "inventory", "analytics")) {
-            try (Stream<Path> paths = Files.walk(server.resolve(owner + "/src"))) {
-                for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
-                    String body = Files.readString(source);
-                    Matcher declared = PACKAGE.matcher(body);
-                    if (!declared.find()) continue;
-                    String packageName = declared.group(1);
-                    boolean rpc = packageName.equals("rpc") || packageName.startsWith("rpc.");
-                    if (rpc) rpcSources++;
-                    boolean compositionRoot = !owner.equals("common") && source.getFileName().toString().equals(
-                            Character.toUpperCase(owner.charAt(0)) + owner.substring(1) + "Main.java");
-                    if (!rpc && !compositionRoot && GRPC_OR_CONTRACTS.matcher(body).find()) {
-                        violations.add(source + ": gRPC or generated contract type outside an rpc package");
-                    }
-                }
-            }
-        }
-        assertTrue(rpcSources > 0, "No rpc package sources found");
-        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
-    }
-
     /**
-     * {@code messaging} is an adapter layer like {@code rpc} (006 Implementation Rule 4): a messaging adapter may
-     * depend on its business layer, {@code events}, and the rest of common, but no other layer imports it; only the
+     * {@code messaging} is the only adapter layer (006 Implementation Rule 4, FR-006): the {@code rpc} layer is
+     * gone, no source references gRPC or a generated gRPC contract, and a messaging adapter may depend on its
+     * business layer, {@code events}, and the rest of common, but no other layer imports it; only the
      * {@code *Main} composition roots wire messaging adapters to {@code events} ports.
      */
     @Test
@@ -155,12 +129,19 @@ class LayerDependencyTest {
         Path server = serverRoot();
         List<String> violations = new ArrayList<>();
         for (String owner : List.of("common", "transaction", "inventory", "analytics")) {
+            if (Files.exists(server.resolve(owner + "/src/rpc"))) violations.add(owner + "/src/rpc/ still exists");
             try (Stream<Path> paths = Files.walk(server.resolve(owner + "/src"))) {
                 for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
                     String body = Files.readString(source);
                     Matcher declared = PACKAGE.matcher(body);
                     if (!declared.find()) continue;
                     String packageName = declared.group(1);
+                    if (packageName.equals("rpc") || packageName.startsWith("rpc.")) {
+                        violations.add(source + ": the rpc adapter layer is removed");
+                    }
+                    if (GRPC_OR_CONTRACTS.matcher(body).find() || RPC_REFERENCE.matcher(body).find()) {
+                        violations.add(source + ": references gRPC, a generated gRPC contract, or the rpc package");
+                    }
                     boolean messaging = packageName.equals("messaging") || packageName.startsWith("messaging.");
                     boolean compositionRoot = !owner.equals("common") && source.getFileName().toString().equals(
                             Character.toUpperCase(owner.charAt(0)) + owner.substring(1) + "Main.java");
@@ -198,17 +179,18 @@ class LayerDependencyTest {
     }
 
     /**
-     * The shared metrics, rpc, events, messaging, faults, and time packages carry no business logic, and metrics
-     * needs no library (R21). metrics and rpc must exist; the others are checked once they exist (006 T023-T027).
-     * events may import the database ports it is built on, such as {@code database.StoreFailure}.
+     * The shared metrics, events, messaging, faults, and time packages carry no business logic, and metrics needs
+     * no library (R21). metrics, events, and messaging must exist; faults and time are checked when they exist.
+     * events may import the database ports it is built on, such as {@code database.StoreFailure}. The rpc package
+     * is gone (006 T153).
      */
     @Test
-    void commonMetricsAndRpcPackagesAreBusinessFreeAndMetricsIsDependencyFree() throws Exception {
+    void commonSharedPackagesAreBusinessFreeAndMetricsIsDependencyFree() throws Exception {
         Path common = serverRoot().resolve("common/src");
         List<String> violations = new ArrayList<>();
-        for (String shared : List.of("metrics", "rpc", "events", "messaging", "faults", "time")) {
+        for (String shared : List.of("metrics", "events", "messaging", "faults", "time")) {
             Path root = common.resolve(shared);
-            if (List.of("metrics", "rpc").contains(shared)) {
+            if (List.of("metrics", "events", "messaging").contains(shared)) {
                 assertTrue(Files.isDirectory(root), "Missing common package: " + root);
             } else if (!Files.isDirectory(root)) {
                 continue;
@@ -240,28 +222,26 @@ class LayerDependencyTest {
     }
 
     /**
-     * {@code contracts.jar} holds only generated classes, the gRPC stubs under {@code contracts/} and the event
-     * schemas under {@code selfcheckout/events/} (006 D2): no business, api, or database class (R1).
+     * {@code contracts.jar} holds only the generated event schemas under {@code selfcheckout/events/} (006 D2): no
+     * gRPC stub (the gRPC protos are deleted, 006 T154) and no business, api, or database class (R1).
      */
     @Test
     void contractsJarHoldsOnlyGeneratedContracts() throws Exception {
         Path jar = serverRoot().resolve("out/contracts.jar");
         assertTrue(Files.isRegularFile(jar), "Missing contracts artifact: " + jar);
         List<String> violations = new ArrayList<>();
-        int generated = 0;
         int events = 0;
         try (java.util.jar.JarFile archive = new java.util.jar.JarFile(jar.toFile())) {
             for (String name : archive.stream().map(java.util.zip.ZipEntry::getName).toList()) {
                 if (!name.endsWith(".class")) continue;
-                if (name.startsWith("contracts/")) generated++;
-                else if (name.startsWith("selfcheckout/events/")) events++;
-                else violations.add("contracts.jar contains a non-contract class " + name);
-                if (name.matches("^(transaction|inventory|analytics|api|database|rpc|metrics|events|messaging)/.*")) {
-                    violations.add("contracts.jar contains business or shared class " + name);
+                if (name.startsWith("selfcheckout/events/")) events++;
+                else violations.add("contracts.jar contains a non-event class " + name);
+                if (name.matches("^(transaction|inventory|analytics|api|database|rpc|metrics|events|messaging|contracts)/.*")) {
+                    violations.add("contracts.jar contains business, shared, or gRPC class " + name);
                 }
+                if (name.contains("Grpc")) violations.add("contracts.jar contains a gRPC stub " + name);
             }
         }
-        assertTrue(generated > 0, "contracts.jar has no generated classes");
         assertTrue(events > 0, "contracts.jar has no generated event classes");
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
     }
@@ -271,6 +251,8 @@ class LayerDependencyTest {
             "(?m)(^import\\s+(?:static\\s+)?messaging\\.)|(?<![A-Za-z0-9_.])messaging\\.[A-Z]");
     private static final Pattern GRPC_OR_CONTRACTS = Pattern.compile(
             "(?m)(^import\\s+(?:static\\s+)?(?:io\\.grpc|contracts)\\.)|\\bio\\.grpc\\.[a-zA-Z]|\\bcontracts\\.(?:inventory|analytics)\\.v\\d");
+    private static final Pattern RPC_REFERENCE = Pattern.compile(
+            "(?m)(^import\\s+(?:static\\s+)?rpc\\.)|(?<![A-Za-z0-9_.])rpc\\.[A-Z]");
 
     private static Path serverRoot() {
         Path cwd = Path.of("").toAbsolutePath().normalize();

@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Replaces benchmark-microservices.ps1, keeping its steps and adding the broker:
-    1. Checks that ports 8080-8083 (and the former gRPC port 9092, until T148) are free,
+    1. Checks that ports 8080-8083 are free,
        that the service artifacts exist, and that the broker answers with its four topics; builds
        load-client/ if needed.
     2. Applies -ExtraEnv to this process, so the broker restarted by the reset also sees it (for
@@ -204,10 +204,7 @@ function Wait-Until([string]$What, [int]$Seconds, [scriptblock]$Condition) {
 
 function Start-BenchService([string]$Service) {
     $title = $Service.Substring(0, 1).ToUpperInvariant() + $Service.Substring(1)
-    $cp = "out/$Service.jar;out/common.jar;out/contracts.jar"
-    # The gRPC runtime stays on the classpath until T148 removes lib/grpc/.
-    if (Test-Path (Join-Path $server 'lib/grpc')) { $cp += ';lib/grpc/*' }
-    $cp += ';lib/messaging/*;lib/mysql-connector-j-9.0.0.jar'
+    $cp = "out/$Service.jar;out/common.jar;out/contracts.jar;lib/messaging/*;lib/mysql-connector-j-9.0.0.jar"
     $process = Start-Process -FilePath $JavaExe -ArgumentList @('-cp', $cp, "$Service.${title}Main") `
         -WorkingDirectory $server -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $out "$Service-stdout.log") `
@@ -526,8 +523,8 @@ try {
         $gateStarted = Get-Date
     }
 
-    # 1. Ports, artifacts, and the broker. 9092 was Inventory's gRPC port, removed by T111; T148 drops the check.
-    $occupied = Get-NetTCPConnection -LocalPort 8080, 8081, 8082, 8083, 9092 -State Listen -ErrorAction SilentlyContinue
+    # 1. Ports, artifacts, and the broker.
+    $occupied = Get-NetTCPConnection -LocalPort 8080, 8081, 8082, 8083 -State Listen -ErrorAction SilentlyContinue
     if ($occupied) { throw "Benchmark ports are in use: $(($occupied.LocalPort | Sort-Object -Unique) -join ', ')" }
     foreach ($artifact in @('out/common.jar', 'out/contracts.jar', 'out/transaction.jar', 'out/inventory.jar', 'out/analytics.jar', 'lib/messaging')) {
         if (-not (Test-Path (Join-Path $server $artifact))) { throw "Missing $artifact; run server/build.sh first" }

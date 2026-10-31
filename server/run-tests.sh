@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-if [ ! -f out/common.jar ] || [ ! -f out/contracts.jar ] || [ ! -d lib/grpc ] || [ ! -d lib/messaging ] ||
+if [ ! -f out/common.jar ] || [ ! -f out/contracts.jar ] || [ ! -d lib/messaging ] ||
    [ ! -f out/transaction.jar ] || [ ! -f out/inventory.jar ] || [ ! -f out/analytics.jar ]; then
   echo "Build artifacts missing - running build.sh first..."
   ./build.sh
@@ -32,7 +32,7 @@ if [ -n "${NGINX_BIN:-}" ]; then
 fi
 STRICT_LIVE=false
 # Packages whose skipped tests fail a strict run.
-LIVE_PACKAGES='contract|integration|rpc|performance'
+LIVE_PACKAGES='contract|integration|performance'
 if [ -n "${SERVER_BASE_URL:-}" ]; then
   JVM_ARGS+=("-DSERVER_BASE_URL=$SERVER_BASE_URL")
   STRICT_LIVE=true
@@ -64,10 +64,10 @@ RESTORATION_DIRECT_CLASSES="${RESTORATION_DIRECT_CLASSES:-messaging.RestorationE
 
 REPORT_DIR="out/test-results/run-$(date +%Y%m%d%H%M%S)-$$"
 mkdir -p "$REPORT_DIR"
-# lib/* does not reach lib/grpc/ or lib/messaging/, so those runtimes are listed separately.
+# lib/* does not reach lib/messaging/, so the messaging runtime is listed separately.
 set +e
 java "${JVM_ARGS[@]}" ${CALLER_JVM_ARGS[@]+"${CALLER_JVM_ARGS[@]}"} \
-  -cp "lib/*${SEP}lib/grpc/*${SEP}lib/messaging/*${SEP}out/common.jar${SEP}out/contracts.jar${SEP}out/transaction.jar${SEP}out/inventory.jar${SEP}out/analytics.jar${SEP}out/test" \
+  -cp "lib/*${SEP}lib/messaging/*${SEP}out/common.jar${SEP}out/contracts.jar${SEP}out/transaction.jar${SEP}out/inventory.jar${SEP}out/analytics.jar${SEP}out/test" \
   org.junit.platform.console.ConsoleLauncher execute "${SELECTORS[@]}" --reports-dir "$REPORT_DIR"
 STATUS=$?
 set -e

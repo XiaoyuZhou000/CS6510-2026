@@ -62,6 +62,8 @@ public final class AnalyticsMain {
             StatusReporter status = StatusReporter.start("analytics",
                     () -> statusQueries.read().line() + " scan_consumer_lag=" + scans.lag());
             AnalyticsService running = service;
+            // contracts/broker-and-deployment.md "Start, stop, restart": HTTP, then the consumer (final commitSync),
+            // then the pipeline and the other background workers, then the pool; Analytics has no producer.
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 server.stop(5);
                 scans.stop(Duration.ofSeconds(5));

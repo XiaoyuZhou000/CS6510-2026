@@ -18,8 +18,8 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Starts real service JVMs from the built artifacts ({@code server/out/*.jar}, {@code lib/grpc/*},
- * {@code lib/messaging/*}, and Connector/J) for process-level crash, restart, and isolation tests (R15).
+ * Starts real service JVMs from the built artifacts ({@code server/out/*.jar}, {@code lib/messaging/*}, and
+ * Connector/J) for process-level crash, restart, and isolation tests (R15).
  *
  * <pre>{@code
  * try (ServiceProcesses.ServiceProcess inventory = ServiceProcesses.service("inventory")
@@ -124,7 +124,6 @@ public final class ServiceProcesses {
                     server.resolve("out/" + service + ".jar").toString(),
                     server.resolve("out/common.jar").toString(),
                     server.resolve("out/contracts.jar").toString(),
-                    server.resolve("lib/grpc").toString() + File.separator + "*",
                     server.resolve("lib/messaging").toString() + File.separator + "*",
                     server.resolve("lib/mysql-connector-j-9.0.0.jar").toString());
             String main = service + "." + Character.toUpperCase(service.charAt(0)) + service.substring(1) + "Main";
@@ -199,7 +198,7 @@ public final class ServiceProcesses {
                     + System.lineSeparator() + output());
         }
 
-        /** Waits until a TCP port accepts connections, for example a gRPC port. */
+        /** Waits until a TCP port accepts connections. */
         public void awaitPort(int port, Duration timeout) throws InterruptedException {
             long deadline = System.nanoTime() + timeout.toNanos();
             while (System.nanoTime() < deadline) {

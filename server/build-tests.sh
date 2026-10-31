@@ -27,6 +27,6 @@ esac
 JUNIT_CONSOLE="lib/junit-platform-console-standalone-1.11.0.jar"
 MYSQL_CONNECTOR="lib/mysql-connector-j-9.0.0.jar"
 javac --release 21 -d out/test \
-  -cp "${JUNIT_CONSOLE}${SEP}${MYSQL_CONNECTOR}${SEP}out/common.jar${SEP}out/contracts.jar${SEP}lib/grpc/*${SEP}lib/messaging/*${SEP}out/transaction.jar${SEP}out/inventory.jar${SEP}out/analytics.jar" \
+  -cp "${JUNIT_CONSOLE}${SEP}${MYSQL_CONNECTOR}${SEP}out/common.jar${SEP}out/contracts.jar${SEP}lib/messaging/*${SEP}out/transaction.jar${SEP}out/inventory.jar${SEP}out/analytics.jar" \
   "${SOURCES[@]}"
 echo "Tests compiled. Run with: ./run-tests.sh"

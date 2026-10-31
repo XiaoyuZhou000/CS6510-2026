@@ -21,8 +21,8 @@ sources_in() {
   done < <(find "$root" -type f -name '*.java' | LC_ALL=C sort)
 }
 
-# Generated gRPC stubs and event classes, the pinned gRPC runtime, and the messaging runtime
-# (kafka-clients) come from the Maven contracts module (005 R1, 006 D2).
+# Generated event classes and the messaging runtime (kafka-clients, protobuf-java, slf4j) come from
+# the Maven contracts module (005 R1, 006 D2). No gRPC runtime remains (006 FR-006).
 build_contracts() {
   if ! command -v mvn >/dev/null 2>&1; then
     echo "Maven (mvn) is required to build out/contracts.jar; install Maven 3.9+ and put it on PATH" >&2
@@ -33,15 +33,20 @@ build_contracts() {
   jdk="$(java -XshowSettings:properties -version 2>&1 | tr -d '\r' | sed -n 's/^ *java\.home = //p')"
   local offline=()
   [ "${MAVEN_OFFLINE:-}" = 1 ] && offline=(-o)
-  # Start from empty runtime directories so an old release never stays on the classpath.
+  # Start from an empty runtime directory so an old release never stays on the classpath; lib/grpc/
+  # is deleted too, so a gRPC runtime left by an earlier build never comes back on any classpath.
   rm -rf lib/grpc lib/messaging
   JAVA_HOME="$jdk" mvn -q "${offline[@]}" -f contracts/pom.xml -DskipTests package
-  if [ ! -f out/contracts.jar ] || [ -z "$(ls lib/grpc/*.jar 2>/dev/null)" ]; then
-    echo "Contracts build did not produce out/contracts.jar and lib/grpc/" >&2
+  if [ ! -f out/contracts.jar ]; then
+    echo "Contracts build did not produce out/contracts.jar" >&2
     exit 1
   fi
   if [ ! -f lib/messaging/kafka-clients-4.1.0.jar ]; then
     echo "Contracts build did not produce lib/messaging/kafka-clients-4.1.0.jar" >&2
+    exit 1
+  fi
+  if [ -n "$(ls lib/messaging/ | grep -i grpc)" ] || [ -e lib/grpc ]; then
+    echo "A gRPC runtime is still on the classpath (lib/messaging/ or lib/grpc/)" >&2
     exit 1
   fi
 }
@@ -52,7 +57,7 @@ build_common() {
   sources_in common/src
   if [ "${#SOURCES[@]}" -gt 0 ]; then
     javac --release 21 -d "$classes" \
-      -cp "out/contracts.jar${SEP}lib/grpc/*${SEP}lib/messaging/*${SEP}${MYSQL_CONNECTOR}" "${SOURCES[@]}"
+      -cp "out/contracts.jar${SEP}lib/messaging/*${SEP}${MYSQL_CONNECTOR}" "${SOURCES[@]}"
   fi
   jar --create --file out/common.jar -C "$classes" .
 }
@@ -65,14 +70,14 @@ build_service() {
   sources_in "$service/src"
   if [ "${#SOURCES[@]}" -gt 0 ]; then
     javac --release 21 -d "$classes" \
-      -cp "out/common.jar${SEP}out/contracts.jar${SEP}lib/grpc/*${SEP}lib/messaging/*${SEP}${MYSQL_CONNECTOR}" "${SOURCES[@]}"
+      -cp "out/common.jar${SEP}out/contracts.jar${SEP}lib/messaging/*${SEP}${MYSQL_CONNECTOR}" "${SOURCES[@]}"
   fi
   if [ -f "$classes/${service}/${service^}Main.class" ]; then
     jar --create --file "out/$service.jar" --main-class "$main_class" -C "$classes" .
   else
     jar --create --file "out/$service.jar" -C "$classes" .
   fi
-  echo "Built out/$service.jar (runtime classpath: out/common.jar${SEP}out/contracts.jar${SEP}lib/grpc/*${SEP}lib/messaging/*${SEP}$MYSQL_CONNECTOR)"
+  echo "Built out/$service.jar (runtime classpath: out/common.jar${SEP}out/contracts.jar${SEP}lib/messaging/*${SEP}$MYSQL_CONNECTOR)"
 }
 
 case "${1:-all}" in

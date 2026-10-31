@@ -84,14 +84,16 @@ public final class InventoryMain {
                     () -> statusQueries.read().line() + " checkout_consumer_lag=" + checkoutConsumer.lag());
             KafkaRecordSender outcomes = outcomeSender;
             KafkaRecordSender catalogRecords = catalogSender;
+            // contracts/broker-and-deployment.md "Start, stop, restart": HTTP, then the consumer (final commitSync),
+            // then the dispatcher (final mark), then the background workers, then the producers, then the pool.
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 server.stop(5);
                 checkoutConsumer.stop(Duration.ofSeconds(5));
                 dispatcher.stop(Duration.ofSeconds(5));
-                outcomes.close();
-                catalogRecords.close();
                 status.stop();
                 reporter.stop();
+                outcomes.close();
+                catalogRecords.close();
                 pool.close();
             }));
             dispatcher.start();

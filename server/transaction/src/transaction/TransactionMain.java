@@ -100,17 +100,20 @@ public final class TransactionMain {
             recoverySettings.stuckAfter());
         StatusReporter status = StatusReporter.start("transaction",
             () -> statusQueries.read().line() + " outcome_consumer_lag=" + outcomes.lag());
+        // contracts/broker-and-deployment.md "Start, stop, restart": HTTP, then the consumers (final commitSync),
+        // then the dispatcher (final mark), then the background workers, then the producers, then the pool. A
+        // recovery republish signalled after the dispatcher stopped is ignored and swept at the next start.
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.stop(5);
-            relay.close();
-            recovery.close();
             outcomes.stop(Duration.ofSeconds(5));
             catalogConsumer.stop(Duration.ofSeconds(5));
             dispatcher.stop(Duration.ofSeconds(5));
-            checkoutSender.close();
-            scanSender.close();
+            recovery.close();
+            relay.close();
             status.stop();
             reporter.stop();
+            checkoutSender.close();
+            scanSender.close();
             pool.close();
         }));
         dispatcher.start();

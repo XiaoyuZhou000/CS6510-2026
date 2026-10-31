@@ -8,6 +8,8 @@ import support.LiveSchemas;
 import support.ServiceHttp;
 import support.ServiceProcesses;
 
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -42,6 +44,93 @@ public final class ResetBaselineTest {
     private static final List<String> FOREIGN = List.of("DB_USER", "DB_PASSWORD", "DB_NAME", "MYSQL_PWD",
             "MYSQL_ADMIN_PASSWORD");
 
+    /**
+     * {@code db/reset-baseline.ps1} refuses while a service port answers (FR-059), before it touches the broker or
+     * any schema. Not destructive: the script gets a Kafka home and a mysql.exe that do not exist, so even a
+     * regression that skipped the check would stop at resolving them instead of resetting anything.
+     */
+    @Test
+    void resetBaselineRefusesWhileAServicePortAnswers() throws Exception {
+        assumeTrue(System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("windows"),
+            "db/reset-baseline.ps1 runs under Windows PowerShell");
+        Path missing = Files.createTempDirectory("reset-refusal-");
+        ServerSocket listener = null;
+        int answering = -1;
+        for (int port : List.of(8081, 8082, 8083)) {
+            if (ServiceProcesses.httpStatus(port, "/") != -1) {
+                answering = port;
+                break;
+            }
+        }
+        try {
+            for (int port : List.of(8081, 8082, 8083)) {
+                if (answering != -1) break;
+                try {
+                    listener = new ServerSocket(port, 50, InetAddress.getLoopbackAddress());
+                    answering = port;
+                } catch (java.io.IOException taken) {
+                    // Reserved or bound without answering; try the next port.
+                }
+            }
+            assertNotEquals(-1, answering, "No service port answers and none of 8081-8083 can be bound");
+            Path script = ServiceProcesses.serverRoot().getParent().resolve("db/reset-baseline.ps1");
+            ProcessBuilder builder = new ProcessBuilder(List.of("powershell", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File", script.toString(),
+                "-KafkaHome", missing.resolve("kafka").toString(), "-MySqlExe", missing.resolve("mysql.exe").toString()));
+            builder.redirectErrorStream(true);
+            Process process = builder.start();
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            assertTrue(process.waitFor(60, TimeUnit.SECONDS), "reset-baseline.ps1 did not finish");
+            assertEquals(1, process.exitValue(), output);
+            assertTrue(output.contains("reset-baseline refused") && output.contains(Integer.toString(answering)), output);
+        } finally {
+            if (listener != null) listener.close();
+            Files.deleteIfExists(missing);
+        }
+    }
+
+    /**
+     * The whole baseline procedure (D13, FR-059): {@code db/reset-baseline.ps1} resets the broker and all three
+     * schemas; afterwards every topic is empty with its partitions, and every schema holds exactly the baseline
+     * with no outbox, parked, or offset row. Destructive like the test below, and it restarts the broker, so it
+     * also needs {@code KAFKA_TEST_BROKER_CONTROL=1} and {@code KAFKA_HOME}.
+     */
+    @Test
+    void resetBaselineEmptiesEveryTopicAndSchema() throws Exception {
+        assumeTrue(Boolean.getBoolean("RUN_RESET_BASELINE_TEST"),
+            "Destructive reset test disabled; pass -DRUN_RESET_BASELINE_TEST=true to enable");
+        assumeTrue(System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("windows"),
+            "db/reset-baseline.ps1 runs under Windows PowerShell");
+        KafkaTestSupport.requireBrokerControl();
+        for (int port : List.of(8081, 8082, 8083)) {
+            assertEquals(-1, ServiceProcesses.httpStatus(port, "/"),
+                "Stop the deployment before resetting the baseline: port " + port + " answers");
+        }
+        Path script = ServiceProcesses.serverRoot().getParent().resolve("db/reset-baseline.ps1");
+        ProcessBuilder builder = new ProcessBuilder(List.of("powershell", "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-File", script.toString()));
+        String kafkaHome = System.getProperty("KAFKA_HOME", System.getenv("KAFKA_HOME"));
+        if (kafkaHome != null && !kafkaHome.isBlank()) builder.environment().put("KAFKA_HOME", kafkaHome);
+        String mysql = System.getProperty("MYSQL_EXE", System.getenv("MYSQL_EXE"));
+        if (mysql != null && !mysql.isBlank()) {
+            builder.command().add("-MySqlExe");
+            builder.command().add(mysql);
+        }
+        builder.redirectErrorStream(true);
+        Process process = builder.start();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertTrue(process.waitFor(600, TimeUnit.SECONDS), "reset-baseline.ps1 did not finish");
+        assertEquals(0, process.exitValue(), "reset-baseline.ps1 failed:" + System.lineSeparator() + output);
+        assertExactDatabaseBaseline(false);
+        TopicNames production = TopicNames.unprefixed();
+        for (TopicNames.Topic topic : TopicNames.Topic.values()) {
+            for (int partition = 0; partition < topic.partitions(); partition++) {
+                assertEquals(0, KafkaTestSupport.endOffset(production.name(topic), partition),
+                    production.name(topic) + "-" + partition + " is empty after the reset");
+            }
+        }
+    }
+
     @Test
     void resetProducesExactBaselineForFreshServer() throws Exception {
         assumeTrue(Boolean.getBoolean("RUN_RESET_BASELINE_TEST"),
@@ -61,7 +150,7 @@ public final class ResetBaselineTest {
             String output = reset(service, credentials.get(service));
             assertTrue(output.contains(service + " schema reset."), output);
         }
-        assertExactDatabaseBaseline();
+        assertExactDatabaseBaseline(false);
 
         // The catalog reaches Transaction through Inventory's events (006 D9), on topics of this run only.
         KafkaTestSupport.requireBroker();
@@ -98,14 +187,19 @@ public final class ResetBaselineTest {
                         assertTrue(fresh.process().pid() > 0,
                             "The fresh " + fresh.service() + " process must have a process id");
                     }
-                    assertExactDatabaseBaseline();
+                    awaitCatalogPublished(Duration.ofSeconds(60));
+                    assertExactDatabaseBaseline(true);
                 }
             }
         }
     }
 
-    /** Every baseline row, each read with only its owning service's credentials. */
-    private static void assertExactDatabaseBaseline() throws Exception {
+    /**
+     * Every baseline row, each read with only its owning service's credentials. Right after a reset no outbox,
+     * parked, or offset row exists; after startup Inventory's outbox holds only its published catalog (D9),
+     * Transaction holds nothing but its replica, and Analytics holds nothing.
+     */
+    private static void assertExactDatabaseBaseline(boolean afterStartup) throws Exception {
         try (Connection connection = LiveSchemas.inventory(); Statement statement = connection.createStatement()) {
             try (ResultSet rows = statement.executeQuery(
                     "SELECT (SELECT COUNT(*) FROM catalog_item) AS catalog_rows, "
@@ -124,18 +218,44 @@ public final class ResetBaselineTest {
             }
             assertEquals(2_000, count(statement, "SELECT product_count FROM catalog_meta WHERE meta_key = 1"));
             assertEmpty(statement, "checkout_operation");
+            assertEmpty(statement, "dead_letter_event");
+            if (afterStartup) {
+                assertEquals(0, count(statement, "SELECT COUNT(*) FROM outbox_event WHERE published_at IS NULL"),
+                    "Inventory published its whole catalog");
+                assertEquals(0, count(statement, "SELECT COUNT(*) FROM outbox_event WHERE event_type NOT IN "
+                    + "('CatalogItemPublished', 'CatalogSnapshotPublished')"), "Inventory's outbox holds only its catalog");
+            } else {
+                assertEmpty(statement, "outbox_event");
+            }
         }
         try (Connection connection = LiveSchemas.transaction(); Statement statement = connection.createStatement()) {
             assertEmpty(statement, "`transaction`");
             assertEmpty(statement, "accepted_scan");
             assertEmpty(statement, "checkout_attempt");
+            assertEmpty(statement, "outbox_event");
+            assertEmpty(statement, "dead_letter_event");
+            if (!afterStartup) assertEmpty(statement, "product_replica");
         }
         try (Connection connection = LiveSchemas.analytics(); Statement statement = connection.createStatement()) {
             assertEmpty(statement, "accepted_scan");
             assertEmpty(statement, "popular_window");
             assertEmpty(statement, "popular_item");
+            assertEmpty(statement, "dead_letter_event");
+            assertEmpty(statement, "consumer_offset");
             assertEquals(0, count(statement, "SELECT last_position FROM scan_sequence WHERE sequence_key = 1"));
             assertEquals(0, count(statement, "SELECT last_window_end FROM analytics_checkpoint WHERE checkpoint_key = 1"));
+        }
+    }
+
+    /** Waits until Inventory's dispatcher has published every catalog row it wrote at startup. */
+    private static void awaitCatalogPublished(Duration timeout) throws Exception {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            try (Connection connection = LiveSchemas.inventory(); Statement statement = connection.createStatement()) {
+                if (count(statement, "SELECT COUNT(*) FROM outbox_event WHERE published_at IS NULL") == 0) return;
+            }
+            if (System.nanoTime() > deadline) fail("Inventory's catalog outbox rows were never all published");
+            Thread.sleep(200);
         }
     }
 

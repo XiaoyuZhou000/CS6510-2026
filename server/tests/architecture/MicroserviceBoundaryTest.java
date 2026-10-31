@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.jar.JarFile;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -23,7 +24,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Gates for the microservices constraints: infrastructure, durability, JDBC flags, ownership (R18-R20, R23),
- * and the single Kafka broker whose client stays in messaging adapters (006 D1, D14).
+ * the single Kafka broker whose client stays in messaging adapters (006 D1, D14), and no synchronous
+ * service-to-service mechanism: no gRPC, HTTP client, socket, or peer address (006 FR-006, SC-010).
  */
 class MicroserviceBoundaryTest {
     private static final List<String> SERVICES = List.of("transaction", "inventory", "analytics");
@@ -45,6 +47,90 @@ class MicroserviceBoundaryTest {
             paths.filter(path -> path.toString().endsWith(".jar"))
                     .filter(path -> forbidden.matcher(path.getFileName().toString()).find())
                     .forEach(path -> violations.add("Forbidden infrastructure dependency: " + path));
+        }
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    /**
+     * Services talk only through the broker (FR-006, SC-010): no service source uses gRPC, an HTTP client, a raw
+     * socket, or a URL connection. The services' own HTTP servers ({@code com.sun.net.httpserver}) are allowed.
+     */
+    @Test
+    void noServiceSourceMakesASynchronousCall() throws Exception {
+        Map<String, Pattern> forbidden = Map.of(
+                "gRPC", Pattern.compile("\\bio\\.grpc\\b|\\bGrpc[A-Z][A-Za-z]*\\b"),
+                "an HTTP client", Pattern.compile("\\bjava\\.net\\.http\\b|\\bHttpClient\\b|\\bHttpURLConnection\\b"),
+                "a raw socket", Pattern.compile("\\bjava\\.net\\.(?:Socket|SocketChannel)\\b|\\bnew\\s+Socket\\s*\\(|\\bSocketChannel\\.open\\b"),
+                "a URL connection", Pattern.compile("\\bopenConnection\\s*\\(|\\bopenStream\\s*\\("));
+        List<String> violations = new ArrayList<>();
+        for (Path source : productionSources()) {
+            String body = Files.readString(source);
+            forbidden.forEach((what, pattern) -> {
+                if (pattern.matcher(body).find()) violations.add(source + " uses " + what);
+            });
+        }
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    /**
+     * No service reads a peer's address (contracts/broker-and-deployment.md "Configuration (changes)"): no
+     * {@code *_GRPC_*}, {@code *_RPC_*}, or {@code *_TARGET} key and no {@code CATALOG_REFRESH_SECONDS} in any
+     * service source or run script, no service source names a peer's {@code _HOST}, {@code _PORT}, {@code _URL},
+     * or {@code _ADDRESS} key, and no run script mentions any variable of a peer.
+     */
+    @Test
+    void noServiceSourceOrRunScriptConfiguresAPeerAddress() throws Exception {
+        Pattern removedKey = Pattern.compile("\\b[A-Z][A-Z0-9_]*_(?:GRPC|RPC)_[A-Z0-9_]+\\b|\\b[A-Z][A-Z0-9_]*_TARGET\\b"
+                + "|\\bCATALOG_REFRESH_SECONDS\\b");
+        List<String> violations = new ArrayList<>();
+        Path server = serverRoot();
+        for (Path source : productionSources()) {
+            String body = Files.readString(source);
+            String relative = server.relativize(source).toString().replace('\\', '/');
+            String owner = relative.substring(0, relative.indexOf('/'));
+            Matcher removed = removedKey.matcher(body);
+            while (removed.find()) violations.add(source + " reads the removed key " + removed.group());
+            for (String peer : SERVICES) {
+                if (peer.equals(owner)) continue;
+                Matcher address = Pattern.compile("\"" + peer.toUpperCase(Locale.ROOT)
+                        + "_(?:HOST|PORT|URL|ADDRESS)\"").matcher(body);
+                while (address.find()) violations.add(source + " reads the peer address key " + address.group());
+            }
+        }
+        for (String owner : SERVICES) {
+            Path script = server.resolve("run-" + owner + ".sh");
+            String body = Files.readString(script);
+            Matcher removed = removedKey.matcher(body);
+            while (removed.find()) violations.add(script + " passes the removed key " + removed.group());
+            for (String peer : SERVICES) {
+                if (peer.equals(owner)) continue;
+                Matcher variable = Pattern.compile("(?<![A-Za-z0-9_])" + peer.toUpperCase(Locale.ROOT)
+                        + "_[A-Z0-9_]+").matcher(body);
+                while (variable.find()) violations.add(script + " passes the peer variable " + variable.group());
+            }
+        }
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    /**
+     * gRPC is gone from the build (FR-006): {@code lib/grpc/} does not exist, no jar under {@code lib/} is a
+     * gRPC jar, and no build, test, run, or event benchmark script puts {@code lib/grpc/*} on a classpath.
+     */
+    @Test
+    void noGrpcArtifactRemainsOnAnyClasspath() throws Exception {
+        Path server = serverRoot();
+        List<String> violations = new ArrayList<>();
+        if (Files.exists(server.resolve("lib/grpc"))) violations.add("lib/grpc/ still exists; run ./build.sh");
+        try (Stream<Path> paths = Files.walk(server.resolve("lib"))) {
+            paths.filter(path -> path.toString().endsWith(".jar"))
+                    .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).contains("grpc"))
+                    .forEach(path -> violations.add("gRPC jar on the classpath: " + path));
+        }
+        List<Path> scripts = new ArrayList<>(serverScripts().stream()
+                .filter(path -> path.toString().endsWith(".sh")).toList());
+        scripts.add(server.resolve("benchmark-event-based.ps1"));
+        for (Path script : scripts) {
+            if (Files.readString(script).contains("lib/grpc/*")) violations.add(script + " puts lib/grpc/* on a classpath");
         }
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
     }
