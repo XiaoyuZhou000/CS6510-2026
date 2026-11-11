@@ -11,7 +11,9 @@
       state directory (KAFKA_DATA_DIR, default <KAFKA_HOME>\cs6510-data), and a Java 17+ java.exe.
       The state directory holds kraft-logs\ (log.dirs), app-logs\ (broker logs and console
       output), and server.properties (the effective configuration, rewritten at every start).
-    - Get-KafkaTopicSpecs lists the four topics of the event catalog, honoring a topic prefix.
+    - Get-KafkaTopicSpecs lists the five fixed topics of the event catalog (feature 006's four plus
+      007's sale-completed topic), honoring a topic prefix. Notification's per-subscriber channel
+      topics are created by Notification Service itself and are not listed here.
     - Invoke-KafkaTool runs one Kafka command-line tool against 127.0.0.1:19092.
     - Get-KafkaBrokerProcess, Wait-KafkaBroker, Get-KafkaTopics, Get-KafkaEndOffsets,
       and Get-KafkaGroupLags read the broker's state; Test-ServicePortAnswers guards the resets.
@@ -82,6 +84,8 @@ function Get-KafkaTopicSpecs {
         @{ Name = "${Prefix}selfcheckout.checkout.v1"; Partitions = 16; Policy = 'delete'; Retention = $week }
         @{ Name = "${Prefix}selfcheckout.checkout-outcome.v1"; Partitions = 16; Policy = 'delete'; Retention = $week }
         @{ Name = "${Prefix}selfcheckout.scan-accepted.v1"; Partitions = 1; Policy = 'delete'; Retention = $week }
+        # Feature 007 (contracts/sale-completed-event.md): Transaction -> Notification, keyed by transaction ID.
+        @{ Name = "${Prefix}selfcheckout.sale-completed.v1"; Partitions = 16; Policy = 'delete'; Retention = $week }
     )
     return @($specs | ForEach-Object {
         $configs = [ordered]@{ 'cleanup.policy' = $_.Policy; 'retention.ms' = $_.Retention }
@@ -237,7 +241,7 @@ function Get-KafkaGroupLags {
 
 # The ports among $Ports on which anything accepts a TCP connection.
 function Test-ServicePortAnswers {
-    param([int[]]$Ports = @(8081, 8082, 8083))
+    param([int[]]$Ports = @(8081, 8082, 8083, 8084))
     $answering = @()
     foreach ($port in $Ports) {
         $client = New-Object System.Net.Sockets.TcpClient

@@ -5,12 +5,12 @@
 .DESCRIPTION
     Kafka on Windows cannot delete a topic: renaming the open partition directory fails and takes the
     log directory offline. The reset therefore replaces the broker's log instead:
-    1. Refuses to run while anything answers on the service ports 8081-8083, so no running service
+    1. Refuses to run while anything answers on the service ports 8081-8084, so no running service
        loses records or offsets it is working on.
     2. Stops the broker (stop-broker.ps1) and deletes <KAFKA_DATA_DIR>\kraft-logs, which holds every
        topic, every committed consumer offset, and the cluster metadata.
     3. Starts the broker (start-broker.ps1), which reformats the log with the same cluster ID and
-       creates the four topics through create-topics.ps1.
+       creates the five fixed topics through create-topics.ps1.
     4. Verifies that every end offset is 0 and that none of the three consumer groups exists.
 
 .EXAMPLE
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 $KafkaHome = Resolve-KafkaHome $KafkaHome
 $DataDir = Resolve-KafkaDataDir -KafkaHome $KafkaHome -Explicit $DataDir
 
-$answering = @(Test-ServicePortAnswers -Ports 8081, 8082, 8083)
+$answering = @(Test-ServicePortAnswers -Ports 8081, 8082, 8083, 8084)
 if ($answering.Count -gt 0) {
     throw "Refusing to reset the broker while ports $($answering -join ', ') answer; stop the services first"
 }
@@ -59,4 +59,4 @@ if ($problems.Count -gt 0) {
     $problems | ForEach-Object { Write-Host "RESET FAILED $_" }
     exit 1
 }
-Write-Host 'Broker reset: four empty topics, and no consumer group or committed offset.'
+Write-Host 'Broker reset: five empty topics, and no consumer group or committed offset.'

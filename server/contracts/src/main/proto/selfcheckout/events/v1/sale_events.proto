@@ -1,0 +1,30 @@
+// Design baseline for server/contracts/src/main/proto/selfcheckout/events/v1/sale_events.proto (N2).
+// Carried in an EventEnvelope on selfcheckout.sale-completed.v1; record key = routing_key = transaction_id.
+syntax = "proto3";
+
+package selfcheckout.events.v1;
+
+option java_package = "selfcheckout.events.v1";
+option java_multiple_files = true;
+
+// One SKU of a completed sale.
+message SoldLine {
+  string sku = 1;
+  // Units of this SKU in the completed basket; always >= 1.
+  int32 quantity = 2;
+}
+
+// Transaction Service recorded that this transaction durably reached COMPLETED (Principle X).
+// Recorded in T3 together with the completion; exactly one per sale. Carries no recipient data (FR-004).
+message SaleCompleted {
+  // The stable sale identity: equal to transaction_id (N2).
+  string sale_id = 1;
+  string transaction_id = 2;
+  // The checkout attempt that completed.
+  int32 attempt_number = 3;
+  // Transaction's completed_at, in epoch milliseconds; used for latency only, never for correctness.
+  int64 completed_at_ms = 4;
+  string station_id = 5;
+  // Unique SKUs in ascending order.
+  repeated SoldLine lines = 6;
+}

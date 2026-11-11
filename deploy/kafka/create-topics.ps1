@@ -1,7 +1,8 @@
 ﻿<#
 .SYNOPSIS
-    Creates the four topics of the event catalog idempotently and verifies them (research D4,
-    specs/006-event-based-architecture/contracts/event-catalog.md "Topics").
+    Creates the five fixed topics of the event catalog idempotently and verifies them (research D4,
+    specs/006-event-based-architecture/contracts/event-catalog.md "Topics", and
+    specs/007-notification-service/contracts/sale-completed-event.md).
 
 .DESCRIPTION
     Waits for the broker on 127.0.0.1:19092, then creates any topic that is missing:
@@ -9,6 +10,8 @@
       selfcheckout.checkout.v1          16 partitions, cleanup.policy=delete,  retention.ms=604800000
       selfcheckout.checkout-outcome.v1  16 partitions, cleanup.policy=delete,  retention.ms=604800000
       selfcheckout.scan-accepted.v1     1 partition,   cleanup.policy=delete,  retention.ms=604800000
+      selfcheckout.sale-completed.v1    16 partitions, cleanup.policy=delete,  retention.ms=604800000
+    Notification Service creates its per-subscriber channel topics itself; they are not listed here.
     Every topic also pins segment.bytes=1073741824 and segment.ms=Long.MAX_VALUE, so its segments
     never roll on Windows (deploy/kafka/server.properties). An existing topic is left as it is.
     Afterwards every topic's partition count, replication factor, and configuration are compared

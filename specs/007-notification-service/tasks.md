@@ -51,14 +51,14 @@ These rules bind every task below.
   - Show the user the working-tree diff of the principles and governance text (excluding the Sync Impact Report), and get explicit approval of that exact text before committing.
   - Remove the leading `<!-- Sync Impact Report … -->` comment block, as Governance requires, leaving every principle unchanged.
   - Commit it alone, or together with `specs/007-notification-service/`, before any code change of this feature.
-- [ ] T002 Run CP0 on the unmodified feature 006 implementation at commit `4a91686`, before any code change:
+- [X] T002 Run CP0 on the unmodified feature 006 implementation at commit `4a91686`, before any code change:
   - Build with `server/build.sh` and `load-client/build.sh`.
   - Run `server/benchmark-event-based.ps1` with the shared-machine settings: twice with `-Workload default` (labels `cp0-default-1`, `cp0-default-2`) and once with `-Workload stress` (label `cp0-stress-1`), writing output under `load-client/reports/notification-service/cp0/`.
   - Record `totalTransactions`, per-operation p95/p99, and the invariant results in a new `load-client/reports/notification-service/checkpoints.md`.
-- [ ] T003 [P] Add `server/contracts/src/main/proto/selfcheckout/events/v1/sale_events.proto` and `notification_events.proto`, copied field-for-field from `specs/007-notification-service/contracts/proto/`. Run `server/build.sh contracts` and confirm that `SaleCompleted`, `SoldLine`, and `SubscriberNotified` are generated in `out/contracts.jar`.
-- [ ] T004 [P] Copy the two `.proto` files into `server/tests/messaging/baseline/` as their version-1 baselines, next to the 006 baselines.
-- [ ] T005 [P] Add the topic `selfcheckout.sale-completed.v1` to `deploy/kafka/create-topics.ps1`: 16 partitions, `cleanup.policy=delete`, and the 006 Windows pins `segment.bytes=1073741824` and `segment.ms=9223372036854775807`. Verify it alongside the four 006 topics, and extend the default `-Ports` of `Test-ServicePortAnswers` in `deploy/kafka/kafka-tools.ps1`, and the port checks in `deploy/kafka/reset-topics.ps1`, from `8081, 8082, 8083` to `8081, 8082, 8083, 8084`.
-- [ ] T006 [P] Create the empty directories `server/notification/src/{api,notification,database,messaging}/`, `subscriber-client/{src,test}/`, `db/notification/`, and `load-client/reports/notification-service/`, each with a `.gitkeep` where it would otherwise be empty.
+- [X] T003 [P] Add `server/contracts/src/main/proto/selfcheckout/events/v1/sale_events.proto` and `notification_events.proto`, copied field-for-field from `specs/007-notification-service/contracts/proto/`. Run `server/build.sh contracts` and confirm that `SaleCompleted`, `SoldLine`, and `SubscriberNotified` are generated in `out/contracts.jar`.
+- [X] T004 [P] Copy the two `.proto` files into `server/tests/messaging/baseline/` as their version-1 baselines, next to the 006 baselines.
+- [X] T005 [P] Add the topic `selfcheckout.sale-completed.v1` to `deploy/kafka/create-topics.ps1`: 16 partitions, `cleanup.policy=delete`, and the 006 Windows pins `segment.bytes=1073741824` and `segment.ms=9223372036854775807`. Verify it alongside the four 006 topics, and extend the default `-Ports` of `Test-ServicePortAnswers` in `deploy/kafka/kafka-tools.ps1`, and the port checks in `deploy/kafka/reset-topics.ps1`, from `8081, 8082, 8083` to `8081, 8082, 8083, 8084`.
+- [X] T006 [P] Create the empty directories `server/notification/src/{api,notification,database,messaging}/`, `subscriber-client/{src,test}/`, `db/notification/`, and `load-client/reports/notification-service/`, each with a `.gitkeep` where it would otherwise be empty.
 
 ---
 

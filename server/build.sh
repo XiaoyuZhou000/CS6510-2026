@@ -82,7 +82,7 @@ build_service() {
 
 case "${1:-all}" in
   all)
-    [ "$#" -eq 0 ] || { echo "Usage: ./build.sh [transaction|inventory|analytics]" >&2; exit 2; }
+    [ "$#" -eq 0 ] || { echo "Usage: ./build.sh [contracts|transaction|inventory|analytics]" >&2; exit 2; }
     build_contracts
     build_common
     build_service transaction
@@ -90,13 +90,20 @@ case "${1:-all}" in
     build_service analytics
     ;;
   transaction|inventory|analytics)
-    [ "$#" -eq 1 ] || { echo "Usage: ./build.sh [transaction|inventory|analytics]" >&2; exit 2; }
+    [ "$#" -eq 1 ] || { echo "Usage: ./build.sh [contracts|transaction|inventory|analytics]" >&2; exit 2; }
     build_contracts
     build_common
     build_service "$1"
     ;;
+  contracts)
+    # Only the generated event classes and the messaging runtime (out/contracts.jar, lib/messaging/),
+    # which the subscriber test application also needs (007 contracts/subscriber-client-and-reconciliation.md).
+    [ "$#" -eq 1 ] || { echo "Usage: ./build.sh [contracts|transaction|inventory|analytics]" >&2; exit 2; }
+    build_contracts
+    echo "Built out/contracts.jar"
+    ;;
   *)
-    echo "Usage: ./build.sh [transaction|inventory|analytics]" >&2
+    echo "Usage: ./build.sh [contracts|transaction|inventory|analytics]" >&2
     exit 2
     ;;
 esac

@@ -20,7 +20,7 @@ Every command below runs from the repository root in Windows PowerShell 5.1 or P
 | `server.properties` | The committed broker configuration. `start-broker.ps1` adds `log.dirs` and the optional flush setting. |
 | `start-broker.ps1` | Writes the effective configuration, formats the log on first use, starts the broker, and creates the topics |
 | `stop-broker.ps1` | Stops the broker |
-| `create-topics.ps1` | Waits for the broker, creates the four topics idempotently, and verifies them |
+| `create-topics.ps1` | Waits for the broker, creates the five fixed topics idempotently (006's four plus `selfcheckout.sale-completed.v1`), and verifies them |
 | `status.ps1` | Broker reachability, topic partitions and end offsets, and consumer-group lag (`-Json` for the benchmark harness) |
 | `reset-topics.ps1` | Empties the broker for a baseline |
 | `kafka-tools.ps1` | Helpers dot-sourced by the scripts above |
@@ -34,7 +34,7 @@ Every command below runs from the repository root in Windows PowerShell 5.1 or P
 | Restart | `stop-broker.ps1`, then `start-broker.ps1` | The log, the topics, and the committed offsets survive |
 | Status | `./deploy/kafka/status.ps1` (or `-Json`) | Prints reachability, each topic's partitions and end offsets, and the lag of `inventory-checkout`, `transaction-checkout-outcome`, and `analytics-scan-ingest`. A group that does not exist yet is reported as `absent`. It takes about 4 s, because each Kafka tool starts its own JVM. |
 | Create topics | `./deploy/kafka/create-topics.ps1 [-TopicPrefix <p>]` | Idempotent. `-TopicPrefix` matches the services' `KAFKA_TOPIC_PREFIX`. Exits nonzero if an existing topic differs from the catalog. |
-| Reset | `./deploy/kafka/reset-topics.ps1` | Refuses to run while any of ports 8081–8083 answers. Stops the broker, deletes its log directory, and starts it again, which reformats the log and recreates the four topics. Then it verifies that every end offset is 0 and that no consumer group remains. `db/reset-baseline.ps1` calls it. |
+| Reset | `./deploy/kafka/reset-topics.ps1` | Refuses to run while any of ports 8081–8084 answers. Stops the broker, deletes its log directory, and starts it again, which reformats the log and recreates the five fixed topics. Then it verifies that every end offset is 0 and that no consumer group remains. `db/reset-baseline.ps1` calls it. |
 | Full removal | `stop-broker.ps1`, then delete `KAFKA_DATA_DIR` | Removes every record |
 
 ## State directory
