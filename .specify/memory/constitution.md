@@ -9,10 +9,11 @@ prior iterations remain in force unless a principle below explicitly replaces th
 
 ### I. Independent Microservices and Domain Ownership (NON-NEGOTIABLE)
 
-- The system MUST consist of three independently deployable microservices:
+- The system MUST consist of four independently deployable microservices:
   - **Transaction Service** owns the transaction lifecycle, shopping baskets, accepted
-    scans, captured prices, transaction states, and checkout Saga state. It owns the
-    durable records required for transaction recovery and idempotency.
+    scans, captured prices, transaction states, checkout Saga state, and the record of
+    completed sales. It owns the durable records required for transaction recovery and
+    idempotency.
   - **Inventory Service** owns the product catalog, product availability, stock
     quantities, and inventory reservations or deductions. It is the sole authority for
     inventory mutations, MUST prevent overselling, and MUST apply inventory operations
@@ -20,6 +21,13 @@ prior iterations remain in force unless a principle below explicitly replaces th
   - **Analytics Service** owns accepted-scan analytics, event consumption progress,
     sliding/hopping window computation, ranking, and persisted analytics results. It
     MUST operate independently of synchronous checkout processing.
+  - **Notification Service** owns subscribers and their identities, durable
+    subscription data, recipient selection, notification delivery records, delivery
+    retries, and notification idempotency. It MUST operate independently of synchronous
+    checkout processing.
+- Transaction Service MUST NOT determine notification recipients, read subscription
+  data, or record whom to notify. It reports completed sales; Notification Service alone
+  decides who is notified.
 - Each service MUST be independently buildable, startable, stoppable, and deployable,
   with its own runtime, entry point, configuration, and port.
 - Service responsibilities MUST remain clearly separated. Business logic and persistence
@@ -30,17 +38,18 @@ prior iterations remain in force unless a principle below explicitly replaces th
   used but MUST NOT contain cross-domain business logic or create runtime dependencies
   between services.
 - Additional services (other than an API Gateway and the message broker) MUST have a
-  documented business need.
+  documented business need. A separate logging microservice is not required.
 
 Rationale: Capability ownership is what makes independent deployment and independent
-data stores meaningful.
+data stores meaningful. Keeping recipient selection out of Transaction Service keeps the
+checkout path unaware of who listens to it.
 
 ### II. Database per Service (NON-NEGOTIABLE)
 
-- Each microservice MUST own an independent data store. For local development, separate
-  MySQL databases or schemas within one MySQL instance MAY be used, provided ownership
-  and access isolation are strictly enforced (e.g., separate schemas and per-service
-  credentials limited to the owning schema).
+- Each of the four microservices MUST own an independent data store. For local
+  development, separate MySQL databases or schemas within one MySQL instance MAY be
+  used, provided ownership and access isolation are strictly enforced (e.g., separate
+  schemas and per-service credentials limited to the owning schema).
 - Each service MUST access only its own database. Direct SQL queries, joins, foreign
   keys, or transactions spanning databases owned by different services are prohibited.
   No service may directly read or modify another service's tables.
@@ -56,12 +65,16 @@ data stores meaningful.
   after that service restarts without manual reconstruction. In-memory caches MAY
   accelerate access but MUST NOT be the sole record of acknowledged state. The message
   broker MUST NOT be the sole record of any service's business state.
-- In-process mechanisms such as locks, caches, wait registries, and retry schedules MAY
-  be used as performance and coordination optimizations, but MUST NOT be the sole
-  authority for durability, idempotency, inventory correctness, or cross-instance
-  consistency; durable state, database guards, and idempotent operations remain
-  authoritative. All safety guarantees MUST hold across process crashes, restarts, and
-  multiple concurrent instances of a service.
+- In-process mechanisms such as locks, caches, wait registries, indexes, and retry
+  schedules MAY be used as performance and coordination optimizations, but MUST NOT be
+  the sole authority for durability, idempotency, inventory correctness, recipient
+  selection, or cross-instance consistency; durable state, database guards, and
+  idempotent operations remain authoritative. All safety guarantees MUST hold across
+  process crashes, restarts, and multiple concurrent instances of a service.
+- An in-memory SKU-to-subscriber index in Notification Service MAY accelerate recipient
+  lookup, but it MUST be derived only from committed subscription data, MUST be
+  rebuildable from that data after a restart, and MUST NOT reflect a subscription change
+  whose database update failed or was rolled back.
 
 Rationale: Independent data ownership is the defining property of the microservice
 design and removes hidden coupling through shared tables.
@@ -80,7 +93,9 @@ design and removes hidden coupling through shared tables.
   introduced as a new versioned type. Messages MUST NOT expose database implementation
   details (table names, SQL, row identifiers not part of the domain).
 - Each message type MUST have exactly one owning producer service. Topics, queues, or
-  exchanges, their routing keys, and their consumer groups MUST be documented.
+  exchanges, their routing keys, and their consumer groups MUST be documented. Adding a
+  consumer (e.g., Notification Service consuming completed sales) MUST NOT require
+  changes to existing consumers.
 - Ordering MUST be guaranteed per routing key where business rules depend on order
   (e.g., per transaction for Saga messages, and one defined order for analytics scans).
   The plan MUST state each ordering guarantee and how the chosen broker provides it.
@@ -102,10 +117,15 @@ schemas, keys, and idempotent consumers keep that decoupling safe to retry.
   endpoints, methods, request and response formats, status codes, and observable
   business behavior as specified in `spec/self-checkout-openapi.yaml` MUST be preserved.
   That OpenAPI specification remains authoritative for external compatibility.
-- Every external endpoint MUST remain synchronous. A service MAY wait for the events it
-  needs before responding, but the client MUST NOT observe asynchronous internals.
-- The Load Client MUST run without source modifications. The event-based redesign MUST
-  NOT require any client-side change.
+- Every existing external endpoint MUST remain synchronous. A service MAY wait for the
+  events it needs before responding, but the client MUST NOT observe asynchronous
+  internals.
+- The Load Client MUST run without source modifications and MUST generate the sales used
+  for notification verification and benchmarks. No architecture change, including the
+  Notification Service, MAY require a client-side change.
+- Notification Service MAY expose new external endpoints (e.g., for subscription
+  management or delivery inspection). They MUST be purely additive, MUST be documented
+  in a versioned contract, and MUST NOT alter, shadow, or overlap any existing endpoint.
 - An API Gateway such as Nginx MAY expose the existing REST interface and route requests
   to the owning service. Routing MUST be documented in deployment configuration.
 - Broker details MUST remain invisible to the external client. Internal errors,
@@ -150,7 +170,10 @@ protects existing clients.
   succeed.
 - The client MUST receive a success response only after the Saga reaches a committed
   completed state in Transaction Service. Repeated completion requests MUST return the
-  established result without re-publishing effective inventory operations.
+  established result without re-publishing effective inventory operations or
+  completed-sale events.
+- Notification is not a Saga step. Checkout completion MUST NOT wait for, depend on, or
+  be compensated because of Notification Service processing.
 
 Rationale: With separate databases and asynchronous messages, correctness depends on
 explicit, recoverable coordination rather than an implicit shared transaction.
@@ -164,6 +187,10 @@ explicit, recoverable coordination rather than an implicit shared transaction.
   `initial_stock - final_stock` MUST equal the quantity sold in completed transactions,
   and final stock MUST NOT be negative, including after redelivery, crashes, broker
   restarts, and compensations.
+- A sale exists only once a checkout has durably reached the COMPLETED state in
+  Transaction Service following a successful stock deduction. Scans, pending attempts,
+  rejected checkouts, retries, and duplicate completion requests MUST NOT create a sale
+  or an additional effective sale.
 - Each transaction MUST end in exactly one terminal outcome as observed by clients, and
   that outcome MUST agree with Inventory Service's recorded effects.
 - Guarantees about completed transactions, final stock, and agreement between services
@@ -184,8 +211,8 @@ of how the work is distributed.
   within the same local transaction as the state change that causes it (a transactional
   outbox). A relay MUST publish outbox entries to the broker with retries and MUST mark
   them published only after the broker confirms receipt. Publishing directly to the
-  broker without a durable record is prohibited for messages that affect business state
-  or analytics.
+  broker without a durable record is prohibited for messages that affect business state,
+  analytics, or notifications.
 - Accepted-scan events MUST be recorded by Transaction Service within the local
   transaction that accepts the scan and delivered to Analytics Service only through the
   broker. Analytics Service MUST NOT read Transaction Service's database.
@@ -207,6 +234,9 @@ of how the work is distributed.
 - Analytics MAY be eventually consistent with accepted scans; the plan MUST define the
   visibility delay and failure behavior. Analytics or broker unavailability MUST NOT
   block Scan, and Analytics unavailability MUST NOT block checkout.
+- Notification traffic MUST NOT change analytics inputs or results, and Notification
+  Service unavailability, backlog, or delivery failure MUST NOT block Scan, checkout, or
+  analytics.
 
 Rationale: Outbox publishing and idempotent consumption preserve correctness without
 coupling the checkout path to the availability of any other component.
@@ -217,26 +247,29 @@ coupling the checkout path to the availability of any other component.
   SHOULD avoid redundant queries, unnecessary synchronous writes, excessive polling of
   outboxes, and chatty per-item messages where batching preserves the guarantees above.
   Required durable writes are not optional.
-- The system MUST use exactly one message broker product (e.g., Kafka, RabbitMQ, or
-  ActiveMQ). The choice, its delivery and ordering guarantees, persistence settings, and
-  rejected alternatives MUST be recorded in the feature's research. The broker MUST be
-  configured for durable message storage so that acknowledged publishes survive a broker
-  restart.
+- Apache Kafka, as established in the event-based iteration, MUST remain the single
+  message broker. No second broker or other messaging middleware MAY be added, including
+  for subscriber channels. Kafka's delivery and ordering guarantees, persistence
+  settings, and any new topics MUST be recorded in the feature's research or plan. The
+  broker MUST be configured for durable message storage so that acknowledged publishes
+  survive a broker restart.
 - Connection pooling, producer and consumer reuse, indexing, batching, and local
   replicas SHOULD be chosen to sustain the default and stress workloads. Performance
   results MUST include throughput, error rate, and tail latency for comparison with
   prior iterations.
-- Infrastructure beyond the three services, their databases, the message broker, and an
-  optional API Gateway (e.g., caches, service meshes, a second broker) MUST NOT be added
-  without a concrete requirement and documented benefit. Simple Java JARs are
-  acceptable; Docker MAY be used when it simplifies deployment.
-- Each service and the broker MUST document build or installation, startup, ports,
-  configuration, database or storage connection, topics or queues, and dependencies.
-  Restarting any single service or the broker MUST preserve correctness of the overall
-  system.
+- Infrastructure beyond the four services, their databases, Kafka, an optional API
+  Gateway, and the subscriber test application (Principle IX) (e.g., caches, service
+  meshes, a logging service, a second broker) MUST NOT be added without a concrete
+  requirement and documented benefit. Simple Java JARs are acceptable; Docker MAY be
+  used when it simplifies deployment.
+- Each service, the broker, and the subscriber test application MUST document build or
+  installation, startup, ports, configuration, database or storage connection, topics or
+  queues, and dependencies. Restarting any single service or the broker MUST preserve
+  correctness of the overall system.
 
-Rationale: The broker is now required infrastructure. Everything else must still earn
-its place, and operation must stay repeatable.
+Rationale: Kafka is required infrastructure already proven in the event-based
+iteration. Everything else must still earn its place, and operation must stay
+repeatable.
 
 ### IX. Verification and Benchmark Evidence
 
@@ -254,56 +287,135 @@ its place, and operation must stay repeatable.
   duplicate delivery and restart of Transaction Service, Analytics Service, or the
   broker.
 - Concurrent completion tests MUST reconcile final stock with completed sales.
-- The unchanged Load Client MUST run against the actual event-based deployment from a
-  reproducible baseline. Two genuine JSON reports MUST be committed: one with default
-  parameters and one using `java -cp out Main --stations=100 --duration=120`. Results
-  MUST NOT be fabricated.
-- An architecture diagram MUST be committed. It MUST show the API Gateway, the three
-  microservices, each service's database, the message broker, and the topics or queues
-  with their producers and consumers.
+- Notification tests MUST cover concurrent sales, subscription changes concurrent with
+  sales, failed subscription updates, duplicate and redelivered sale events, delivery
+  failure and retry, restarts of Transaction Service, Notification Service, and the
+  broker, and recovery to a fully delivered state afterwards.
+- A separate subscriber test application, not part of any service, MUST support a
+  configurable number of subscriber threads, reproducible SKU assignments derived from a
+  recorded random seed, and structured records of every received notification sufficient
+  to identify the subscriber, sale, SKU, quantity, notification identity, and receipt
+  time.
+- After the system drains, verification MUST independently reconcile four sources:
+  completed sales, the applicable subscription snapshot (Principle XI), Notification
+  Service delivery records, and subscriber receipt records. It MUST report missing,
+  unexpected, and duplicate notifications and quantity mismatches, and MUST fail on any
+  mismatch.
+- The unchanged Load Client MUST run against the actual deployment, including
+  Notification Service, from a reproducible baseline. Two genuine JSON reports MUST be
+  committed: one with default parameters and one using
+  `java -cp out Main --stations=100 --duration=120`. Results MUST NOT be fabricated.
+- Notification performance evidence MUST be measured with the unchanged Load Client
+  generating sales at no fewer than three distinct subscriber counts, including 100. For
+  each count it MUST report completed sales per second, notifications per second,
+  end-to-end notification latency (p50, p95, p99) from sale completion to subscriber
+  receipt, delivery failures, and backlog or consumer lag, together with the random seed
+  and settings used. Results MUST NOT be fabricated.
+- An architecture diagram MUST be committed. It MUST show the API Gateway, the four
+  microservices, each service's database, the message broker, the topics or queues with
+  their producers and consumers, and the subscriber test application with its channels.
 
 Rationale: Distributed correctness claims require executable evidence under the same
-client and workloads used for earlier iterations.
+client and workloads used for earlier iterations, and notification claims require an
+independent count of what was owed against what was received.
+
+### X. Completed-Sale Events (NON-NEGOTIABLE)
+
+- Transaction Service MUST record a versioned SaleCompleted event in the same local
+  database transaction that moves a checkout to COMPLETED, and MUST publish it only
+  through its outbox (Principle VII).
+- A SaleCompleted event MUST carry a stable sale identity and the sold SKU quantities of
+  that sale. The same sale MUST always carry the same sale identity, including when the
+  event is re-published or redelivered.
+- Exactly one effective SaleCompleted event MUST exist per completed sale. Scans,
+  pending attempts, rejected checkouts, Saga retries, and duplicate completion requests
+  MUST NOT record additional SaleCompleted events or additional effective sales.
+- SaleCompleted MUST describe the sale only. It MUST NOT carry recipients, subscription
+  data, or any decision about whom to notify.
+
+Rationale: Notifications are only as correct as the sale record they are derived from;
+tying the event to the completing transaction makes every sale reportable exactly once.
+
+### XI. Subscriptions and Notification Delivery (NON-NEGOTIABLE)
+
+- Notification Service MUST support at least 100 subscribers. Each subscriber
+  MUST have a stable identity, MUST be able to subscribe to one or more SKUs, and MUST
+  have its own independent asynchronous communication channel, so that delivery to one
+  subscriber does not wait on or depend on delivery to another.
+- A subscription change becomes effective only after it commits in Notification
+  Service's database. A change whose database update fails MUST NOT become effective,
+  including in any in-memory index (Principle II).
+- The specification MUST define, as one explicit rule, which committed subscription
+  state determines a sale's recipients when subscriptions change concurrently with that
+  sale. Notification Service MUST record enough information to reproduce the selection
+  it applied, and verification MUST apply the same rule.
+- For each completed sale, each recipient selected under that rule MUST receive exactly
+  one effective notification per sold SKU to which it is subscribed, carrying the
+  correct quantity for that SKU in that sale. A notification's identity MUST be stable
+  for its sale, SKU, and subscriber.
+- Broker and channel delivery MAY be at least once, but duplicate events, redeliveries,
+  restarts, and retries MUST NOT create duplicate effective notifications. Subscriber
+  receipt records MUST retain redeliveries so verification can distinguish a redelivery
+  from a duplicate effective notification.
+- Recipient selection results and per-notification delivery state MUST be durable in
+  Notification Service's database before the triggering sale event is acknowledged.
+- Failed delivery MUST remain observable and retryable with a bounded, documented retry
+  policy, and MUST end in either a delivered state or an observable failed or parked
+  state. Notifications MUST NOT be silently lost.
+
+Rationale: Owning subscriptions, selection, and delivery state in one service makes
+"who should have been told what" a durable, auditable fact rather than a side effect of
+timing.
 
 ## Architectural Constraints
 
-- This iteration MUST evolve from the existing microservices implementation (feature
-  005) through incremental refactoring. Tested business logic, HTTP handlers,
-  persistence adapters, Saga state handling, and analytics filters SHOULD be reused
-  where practical. gRPC interfaces between services MUST be replaced by broker messages
-  and then removed. Unrelated feature changes SHOULD be avoided.
+- This iteration MUST evolve from the event-based implementation (feature 006,
+  `event-based-architecture` branch) through incremental refactoring. Existing services,
+  schemas, outboxes, Saga handling, and analytics filters SHOULD be reused where
+  practical. Changes to Transaction Service SHOULD be limited to what Principle X
+  requires. Unrelated feature changes SHOULD be avoided.
 - Endpoint ownership: Transaction Service serves `/transactions/**`; Inventory Service
   serves `/items` and `/inventory/low-stock`; Analytics Service serves
-  `/analytics/popular-items`. Each owning service's database is the source of truth for
+  `/analytics/popular-items`; Notification Service serves only its own additive
+  endpoints (Principle IV). Each owning service's database is the source of truth for
   that data.
 - Any catalog or price replica in Transaction Service MUST be populated and kept current
   through events published by Inventory Service, including its initial load.
 - Each service MUST use its own configurable database or schema and credentials. Any
-  data reset or seeding used for benchmarks MUST be performed per service through its
-  own interfaces or scripts, never by one service writing another's data. The broker's
-  topics or queues MUST be reset or drained as part of the same reproducible baseline.
+  data reset or seeding used for benchmarks or verification, including subscriptions and
+  delivery records, MUST be performed per service through its own interfaces or scripts,
+  never by one service writing another's data. The broker's topics or queues and the
+  subscriber test application's receipt records MUST be reset or drained as part of the
+  same reproducible baseline.
 - The established 2,000-item, 10,000-units-per-item baseline MUST be preserved for
-  comparable runs. Default and stress reports MUST identify their settings and the
-  event-based deployment used.
+  comparable runs. Default, stress, and notification reports MUST identify their
+  settings, subscriber count, random seed where applicable, and the deployment used.
+- Concrete endpoints, schemas, topic layout, channel mechanisms, and implementation
+  steps belong in the specification and plan, not in this constitution.
 
 ## Development Workflow & Quality Gates
 
 - Work MUST follow constitution → specification → plan → tasks → implementation. The
-  specification and plan MUST trace service ownership, data stores, broker choice,
-  message schemas, topics or queues, Saga steps with their compensations or
-  forward-recovery rules, outbox relays, gateway routing, and deployment back to these
-  principles.
+  specification and plan MUST trace service ownership, data stores, broker use, message
+  schemas, topics or queues, Saga steps with their compensations or forward-recovery
+  rules, outbox relays, gateway routing, subscriber channels, and deployment back to
+  these principles.
 - Plans MUST define message ordering keys, idempotency keys, retry and dead-letter
   policies, Saga states and recovery rules, the wait and timeout behavior of synchronous
   endpoints that depend on events, replicated-data consistency models, consumption
-  checkpoints, and the analytics visibility delay.
+  checkpoints, the analytics visibility delay, the SaleCompleted schema version, the
+  recipient-selection rule, notification identity and delivery states, the notification
+  retry policy, and how in-memory subscription indexes are rebuilt.
 - Reviews MUST verify independent build and restart, no cross-database access, no
   synchronous service-to-service calls, outbox use for every published message,
-  idempotent consumers, inventory invariants, unchanged REST behavior, and loss-free,
-  duplicate-free analytics.
-- Completion requires passing relevant automated tests, producing both reproducible
-  benchmark JSON files from the event-based deployment, and committing the architecture
-  diagram.
+  idempotent consumers, inventory invariants, unchanged REST behavior, loss-free and
+  duplicate-free analytics, that Transaction Service does not select recipients, and
+  exactly one effective notification per owed sale, SKU, and subscriber.
+- Completion requires passing relevant automated tests, a passing post-drain
+  notification reconciliation, both reproducible Load Client JSON reports, the
+  notification performance evidence, and the updated architecture diagram.
+- Presentation materials and video production are outside the scope of this
+  constitution and are not completion gates.
 
 ## Governance
 
@@ -318,5 +430,13 @@ client and workloads used for earlier iterations.
 - Compliance reviews MUST prioritize correctness, data ownership, compatibility,
   recoverability, and independent deployability. Implementation choices belong in the
   relevant specification or plan unless a principle requires them.
+- Amendment 7.0.0 (2026-11-11): added Notification Service as an independently
+  deployable fourth service with its own database (Principles I, II, IV, V, VII);
+  defined completed sales and the SaleCompleted event (Principles VI, X); added
+  subscription and notification delivery guarantees (Principle XI); fixed Kafka as the
+  single broker (Principle VIII); and extended verification and benchmark evidence
+  (Principle IX). Rationale: the notification feature adds a new consumer domain without
+  weakening any checkout, inventory, analytics, REST API, Load Client, or recovery
+  guarantee.
 
-**Version**: 6.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-10-28
+**Version**: 7.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-11-11

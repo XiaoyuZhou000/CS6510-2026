@@ -1,0 +1,24 @@
+// Design baseline for server/contracts/src/main/proto/selfcheckout/events/v1/notification_events.proto (N7).
+// Carried in an EventEnvelope on the subscriber's own channel topic, selfcheckout.notify.<subscriber_id>.v1;
+// record key = routing_key = subscriber_id; envelope event_id = notification_id; producer = "notification".
+syntax = "proto3";
+
+package selfcheckout.events.v1;
+
+option java_package = "selfcheckout.events.v1";
+option java_multiple_files = true;
+
+// Notification Service notifies one subscriber that one subscribed SKU was sold in one sale.
+message SubscriberNotified {
+  // Stable for (sale_id, sku, subscriber_id); identical on every delivery attempt (FR-014).
+  string notification_id = 1;
+  string subscriber_id = 2;
+  string sale_id = 3;
+  string sku = 4;
+  // Units of sku sold in this sale (FR-013).
+  int32 quantity = 5;
+  // From SaleCompleted.completed_at_ms; the start of end-to-end latency (N9).
+  int64 completed_at_ms = 6;
+  // The subscription history version the selection used (rule 4); informational for subscribers.
+  int64 subscription_version = 7;
+}
