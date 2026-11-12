@@ -33,9 +33,15 @@ class MicroserviceBoundaryTest {
      * The only business components allowed to hold in-memory state such as maps (Implementation Rule 4), plus
      * feature 006's catalog version buffer in {@code CatalogEventHandler} (data-model "In-memory projections").
      */
+    /**
+     * The process-local structures each service may hold, none of them authoritative. Notification's are those of
+     * 007 data-model.md section 4: the recipient index, the catalog SKU set, the channel cache, the dispatcher's
+     * lanes, and the charging tracker.
+     */
     private static final Set<String> DESIGNATED_STATE = Set.of("TransactionStateCache", "TransactionLocks",
             "ProductCatalogReplica", "SettlementRegistry", "RecoverySchedule", "CatalogCache", "ProductNameMap",
-            "CatalogEventHandler");
+            "CatalogEventHandler", "SubscriptionIndex", "KnownSkus", "Channels", "NotificationDispatcher",
+            "ChargingTracker");
     private static final Pattern KAFKA_REFERENCE = Pattern.compile("\\borg\\.apache\\.kafka\\.");
 
     /** Kafka is the one broker (FR-007); a cache or a second broker product stays off the classpath. */

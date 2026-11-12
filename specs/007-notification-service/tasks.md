@@ -183,69 +183,69 @@ These rules bind every task below.
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T036 [P] [US2] Write `server/tests/unit/notification/SubscriptionIndexTest.java`:
+- [X] T036 [P] [US2] Write `server/tests/unit/notification/SubscriptionIndexTest.java`:
   - snapshots are immutable, with SKUs mapped to sorted subscriber IDs;
   - `apply(change)` requires `change.version == index.version + 1`, and a gap is reported for catch-up;
   - `resulting_skus` replaces the subscriber's set, and `CANCEL` removes it;
   - a rebuild from rows plus the clock version is equal to incremental application.
-- [ ] T037 [P] [US2] Write `server/tests/unit/notification/SelectionPlanTest.java`: lines × index snapshot give exactly one planned notification per (SKU, subscriber) for subscribed SKUs only, with the line's quantity and `EventIds.notificationId`; a sale with no subscribed SKU gives zero notifications and a selection with `recipient_count = 0`; `recipient_count` counts distinct subscribers.
-- [ ] T038 [P] [US2] Write `server/tests/unit/notification/KnownSkusTest.java`: the set is empty and `loaded() == false` until a `CatalogSnapshotPublished` whose `product_count` matches the received items of its version; a newer version replaces the set; stale items are ignored.
-- [ ] T039 [P] [US2] Write `server/tests/database/JdbcSubscriptionStoreTest.java` for registration:
+- [X] T037 [P] [US2] Write `server/tests/unit/notification/SelectionPlanTest.java`: lines × index snapshot give exactly one planned notification per (SKU, subscriber) for subscribed SKUs only, with the line's quantity and `EventIds.notificationId`; a sale with no subscribed SKU gives zero notifications and a selection with `recipient_count = 0`; `recipient_count` counts distinct subscribers.
+- [X] T038 [P] [US2] Write `server/tests/unit/notification/KnownSkusTest.java`: the set is empty and `loaded() == false` until a `CatalogSnapshotPublished` whose `product_count` matches the received items of its version; a newer version replaces the set; stale items are ignored.
+- [X] T039 [P] [US2] Write `server/tests/database/JdbcSubscriptionStoreTest.java` for registration:
   - the clock is locked `FOR UPDATE`;
   - a new subscriber gives `version + 1`, one `subscription_change` (`REGISTER`), and `subscription` rows;
   - an identical repeat gives no new row and returns `updated_version`;
   - a different SKU set for an active subscriber gives `SUBSCRIBER_EXISTS` and no change;
   - `FaultHooks` `notification.subscription.beforeCommit:throw` leaves no row and the clock unchanged.
-- [ ] T040 [P] [US2] Write `server/tests/database/JdbcSelectionStoreTest.java`:
+- [X] T040 [P] [US2] Write `server/tests/database/JdbcSelectionStoreTest.java`:
   - the selection reads the clock `FOR SHARE` and records that version;
   - a duplicate `sale_id` returns `ALREADY_SELECTED` and inserts nothing;
   - 1,201 notifications are inserted in three statements (chunks of ≤ 500);
   - a zero-recipient sale inserts only `sale_selection`;
   - the catch-up query returns `subscription_change` rows in version order.
-- [ ] T041 [P] [US2] Write `server/tests/database/JdbcNotificationStoreTest.java`:
+- [X] T041 [P] [US2] Write `server/tests/database/JdbcNotificationStoreTest.java`:
   - `markDelivered(ids, at)` updates only `PENDING` rows and sets `delivered_at`;
   - `recordFailures` updates `attempt_count`, the charged or uncharged count, `last_error`, and `next_attempt_at`;
   - `park` sets `PARKED` and `parked_at`;
   - `selectDue(now, 1000)` orders by `next_attempt_at` and excludes `DELIVERED` and `PARKED`;
   - both CHECK constraints reject inconsistent rows.
-- [ ] T042 [P] [US2] Write `server/tests/unit/notification/NotificationDispatcherTest.java` with `CountingRecordSender` and a manual clock:
+- [X] T042 [P] [US2] Write `server/tests/unit/notification/NotificationDispatcherTest.java` with `CountingRecordSender` and a manual clock:
   - the immediate path sends after intake;
   - lanes hold at most 64 in flight per subscriber and are served round-robin;
   - confirmations are batched (20 ms or 200 IDs);
   - failures schedule `min(200 ms × 2^n, 5 s)`;
   - the sweep re-sends due rows after a simulated restart with the same `notification_id`;
   - a channel that is not ready is provisioned before its first send.
-- [ ] T043 [P] [US2] Write `server/tests/contract/NotificationSubscribersEndpointTest.java` for `POST /notifications/subscribers` and `GET /notifications/subscribers/{id}`, with every row of [contracts/notification-http.md](contracts/notification-http.md): 201, 200 for a repeat, 409 `SUBSCRIBER_EXISTS`, 400 `INVALID_SUBSCRIBER_ID`, 400 `MISSING_SKUS`, 400 `UNKNOWN_SKU`, 400 `INVALID_REQUEST`, 500 while the catalog is not loaded, 404 `SUBSCRIBER_NOT_FOUND`, the validation precedence, and the subscriber view fields.
-- [ ] T044 [P] [US2] Write `server/tests/integration/NotificationFlowTest.java` on `InProcessCheckout` + `InProcessNotification` + `InMemoryEventBus`, covering spec US2 acceptance scenarios 1–4 and 6: per-SKU notifications and quantities, a zero-recipient selection, the selection recorded before acknowledgement, two sales of one SKU, and a stable identity across a forced re-send.
-- [ ] T045 [P] [US2] Write `server/tests/messaging/ChannelIsolationLiveTest.java` (live Kafka), covering US2 scenario 5:
+- [X] T043 [P] [US2] Write `server/tests/contract/NotificationSubscribersEndpointTest.java` for `POST /notifications/subscribers` and `GET /notifications/subscribers/{id}`, with every row of [contracts/notification-http.md](contracts/notification-http.md): 201, 200 for a repeat, 409 `SUBSCRIBER_EXISTS`, 400 `INVALID_SUBSCRIBER_ID`, 400 `MISSING_SKUS`, 400 `UNKNOWN_SKU`, 400 `INVALID_REQUEST`, 500 while the catalog is not loaded, 404 `SUBSCRIBER_NOT_FOUND`, the validation precedence, and the subscriber view fields.
+- [X] T044 [P] [US2] Write `server/tests/integration/NotificationFlowTest.java` on `InProcessCheckout` + `InProcessNotification` + `InMemoryEventBus`, covering spec US2 acceptance scenarios 1–4 and 6: per-SKU notifications and quantities, a zero-recipient selection, the selection recorded before acknowledgement, two sales of one SKU, and a stable identity across a forced re-send.
+- [X] T045 [P] [US2] Write `server/tests/messaging/ChannelIsolationLiveTest.java` (live Kafka), covering US2 scenario 5:
   - register 3 subscribers;
   - set `notification.channel.reject:<s1>` and then `notification.channel.stall:<s1>` through `ChannelFaults`;
   - complete sales: s2 and s3 receive every notification on their own topics with no added delay beyond 1 s, while s1's rows stay `PENDING` with charged failures;
   - after the fault is cleared, s1's notifications are delivered.
-- [ ] T046 [P] [US2] Write `server/tests/performance/SelectionStatementBudgetTest.java` and add `notification.select.statements=3` (for n ≤ 500, plus 1 per further 500) and `notification.select.commits=1` to `statement-budgets.properties`.
+- [X] T046 [P] [US2] Write `server/tests/performance/SelectionStatementBudgetTest.java` and add `notification.select.statements=3` (for n ≤ 500, plus 1 per further 500) and `notification.select.commits=1` to `statement-budgets.properties`.
 
 ### Implementation for User Story 2
 
-- [ ] T047 [US2] Create `server/notification/src/notification/KnownSkus.java` (the business handler for `CatalogItemPublished` and `CatalogSnapshotPublished`, holding the complete SKU set per version) and `server/notification/src/messaging/CatalogSkuConsumer.java`, a manually assigned consumer of `TopicNames.catalog()` that replays from offset 0 at every start, modeled on `server/transaction/src/messaging/CatalogConsumer.java` and parking invalid records in Notification's `dead_letter_event`.
-- [ ] T048 [US2] Create `server/notification/src/notification/SubscriptionIndex.java`: an immutable snapshot `{version, Map<String sku, String[] sortedSubscriberIds>}` behind an `AtomicReference`, with `apply(List<ChangeRow>)` in strict version order, `rebuild(rows, version)`, and `lookup(sku)`.
-- [ ] T049 [US2] Create the `server/notification/src/database/SubscriptionStore.java` port and `JdbcSubscriptionStore.java`, implementing the change transaction of [contracts/notification-delivery.md](contracts/notification-delivery.md#subscription-change-transaction) for `REGISTER`, including re-registration of a `CANCELLED` subscriber, together with `find(subscriberId)`, `loadIndex()` (subscriptions plus clock in one consistent read), and `changesAfter(version, upTo)`. Store canonical sorted JSON arrays in `added_skus`, `removed_skus`, and `resulting_skus`.
-- [ ] T050 [US2] Create `server/notification/src/notification/SubscriptionService.java`:
+- [X] T047 [US2] Create `server/notification/src/notification/KnownSkus.java` (the business handler for `CatalogItemPublished` and `CatalogSnapshotPublished`, holding the complete SKU set per version) and `server/notification/src/messaging/CatalogSkuConsumer.java`, a manually assigned consumer of `TopicNames.catalog()` that replays from offset 0 at every start, modeled on `server/transaction/src/messaging/CatalogConsumer.java` and parking invalid records in Notification's `dead_letter_event`.
+- [X] T048 [US2] Create `server/notification/src/notification/SubscriptionIndex.java`: an immutable snapshot `{version, Map<String sku, String[] sortedSubscriberIds>}` behind an `AtomicReference`, with `apply(List<ChangeRow>)` in strict version order, `rebuild(rows, version)`, and `lookup(sku)`.
+- [X] T049 [US2] Create the `server/notification/src/database/SubscriptionStore.java` port and `JdbcSubscriptionStore.java`, implementing the change transaction of [contracts/notification-delivery.md](contracts/notification-delivery.md#subscription-change-transaction) for `REGISTER`, including re-registration of a `CANCELLED` subscriber, together with `find(subscriberId)`, `loadIndex()` (subscriptions plus clock in one consistent read), and `changesAfter(version, upTo)`. Store canonical sorted JSON arrays in `added_skus`, `removed_skus`, and `resulting_skus`.
+- [X] T050 [US2] Create `server/notification/src/notification/SubscriptionService.java`:
   - validation in the precedence of the HTTP contract, with the subscriber ID matching `^[A-Za-z0-9_-]{1,40}$` and SKUs checked against `KnownSkus`;
   - `register`, which calls the store and, only after commit, applies the change to `SubscriptionIndex` (catching up from `changesAfter` on a gap) and provisions the channel;
   - an ambiguous commit returns `INTERNAL_ERROR` and leaves the index untouched.
-- [ ] T051 [US2] Create the `server/notification/src/notification/ChannelProvisioner.java` port and `server/notification/src/messaging/KafkaChannelProvisioner.java`, which uses `KafkaClients.admin` to create `TopicNames.channel(id)` with 1 partition, replication 1, `cleanup.policy=delete`, `segment.bytes=1073741824`, `segment.ms=9223372036854775807`, `segment.index.bytes=1048576`, and no retention, treating `TopicExistsException` as success. On success, set `subscriber.channel_ready = TRUE` through `JdbcSubscriptionStore.markChannelReady`.
-- [ ] T052 [US2] Create `server/notification/src/api/NotificationHttpHandler.java` and `NotificationErrorMapper.java` for `POST /notifications/subscribers` and `GET /notifications/subscribers/{id}`, using `common/api` `HttpSupport`, `Json`, and `ApiErrors`, with the subscriber view of the contract. Messages never name Kafka, offsets, or SQL.
-- [ ] T053 [US2] Create the `server/notification/src/database/SelectionStore.java` port and `JdbcSelectionStore.java`, implementing the selection transaction of [contracts/notification-delivery.md](contracts/notification-delivery.md#selection-transaction): clock `FOR SHARE`, a catch-up callback, the `sale_selection` INSERT with duplicate detection, notification INSERTs in chunks of ≤ 500, and the `notification.selection.beforeCommit` and `afterCommit` hooks.
-- [ ] T054 [US2] Create `server/notification/src/notification/SaleSelectionHandler.java`, an `EventHandler` for `SaleCompleted`:
+- [X] T051 [US2] Create the `server/notification/src/notification/ChannelProvisioner.java` port and `server/notification/src/messaging/KafkaChannelProvisioner.java`, which uses `KafkaClients.admin` to create `TopicNames.channel(id)` with 1 partition, replication 1, `cleanup.policy=delete`, `segment.bytes=1073741824`, `segment.ms=9223372036854775807`, `segment.index.bytes=1048576`, and no retention, treating `TopicExistsException` as success. On success, set `subscriber.channel_ready = TRUE` through `JdbcSubscriptionStore.markChannelReady`.
+- [X] T052 [US2] Create `server/notification/src/api/NotificationHttpHandler.java` and `NotificationErrorMapper.java` for `POST /notifications/subscribers` and `GET /notifications/subscribers/{id}`, using `common/api` `HttpSupport`, `Json`, and `ApiErrors`, with the subscriber view of the contract. Messages never name Kafka, offsets, or SQL.
+- [X] T053 [US2] Create the `server/notification/src/database/SelectionStore.java` port and `JdbcSelectionStore.java`, implementing the selection transaction of [contracts/notification-delivery.md](contracts/notification-delivery.md#selection-transaction): clock `FOR SHARE`, a catch-up callback, the `sale_selection` INSERT with duplicate detection, notification INSERTs in chunks of ≤ 500, and the `notification.selection.beforeCommit` and `afterCommit` hooks.
+- [X] T054 [US2] Create `server/notification/src/notification/SaleSelectionHandler.java`, an `EventHandler` for `SaleCompleted`:
   - validate the payload (lines non-empty, unique, ascending; quantities ≥ 1; `sale_id = transaction_id = routing_key`), throwing `PermanentEventFailure` otherwise;
   - plan the notifications against the index after catch-up to the locked version, and run the selection;
   - treat a duplicate as a no-op;
   - hand new rows to the dispatcher after the commit;
   - map `StoreFailure` to `TransientEventFailure`.
-- [ ] T055 [US2] Create `server/notification/src/messaging/SaleCompletedConsumer.java`, wiring `ConsumerLoop` on `TopicNames.saleCompleted()`, group `NOTIFICATION_SALE_COMPLETED_GROUP`, with `NOTIFICATION_SALE_CONSUMER_THREADS` threads, `fetch.max.wait.ms=50`, and parking in Notification's `dead_letter_event` through `JdbcDeadLetterStore`.
-- [ ] T056 [US2] Create the `server/notification/src/database/NotificationStore.java` port and `JdbcNotificationStore.java`, with `markDelivered`, `recordFailures`, `park`, `selectDue`, `retryParked(Optional<String> subscriberId)`, and the counts by state, as tested in T041.
-- [ ] T057 [US2] Create `server/notification/src/notification/NotificationEnvelopes.java`, which builds the `SubscriberNotified` envelope bytes for a `notification` row (`event_id = notification_id`, `routing_key = subscriber_id`, `correlation_id = sale_id`, `producer = notification`, `occurred_at_ms` = the selection time). Create `server/notification/src/notification/ChargingTracker.java`, holding the last confirmed send time per channel and `isCharged(attemptStartedAt, subscriberId)`, which is true when any other channel confirmed a send after `attemptStartedAt`.
-- [ ] T058 [US2] Create `server/notification/src/notification/NotificationDispatcher.java` per the dispatch table of [contracts/notification-delivery.md](contracts/notification-delivery.md#dispatch):
+- [X] T055 [US2] Create `server/notification/src/messaging/SaleCompletedConsumer.java`, wiring `ConsumerLoop` on `TopicNames.saleCompleted()`, group `NOTIFICATION_SALE_COMPLETED_GROUP`, with `NOTIFICATION_SALE_CONSUMER_THREADS` threads, `fetch.max.wait.ms=50`, and parking in Notification's `dead_letter_event` through `JdbcDeadLetterStore`.
+- [X] T056 [US2] Create the `server/notification/src/database/NotificationStore.java` port and `JdbcNotificationStore.java`, with `markDelivered`, `recordFailures`, `park`, `selectDue`, `retryParked(Optional<String> subscriberId)`, and the counts by state, as tested in T041.
+- [X] T057 [US2] Create `server/notification/src/notification/NotificationEnvelopes.java`, which builds the `SubscriberNotified` envelope bytes for a `notification` row (`event_id = notification_id`, `routing_key = subscriber_id`, `correlation_id = sale_id`, `producer = notification`, `occurred_at_ms` = the selection time). Create `server/notification/src/notification/ChargingTracker.java`, holding the last confirmed send time per channel and `isCharged(attemptStartedAt, subscriberId)`, which is true when any other channel confirmed a send after `attemptStartedAt`.
+- [X] T058 [US2] Create `server/notification/src/notification/NotificationDispatcher.java` per the dispatch table of [contracts/notification-delivery.md](contracts/notification-delivery.md#dispatch):
   - immediate intake, plus a sweep every `NOTIFICATION_SWEEP_MS`;
   - per-subscriber lanes with `NOTIFICATION_LANE_IN_FLIGHT` in flight, served round-robin;
   - provisioning of channels that are not ready;
@@ -253,11 +253,11 @@ These rules bind every task below.
   - batched failure bookkeeping with the backoff;
   - parking on the `NOTIFICATION_PARK_AFTER_CHARGED`-th charged failure, with an alarm;
   - a stall alarm after 60 s with no confirmed send while rows are pending.
-- [ ] T059 [US2] Create `server/notification/src/notification/ChannelFaults.java`, a `RecordSender` decorator that applies `notification.channel.reject:<id>` (the returned future fails immediately) and `notification.channel.stall:<id>` (the future fails with a timeout after 10 s) by reading `FaultHooks`' property on each send. It is applied only to channel sends.
-- [ ] T060 [US2] Wire everything in `server/notification/src/notification/NotificationMain.java`: `KnownSkus`/`CatalogSkuConsumer`, the stores, the index rebuild at startup, `SubscriptionService`, the HTTP handler, `SaleSelectionHandler`/`SaleCompletedConsumer`, the dispatcher with `ChannelFaults` around a lazy `KafkaRecordSender` (`acks=all`, idempotence, `linger.ms=5`, `delivery.timeout.ms=10000`, `max.block.ms=1000`), and `KafkaChannelProvisioner`, keeping the T015 shutdown order.
-- [ ] T061 [US2] Create `server/notification/src/database/NotificationStatusQueries.java` and `server/notification/src/api/OpsHttpHandler.java` with `GET /notifications/ops/status`, returning every field of the contract's ops table (`subscriptionVersion`, `indexVersion`, `activeSubscribers`, `catalogLoaded`, `salesSelected`, notifications by state, charged and uncharged failures, `parkedEvents`, `alarms`, `saleConsumerLag`, `lastConfirmedSendAt`), and print the same fields in the 10-second status line.
-- [ ] T062 [US2] Write `spec/notification-openapi.yaml` (OpenAPI 3.0.3, `info.version: 1.0.0`) with `POST /notifications/subscribers`, `GET /notifications/subscribers/{subscriberId}`, the subscriber view schema, and the error schema, matching T043.
-- [ ] T063 [US2] Run `server/run-tests.sh unit database contract integration messaging performance architecture` and confirm that T036–T046 pass with no 006 regression.
+- [X] T059 [US2] Create `server/notification/src/notification/ChannelFaults.java`, a `RecordSender` decorator that applies `notification.channel.reject:<id>` (the returned future fails immediately) and `notification.channel.stall:<id>` (the future fails with a timeout after 10 s) by reading `FaultHooks`' property on each send. It is applied only to channel sends.
+- [X] T060 [US2] Wire everything in `server/notification/src/notification/NotificationMain.java`: `KnownSkus`/`CatalogSkuConsumer`, the stores, the index rebuild at startup, `SubscriptionService`, the HTTP handler, `SaleSelectionHandler`/`SaleCompletedConsumer`, the dispatcher with `ChannelFaults` around a lazy `KafkaRecordSender` (`acks=all`, idempotence, `linger.ms=5`, `delivery.timeout.ms=10000`, `max.block.ms=1000`), and `KafkaChannelProvisioner`, keeping the T015 shutdown order.
+- [X] T061 [US2] Create `server/notification/src/database/NotificationStatusQueries.java` and `server/notification/src/api/OpsHttpHandler.java` with `GET /notifications/ops/status`, returning every field of the contract's ops table (`subscriptionVersion`, `indexVersion`, `activeSubscribers`, `catalogLoaded`, `salesSelected`, notifications by state, charged and uncharged failures, `parkedEvents`, `alarms`, `saleConsumerLag`, `lastConfirmedSendAt`), and print the same fields in the 10-second status line.
+- [X] T062 [US2] Write `spec/notification-openapi.yaml` (OpenAPI 3.0.3, `info.version: 1.0.0`) with `POST /notifications/subscribers`, `GET /notifications/subscribers/{subscriberId}`, the subscriber view schema, and the error schema, matching T043.
+- [X] T063 [US2] Run `server/run-tests.sh unit database contract integration messaging performance architecture` and confirm that T036–T046 pass with no 006 regression.
 
 **Checkpoint**: an end-to-end notification path exists; one subscriber's channel fault does not affect the others.
 

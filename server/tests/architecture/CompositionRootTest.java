@@ -184,7 +184,11 @@ class CompositionRootTest {
         assertTrue(config.contains("DEFAULT_SCHEMA = \"cs6510_notification\"")
                 && config.contains("DEFAULT_USER = \"cs6510_notification_svc\""), "Notification's own schema and user");
 
-        List<List<String>> stages = List.of(List.of("server.stop("), List.of("status.stop()", "reporter.stop()"),
+        // US2 (007 T060): the SaleCompleted and catalog consumers, then the dispatcher's final mark, then the status
+        // workers, then the channel producer and the admin client, then the pool.
+        List<List<String>> stages = List.of(List.of("server.stop("),
+                List.of("sales.stop(", "catalogConsumer.stop("), List.of("dispatcher.stop("),
+                List.of("status.stop()", "reporter.stop()"), List.of("channelSender.close()", "provisioner.close()"),
                 List.of("pool.close()"));
         String hook = shutdownHook(source, main);
         int previousLast = -1;

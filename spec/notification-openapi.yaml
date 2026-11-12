@@ -1,0 +1,197 @@
+openapi: 3.0.3
+info:
+  title: Self-Checkout Notification Service API
+  version: "1.0.0"
+  description: |
+    The subscription interface of Notification Service (feature 007,
+    specs/007-notification-service/contracts/notification-http.md).
+
+    These endpoints are additive: the self-checkout API in
+    self-checkout-openapi.yaml is unchanged. Notification Service listens on
+    port 8084 and is reached through the gateway at http://localhost:8080 via
+    the /notifications/ prefix.
+
+    A subscriber registers for one or more catalog SKUs. Every completed sale
+    of a subscribed SKU produces exactly one notification per (sale, SKU,
+    subscriber), delivered asynchronously to the subscriber's own channel. A
+    change takes effect only when it commits; a 200 or 201 response is the
+    commit confirmation, and subscriptionVersion names the history version at
+    which the returned state took effect.
+
+    Validation precedence: request shape (400), then subscriber existence
+    (404), then state conflicts (409), then SKU validity (400 UNKNOWN_SKU).
+    No error message names the broker, an offset, or SQL.
+
+servers:
+  - url: http://localhost:8080
+    description: Gateway (Nginx)
+  - url: http://localhost:8084
+    description: Notification Service directly
+
+tags:
+  - name: subscribers
+    description: Register and read subscribers
+
+paths:
+  /notifications/subscribers:
+    post:
+      tags: [subscribers]
+      summary: Register a subscriber for one or more SKUs
+      description: >
+        Registers a new subscriber, or registers a cancelled subscriber again
+        (201). Registering an active subscriber with the same SKU set is an
+        idempotent repeat (200) that returns the version of the change that
+        produced the state; a different SKU set is a conflict (409). Repeating
+        a request after a 500 is safe.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Registered; the change committed at subscriptionVersion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriberView"
+        "200":
+          description: Idempotent repeat; nothing changed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriberView"
+        "400":
+          description: >
+            INVALID_REQUEST (malformed JSON or a non-string SKU),
+            INVALID_SUBSCRIBER_ID (missing or not matching ^[A-Za-z0-9_-]{1,40}$),
+            MISSING_SKUS (missing or empty skus), or UNKNOWN_SKU (an SKU outside
+            the catalog; the message names it)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: SUBSCRIBER_EXISTS - the subscriber is active with a different SKU set
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: >
+            INTERNAL_ERROR - the catalog is not loaded yet, the database is
+            unavailable, or the commit failed or its outcome is unknown. The
+            change was not applied or its outcome is unknown; repeating the
+            request is safe.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /notifications/subscribers/{subscriberId}:
+    get:
+      tags: [subscribers]
+      summary: Read a subscriber's committed state
+      description: Reads committed state and never waits.
+      parameters:
+        - $ref: "#/components/parameters/SubscriberId"
+      responses:
+        "200":
+          description: The subscriber
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriberView"
+        "400":
+          description: INVALID_SUBSCRIBER_ID - the path does not hold a valid subscriber ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: SUBSCRIBER_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: INTERNAL_ERROR - the database is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+components:
+  parameters:
+    SubscriberId:
+      name: subscriberId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{1,40}$"
+      example: sub-0001
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [subscriberId, skus]
+      properties:
+        subscriberId:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{1,40}$"
+          example: sub-0001
+        skus:
+          type: array
+          minItems: 1
+          description: Catalog SKUs; duplicates are ignored and the order does not matter
+          items:
+            type: string
+          example: ["SKU-000017", "SKU-001234"]
+
+    SubscriberView:
+      type: object
+      required: [subscriberId, status, skus, channel, channelReady, subscriptionVersion]
+      properties:
+        subscriberId:
+          type: string
+          example: sub-0001
+        status:
+          type: string
+          enum: [ACTIVE, CANCELLED]
+        skus:
+          type: array
+          description: Sorted ascending; empty when cancelled
+          items:
+            type: string
+          example: ["SKU-000017", "SKU-001234"]
+        channel:
+          type: string
+          description: The subscriber's own channel topic
+          example: selfcheckout.notify.sub-0001.v1
+        channelReady:
+          type: boolean
+          description: Whether the channel topic has been created
+        subscriptionVersion:
+          type: integer
+          format: int64
+          minimum: 1
+          description: The subscription history version at which this state took effect
+
+    ApiError:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          enum:
+            - INVALID_REQUEST
+            - INVALID_SUBSCRIBER_ID
+            - MISSING_SKUS
+            - UNKNOWN_SKU
+            - SUBSCRIBER_EXISTS
+            - SUBSCRIBER_NOT_FOUND
+            - INTERNAL_ERROR
+        message:
+          type: string

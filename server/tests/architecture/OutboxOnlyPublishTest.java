@@ -44,6 +44,12 @@ class OutboxOnlyPublishTest {
     private static final Set<String> RECORD_SENDERS = Set.of("events/OutboxDispatcher", "messaging/KafkaScanEventSink");
     /** Notification's only publisher (007 Implementation Rule 2); found once US2 adds it. */
     private static final String NOTIFICATION_SENDER = "notification/NotificationDispatcher";
+    /**
+     * The test-fault wrapper of the dispatcher's channel sender (007 research N13, T059): a {@code RecordSender}
+     * decorator that forwards the dispatcher's own sends, so it may call the port it wraps; it originates no record,
+     * and only {@code NotificationMain} constructs it, around the channel producer.
+     */
+    private static final String NOTIFICATION_CHANNEL_WRAPPER = "notification/ChannelFaults";
     private static final Set<String> PRODUCER_CALLERS = Set.of("messaging/KafkaRecordSender");
     private static final Pattern EVENT_TYPE_REFERENCE = Pattern.compile("\\bEventTypes\\.([A-Z_]+)\\b");
 
@@ -72,7 +78,8 @@ class OutboxOnlyPublishTest {
                         if (RECORD_SENDS.contains(call)) {
                             recordCallers.add(outer);
                             boolean allowed = RECORD_SENDERS.contains(outer)
-                                    || (artifact.equals("notification") && outer.equals(NOTIFICATION_SENDER));
+                                    || (artifact.equals("notification") && (outer.equals(NOTIFICATION_SENDER)
+                                            || outer.equals(NOTIFICATION_CHANNEL_WRAPPER)));
                             if (!allowed) violations.add(className + " calls " + call);
                         }
                         if (PRODUCER_SENDS.contains(call)) {
@@ -86,7 +93,11 @@ class OutboxOnlyPublishTest {
         assertTrue(classes > 0, "No classes found in the service artifacts");
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
         Set<String> expectedCallers = new TreeSet<>(RECORD_SENDERS);
-        if (notificationSenderBuilt) expectedCallers.add(NOTIFICATION_SENDER);
+        if (notificationSenderBuilt) {
+            expectedCallers.add(NOTIFICATION_SENDER);
+            expectedCallers.add(NOTIFICATION_CHANNEL_WRAPPER);
+            assertChannelWrapperOnlyWrapsTheDispatchersSender(violations);
+        }
         assertEquals(expectedCallers, recordCallers, "every outbox publisher is found by the scan");
         assertEquals(PRODUCER_CALLERS, producerCallers, "the Kafka sender adapter is found by the scan");
     }
@@ -165,6 +176,20 @@ class OutboxOnlyPublishTest {
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
         assertTrue(builders.containsKey(EventTypes.TRANSACTION), "Transaction builds its envelopes: " + builders);
         assertTrue(builders.containsKey(EventTypes.INVENTORY), "Inventory builds its envelopes: " + builders);
+    }
+
+    /** {@code new ChannelFaults(} appears in Notification's production code only in {@code NotificationMain}. */
+    private static void assertChannelWrapperOnlyWrapsTheDispatchersSender(List<String> violations) throws IOException {
+        int constructions = 0;
+        try (Stream<Path> paths = Files.walk(serverRoot().resolve("notification/src"))) {
+            for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
+                if (!Files.readString(source).contains("new ChannelFaults(")) continue;
+                if (source.getFileName().toString().equals("NotificationMain.java")) constructions++;
+                else violations.add(source + " constructs the channel fault wrapper outside NotificationMain");
+            }
+        }
+        assertEquals(1, constructions, "NotificationMain wraps the channel sender in ChannelFaults");
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
     }
 
     private static boolean isEventType(String name) {

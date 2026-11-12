@@ -1,0 +1,273 @@
+package database;
+
+import faults.FaultHooks;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.SortedSet;
+import java.util.TreeMap;
+import java.util.TreeSet;
+
+/**
+ * {@link SubscriptionStore} on Notification's pool (007 T049). A registration is one contended unit of work:
+ *
+ * <ol>
+ *   <li>{@code SELECT version FROM subscription_clock WHERE id = 1 FOR UPDATE} gives {@code V};</li>
+ *   <li>{@code SELECT … FROM subscriber WHERE subscriber_id = ? FOR UPDATE}, and its {@code subscription} rows;</li>
+ *   <li>reject or no-op (rollback), or apply: insert or update {@code subscriber} at {@code V + 1}, insert the
+ *       {@code subscription} rows in one statement, insert the {@code subscription_change} row at {@code V + 1},
+ *       and set the clock to {@code V + 1};</li>
+ *   <li>{@code FaultHooks.hit("notification.subscription.beforeCommit")}, then commit.</li>
+ * </ol>
+ *
+ * <p>Seven statements and one commit for an applied change, within the plan's ≤ 9.</p>
+ */
+public final class JdbcSubscriptionStore implements SubscriptionStore {
+    private static final String LOCK_CLOCK = "SELECT version FROM subscription_clock WHERE id = 1 FOR UPDATE";
+    private static final String SHARE_CLOCK = "SELECT version FROM subscription_clock WHERE id = 1 FOR SHARE";
+    private static final String READ_CLOCK = "SELECT version FROM subscription_clock WHERE id = 1";
+    private static final String LOCK_SUBSCRIBER = "SELECT status, channel_topic, channel_ready, created_version, "
+            + "updated_version FROM subscriber WHERE subscriber_id = ? FOR UPDATE";
+    private static final String SUBSCRIPTIONS = "SELECT sku FROM subscription WHERE subscriber_id = ? ORDER BY sku";
+    private static final String INSERT_SUBSCRIBER = "INSERT INTO subscriber (subscriber_id, status, channel_topic, "
+            + "channel_ready, created_version, updated_version, created_at, updated_at) VALUES (?, 'ACTIVE', ?, FALSE, ?, ?, ?, ?)";
+    private static final String REACTIVATE = "UPDATE subscriber SET status = 'ACTIVE', updated_version = ?, updated_at = ? "
+            + "WHERE subscriber_id = ?";
+    private static final String INSERT_CHANGE = "INSERT INTO subscription_change (version, subscriber_id, change_type, "
+            + "added_skus, removed_skus, resulting_skus, committed_at) VALUES (?, ?, ?, ?, ?, ?, ?)";
+    private static final String ADVANCE_CLOCK = "UPDATE subscription_clock SET version = ? WHERE id = 1";
+    private static final String FIND = "SELECT s.status, s.channel_topic, s.channel_ready, s.created_version, "
+            + "s.updated_version, sub.sku FROM subscriber s LEFT JOIN subscription sub ON sub.subscriber_id = s.subscriber_id "
+            + "WHERE s.subscriber_id = ? ORDER BY sub.sku";
+    private static final String ACTIVE_SUBSCRIPTIONS = "SELECT subscriber_id, sku FROM subscription ORDER BY subscriber_id, sku";
+    private static final String CHANGES = "SELECT version, subscriber_id, change_type, added_skus, removed_skus, "
+            + "resulting_skus FROM subscription_change WHERE version > ? AND version <= ? ORDER BY version";
+    private static final String CHANNEL = "SELECT channel_topic, channel_ready FROM subscriber WHERE subscriber_id = ?";
+    private static final String MARK_READY = "UPDATE subscriber SET channel_ready = TRUE WHERE subscriber_id = ?";
+
+    private final ConnectionPool pool;
+
+    public JdbcSubscriptionStore(ConnectionPool pool) {
+        this.pool = Objects.requireNonNull(pool, "pool");
+    }
+
+    @Override
+    public ChangeResult register(String subscriberId, SortedSet<String> skus, String channelTopic,
+                                 String firstUnknownSku, Instant at) {
+        Objects.requireNonNull(subscriberId, "subscriberId");
+        Objects.requireNonNull(channelTopic, "channelTopic");
+        if (skus == null || skus.isEmpty()) throw new IllegalArgumentException("a registration needs at least one SKU");
+        List<String> requested = List.copyOf(new TreeSet<>(skus));
+        Timestamp now = Timestamp.from(at.truncatedTo(ChronoUnit.MILLIS));
+        return JdbcUnitOfWork.inContendedTransaction(pool, "notification.subscription.change", connection -> {
+            long version = clock(connection, LOCK_CLOCK);
+            Optional<SubscriberState> existing = lockSubscriber(connection, subscriberId);
+            if (existing.isPresent() && existing.get().status() == Status.ACTIVE) {
+                if (existing.get().skus().equals(requested)) {
+                    throw JdbcUnitOfWork.rollbackAndReturn(new Unchanged(existing.get()));
+                }
+                throw JdbcUnitOfWork.rollbackAndReturn(new Rejected(Rejection.SUBSCRIBER_EXISTS,
+                        "subscriber " + subscriberId + " is already registered with other SKUs"));
+            }
+            if (firstUnknownSku != null) {
+                throw JdbcUnitOfWork.rollbackAndReturn(new Rejected(Rejection.UNKNOWN_SKU, firstUnknownSku));
+            }
+            long next = version + 1;
+            SubscriberState state;
+            if (existing.isEmpty()) {
+                try (PreparedStatement insert = connection.prepareStatement(INSERT_SUBSCRIBER)) {
+                    insert.setString(1, subscriberId);
+                    insert.setString(2, channelTopic);
+                    insert.setLong(3, next);
+                    insert.setLong(4, next);
+                    insert.setTimestamp(5, now);
+                    insert.setTimestamp(6, now);
+                    insert.executeUpdate();
+                }
+                state = new SubscriberState(subscriberId, Status.ACTIVE, requested, channelTopic, false, next, next);
+            } else {
+                try (PreparedStatement update = connection.prepareStatement(REACTIVATE)) {
+                    update.setLong(1, next);
+                    update.setTimestamp(2, now);
+                    update.setString(3, subscriberId);
+                    update.executeUpdate();
+                }
+                SubscriberState old = existing.get();
+                state = new SubscriberState(subscriberId, Status.ACTIVE, requested, old.channelTopic(), old.channelReady(),
+                        old.createdVersion(), next);
+            }
+            insertSubscriptions(connection, subscriberId, requested, next);
+            ChangeRow change = new ChangeRow(next, subscriberId, ChangeType.REGISTER, requested, List.of(), requested);
+            insertChange(connection, change, now);
+            try (PreparedStatement advance = connection.prepareStatement(ADVANCE_CLOCK)) {
+                advance.setLong(1, next);
+                advance.executeUpdate();
+            }
+            FaultHooks.hit("notification.subscription.beforeCommit");
+            return new Applied(state, change, true);
+        });
+    }
+
+    @Override
+    public Optional<SubscriberState> find(String subscriberId) {
+        return JdbcUnitOfWork.read(pool, "notification.subscription.find", connection -> {
+            try (PreparedStatement select = connection.prepareStatement(FIND)) {
+                select.setString(1, subscriberId);
+                try (ResultSet rows = select.executeQuery()) {
+                    if (!rows.next()) return Optional.empty();
+                    Status status = Status.valueOf(rows.getString(1));
+                    String topic = rows.getString(2);
+                    boolean ready = rows.getBoolean(3);
+                    long created = rows.getLong(4);
+                    long updated = rows.getLong(5);
+                    List<String> skus = new ArrayList<>();
+                    do {
+                        String sku = rows.getString(6);
+                        if (sku != null) skus.add(sku);
+                    } while (rows.next());
+                    return Optional.of(new SubscriberState(subscriberId, status, skus, topic, ready, created, updated));
+                }
+            }
+        });
+    }
+
+    @Override
+    public IndexRows loadIndex() {
+        return JdbcUnitOfWork.read(pool, "notification.subscription.loadIndex", connection -> {
+            // The shared lock keeps every change from committing until the subscriptions are read, so the rows
+            // are exactly the state at the clock's version under READ COMMITTED too (N5).
+            long version = clock(connection, SHARE_CLOCK);
+            Map<String, List<String>> bySubscriber = new TreeMap<>();
+            try (PreparedStatement select = connection.prepareStatement(ACTIVE_SUBSCRIPTIONS);
+                 ResultSet rows = select.executeQuery()) {
+                while (rows.next()) {
+                    bySubscriber.computeIfAbsent(rows.getString(1), ignored -> new ArrayList<>()).add(rows.getString(2));
+                }
+            }
+            return new IndexRows(version, bySubscriber);
+        });
+    }
+
+    @Override
+    public List<ChangeRow> changesAfter(long after, long upTo) {
+        return JdbcUnitOfWork.read(pool, "notification.subscription.changes", connection -> readChanges(connection, after, upTo));
+    }
+
+    @Override
+    public long currentVersion() {
+        return JdbcUnitOfWork.read(pool, "notification.subscription.clock", connection -> clock(connection, READ_CLOCK));
+    }
+
+    @Override
+    public Optional<Channel> channel(String subscriberId) {
+        return JdbcUnitOfWork.read(pool, "notification.subscription.channel", connection -> {
+            try (PreparedStatement select = connection.prepareStatement(CHANNEL)) {
+                select.setString(1, subscriberId);
+                try (ResultSet row = select.executeQuery()) {
+                    if (!row.next()) return Optional.empty();
+                    return Optional.of(new Channel(subscriberId, row.getString(1), row.getBoolean(2)));
+                }
+            }
+        });
+    }
+
+    @Override
+    public void markChannelReady(String subscriberId) {
+        JdbcUnitOfWork.inTransaction(pool, "notification.subscription.channelReady", connection -> {
+            try (PreparedStatement update = connection.prepareStatement(MARK_READY)) {
+                update.setString(1, subscriberId);
+                return update.executeUpdate();
+            }
+        });
+    }
+
+    /** The history rows in {@code (after, upTo]} on {@code connection}, in version order; also used by selections. */
+    public static List<ChangeRow> readChanges(Connection connection, long after, long upTo) throws SQLException {
+        List<ChangeRow> changes = new ArrayList<>();
+        if (upTo <= after) return changes;
+        try (PreparedStatement select = connection.prepareStatement(CHANGES)) {
+            select.setLong(1, after);
+            select.setLong(2, upTo);
+            try (ResultSet rows = select.executeQuery()) {
+                while (rows.next()) {
+                    changes.add(new ChangeRow(rows.getLong(1), rows.getString(2), ChangeType.valueOf(rows.getString(3)),
+                            NotificationJson.parseSkuArray(rows.getString(4)), NotificationJson.parseSkuArray(rows.getString(5)),
+                            NotificationJson.parseSkuArray(rows.getString(6))));
+                }
+            }
+        }
+        return changes;
+    }
+
+    private static long clock(Connection connection, String sql) throws SQLException {
+        try (PreparedStatement select = connection.prepareStatement(sql); ResultSet row = select.executeQuery()) {
+            if (!row.next()) throw new SQLException("subscription_clock has no row");
+            return row.getLong(1);
+        }
+    }
+
+    private static Optional<SubscriberState> lockSubscriber(Connection connection, String subscriberId) throws SQLException {
+        Status status;
+        String topic;
+        boolean ready;
+        long created;
+        long updated;
+        try (PreparedStatement select = connection.prepareStatement(LOCK_SUBSCRIBER)) {
+            select.setString(1, subscriberId);
+            try (ResultSet row = select.executeQuery()) {
+                if (!row.next()) return Optional.empty();
+                status = Status.valueOf(row.getString(1));
+                topic = row.getString(2);
+                ready = row.getBoolean(3);
+                created = row.getLong(4);
+                updated = row.getLong(5);
+            }
+        }
+        List<String> skus = new ArrayList<>();
+        try (PreparedStatement select = connection.prepareStatement(SUBSCRIPTIONS)) {
+            select.setString(1, subscriberId);
+            try (ResultSet rows = select.executeQuery()) {
+                while (rows.next()) skus.add(rows.getString(1));
+            }
+        }
+        return Optional.of(new SubscriberState(subscriberId, status, skus, topic, ready, created, updated));
+    }
+
+    private static void insertSubscriptions(Connection connection, String subscriberId, List<String> skus, long version)
+            throws SQLException {
+        StringBuilder sql = new StringBuilder("INSERT INTO subscription (subscriber_id, sku, added_version) VALUES ");
+        for (int i = 0; i < skus.size(); i++) sql.append(i == 0 ? "(?, ?, ?)" : ", (?, ?, ?)");
+        try (PreparedStatement insert = connection.prepareStatement(sql.toString())) {
+            int parameter = 1;
+            for (String sku : skus) {
+                insert.setString(parameter++, subscriberId);
+                insert.setString(parameter++, sku);
+                insert.setLong(parameter++, version);
+            }
+            insert.executeUpdate();
+        }
+    }
+
+    private static void insertChange(Connection connection, ChangeRow change, Timestamp at) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement(INSERT_CHANGE)) {
+            insert.setLong(1, change.version());
+            insert.setString(2, change.subscriberId());
+            insert.setString(3, change.type().name());
+            insert.setString(4, NotificationJson.skuArray(change.addedSkus()));
+            insert.setString(5, NotificationJson.skuArray(change.removedSkus()));
+            insert.setString(6, NotificationJson.skuArray(change.resultingSkus()));
+            insert.setTimestamp(7, at);
+            insert.executeUpdate();
+        }
+    }
+}
