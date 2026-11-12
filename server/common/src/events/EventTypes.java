@@ -8,21 +8,27 @@ import selfcheckout.events.v1.CatalogItemPublished;
 import selfcheckout.events.v1.CatalogSnapshotPublished;
 import selfcheckout.events.v1.CheckoutRequested;
 import selfcheckout.events.v1.RestorationNotNeeded;
+import selfcheckout.events.v1.SaleCompleted;
 import selfcheckout.events.v1.ScanAccepted;
 import selfcheckout.events.v1.StockDeducted;
 import selfcheckout.events.v1.StockDeductionRefused;
 import selfcheckout.events.v1.StockRejected;
 import selfcheckout.events.v1.StockRestorationRequested;
 import selfcheckout.events.v1.StockRestored;
+import selfcheckout.events.v1.SubscriberNotified;
 
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 
 /**
- * The ten event types of the catalog (contracts/event-catalog.md "Event types", D3): for each, its topic,
- * its single owning producer (FR-009), its supported schema versions, its payload parser, and the payload
- * field that must equal the envelope's {@code routing_key}.
+ * The twelve event types of the catalog (006 contracts/event-catalog.md "Event types", D3, and 007
+ * contracts/sale-completed-event.md): for each, its topic, its single owning producer (FR-009), its
+ * supported schema versions, its payload parser, and the payload field that must equal the envelope's
+ * {@code routing_key}.
+ *
+ * <p>{@link #SUBSCRIBER_NOTIFIED} is a channel-family type: each record goes to its subscriber's own channel
+ * ({@link TopicNames#channel}), so it has no fixed {@link #topic()}.</p>
  */
 public enum EventTypes {
     CATALOG_ITEM_PUBLISHED("CatalogItemPublished", Topic.CATALOG, EventTypes.INVENTORY,
@@ -45,10 +51,16 @@ public enum EventTypes {
     RESTORATION_NOT_NEEDED("RestorationNotNeeded", Topic.CHECKOUT_OUTCOME, EventTypes.INVENTORY,
             RestorationNotNeeded.parser(), payload -> transactionOf(((RestorationNotNeeded) payload).getAttempt())),
     SCAN_ACCEPTED("ScanAccepted", Topic.SCAN_ACCEPTED, EventTypes.TRANSACTION,
-            ScanAccepted.parser(), payload -> ((ScanAccepted) payload).getTransactionId());
+            ScanAccepted.parser(), payload -> ((ScanAccepted) payload).getTransactionId()),
+    SALE_COMPLETED("SaleCompleted", Topic.SALE_COMPLETED, EventTypes.TRANSACTION,
+            SaleCompleted.parser(), payload -> ((SaleCompleted) payload).getTransactionId()),
+    /** On the subscriber's channel topic, not a fixed one. */
+    SUBSCRIBER_NOTIFIED("SubscriberNotified", null, EventTypes.NOTIFICATION,
+            SubscriberNotified.parser(), payload -> ((SubscriberNotified) payload).getSubscriberId());
 
     public static final String TRANSACTION = "transaction";
     public static final String INVENTORY = "inventory";
+    public static final String NOTIFICATION = "notification";
     /** Routing key of {@code CatalogSnapshotPublished}. */
     public static final String SNAPSHOT_KEY = "__snapshot__";
     /** Every type of this feature is version 1 (D3). */
@@ -72,9 +84,13 @@ public enum EventTypes {
     /** The {@code event_type} string, for example {@code CheckoutRequested}. */
     public String typeName() { return typeName; }
 
-    public Topic topic() { return topic; }
+    /** The fixed topic of this type, or empty for a channel-family type ({@link #isChannelType()}). */
+    public Optional<Topic> topic() { return Optional.ofNullable(topic); }
 
-    /** {@code transaction} or {@code inventory}. */
+    /** Whether each record of this type goes to its subscriber's channel topic instead of a fixed topic. */
+    public boolean isChannelType() { return topic == null; }
+
+    /** {@code transaction}, {@code inventory}, or {@code notification}. */
     public String producer() { return producer; }
 
     public Set<Integer> supportedVersions() { return Set.of(CURRENT_VERSION); }

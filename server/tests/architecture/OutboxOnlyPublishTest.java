@@ -28,16 +28,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * No publish without an outbox row (FR-010, SC-010, Implementation Rule 2), checked on the built classes: only
- * {@code OutboxDispatcher} and {@code KafkaScanEventSink} call {@code RecordSender.send}, and only
+ * {@code OutboxDispatcher}, {@code KafkaScanEventSink}, and Notification's {@code NotificationDispatcher} (007,
+ * which sends only stored {@code notification} rows) call {@code RecordSender.send}, and only
  * {@code KafkaRecordSender}, the Kafka adapter behind that port, calls a Kafka producer's {@code send}. Every
- * event type has exactly one producer, matching the event catalog, and only its owner service builds its envelope.
+ * event type has exactly one producer, matching the event catalog (006's and 007's additions), and only its
+ * owner service builds its envelope.
  */
 class OutboxOnlyPublishTest {
-    private static final List<String> ARTIFACTS = List.of("common", "transaction", "inventory", "analytics");
+    private static final List<String> ARTIFACTS = List.of("common", "transaction", "inventory", "analytics", "notification");
+    private static final Set<String> PRODUCERS = Set.of(EventTypes.TRANSACTION, EventTypes.INVENTORY, EventTypes.NOTIFICATION);
     private static final Set<String> RECORD_SENDS = Set.of("events/RecordSender.send", "messaging/KafkaRecordSender.send");
     private static final Set<String> PRODUCER_SENDS = Set.of("org/apache/kafka/clients/producer/KafkaProducer.send",
             "org/apache/kafka/clients/producer/Producer.send");
+    /** The 006 publishers, which must be found by the scan. */
     private static final Set<String> RECORD_SENDERS = Set.of("events/OutboxDispatcher", "messaging/KafkaScanEventSink");
+    /** Notification's only publisher (007 Implementation Rule 2); found once US2 adds it. */
+    private static final String NOTIFICATION_SENDER = "notification/NotificationDispatcher";
     private static final Set<String> PRODUCER_CALLERS = Set.of("messaging/KafkaRecordSender");
     private static final Pattern EVENT_TYPE_REFERENCE = Pattern.compile("\\bEventTypes\\.([A-Z_]+)\\b");
 
@@ -46,6 +52,7 @@ class OutboxOnlyPublishTest {
         List<String> violations = new ArrayList<>();
         Set<String> recordCallers = new TreeSet<>();
         Set<String> producerCallers = new TreeSet<>();
+        boolean notificationSenderBuilt = false;
         int classes = 0;
         for (String artifact : ARTIFACTS) {
             Path jar = serverRoot().resolve("out/" + artifact + ".jar");
@@ -56,6 +63,7 @@ class OutboxOnlyPublishTest {
                     classes++;
                     String className = entry.getName().substring(0, entry.getName().length() - ".class".length());
                     String outer = className.contains("$") ? className.substring(0, className.indexOf('$')) : className;
+                    if (outer.equals(NOTIFICATION_SENDER)) notificationSenderBuilt = true;
                     Set<String> calls;
                     try (var in = archive.getInputStream(entry)) {
                         calls = methodReferences(in.readAllBytes());
@@ -63,7 +71,9 @@ class OutboxOnlyPublishTest {
                     for (String call : calls) {
                         if (RECORD_SENDS.contains(call)) {
                             recordCallers.add(outer);
-                            if (!RECORD_SENDERS.contains(outer)) violations.add(className + " calls " + call);
+                            boolean allowed = RECORD_SENDERS.contains(outer)
+                                    || (artifact.equals("notification") && outer.equals(NOTIFICATION_SENDER));
+                            if (!allowed) violations.add(className + " calls " + call);
                         }
                         if (PRODUCER_SENDS.contains(call)) {
                             producerCallers.add(outer);
@@ -75,17 +85,22 @@ class OutboxOnlyPublishTest {
         }
         assertTrue(classes > 0, "No classes found in the service artifacts");
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
-        assertEquals(RECORD_SENDERS, recordCallers, "both outbox publishers are found by the scan");
+        Set<String> expectedCallers = new TreeSet<>(RECORD_SENDERS);
+        if (notificationSenderBuilt) expectedCallers.add(NOTIFICATION_SENDER);
+        assertEquals(expectedCallers, recordCallers, "every outbox publisher is found by the scan");
         assertEquals(PRODUCER_CALLERS, producerCallers, "the Kafka sender adapter is found by the scan");
     }
 
-    /** Each of the ten types has one producer and one topic, as the event catalog's "Event types" table says. */
+    /**
+     * Each of the twelve types has one producer and one topic, as the event catalog's "Event types" table says
+     * together with 007's "Event types (additions)"; a channel-family type's topic is the subscriber's channel.
+     */
     @Test
     void everyEventTypeHasExactlyOneProducerAndMatchesTheEventCatalog() throws Exception {
         Map<String, String[]> catalog = catalogEventTypes();
         List<String> violations = new ArrayList<>();
         for (EventTypes type : EventTypes.values()) {
-            if (!Set.of(EventTypes.TRANSACTION, EventTypes.INVENTORY).contains(type.producer())) {
+            if (!PRODUCERS.contains(type.producer())) {
                 violations.add(type + " has the producer " + type.producer());
             }
             String[] row = catalog.get(type.typeName());
@@ -96,14 +111,19 @@ class OutboxOnlyPublishTest {
             if (!row[1].toLowerCase(Locale.ROOT).startsWith(type.producer())) {
                 violations.add(type.typeName() + " is produced by " + type.producer() + " but the catalog says " + row[1]);
             }
-            if (!topicMatches(type.topic(), row[0])) {
-                violations.add(type.typeName() + " is on " + type.topic().baseName() + " but the catalog says " + row[0]);
+            if (type.isChannelType()) {
+                if (!row[0].contains("channel")) {
+                    violations.add(type.typeName() + " is on the subscriber's channel but the catalog says " + row[0]);
+                }
+            } else if (!topicMatches(type.topic().orElseThrow(), row[0])) {
+                violations.add(type.typeName() + " is on " + type.topic().orElseThrow().baseName()
+                        + " but the catalog says " + row[0]);
             }
         }
         Set<String> extra = new TreeSet<>(catalog.keySet());
         for (EventTypes type : EventTypes.values()) extra.remove(type.typeName());
         if (!extra.isEmpty()) violations.add("event-catalog.md lists types EventTypes lacks: " + extra);
-        assertEquals(10, EventTypes.values().length, "the catalog's ten event types");
+        assertEquals(12, EventTypes.values().length, "the catalog's twelve event types");
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
     }
 
@@ -122,7 +142,7 @@ class OutboxOnlyPublishTest {
                     String body = Files.readString(source);
                     if (!body.contains("EnvelopeCodec.encode(")) continue;
                     builders.merge(owner, 1, Integer::sum);
-                    if (!Set.of(EventTypes.TRANSACTION, EventTypes.INVENTORY).contains(owner)) {
+                    if (!PRODUCERS.contains(owner)) {
                         violations.add(source + " builds an envelope outside a producing service");
                         continue;
                     }
@@ -132,6 +152,7 @@ class OutboxOnlyPublishTest {
                         String producer = switch (name) {
                             case "TRANSACTION" -> EventTypes.TRANSACTION;
                             case "INVENTORY" -> EventTypes.INVENTORY;
+                            case "NOTIFICATION" -> EventTypes.NOTIFICATION;
                             default -> isEventType(name) ? EventTypes.valueOf(name).producer() : null;
                         };
                         if (producer != null && !producer.equals(owner)) {
@@ -157,22 +178,32 @@ class OutboxOnlyPublishTest {
         return base.equals(column) || base.endsWith("-" + column);
     }
 
-    /** {@code event_type -> [topic column, producer column]} from the "Event types" table. */
+    /**
+     * {@code event_type -> [topic column, producer column]} from 006's "Event types" table and 007's
+     * "Event types (additions)" table.
+     */
     private static Map<String, String[]> catalogEventTypes() throws IOException {
-        Path file = serverRoot().getParent().resolve("specs/006-event-based-architecture/contracts/event-catalog.md");
-        assertTrue(Files.isRegularFile(file), "Missing " + file);
         Map<String, String[]> rows = new LinkedHashMap<>();
+        readEventTypes(serverRoot().getParent().resolve("specs/006-event-based-architecture/contracts/event-catalog.md"),
+                "## Event types", rows);
+        readEventTypes(serverRoot().getParent().resolve("specs/007-notification-service/contracts/sale-completed-event.md"),
+                "## Event types (additions)", rows);
+        return rows;
+    }
+
+    private static void readEventTypes(Path file, String heading, Map<String, String[]> rows) throws IOException {
+        assertTrue(Files.isRegularFile(file), "Missing " + file);
+        int before = rows.size();
         boolean inTable = false;
         for (String line : Files.readAllLines(file)) {
-            if (line.startsWith("## ")) inTable = line.equals("## Event types");
+            if (line.startsWith("## ")) inTable = line.equals(heading);
             if (!inTable || !line.startsWith("| `")) continue;
             String[] cells = line.split("\\|");
             String type = cells[1].trim().replaceAll("`", "").replace("(reserved)", "").trim();
-            assertFalse(rows.containsKey(type), "event-catalog.md lists " + type + " twice");
+            assertFalse(rows.containsKey(type), "the event catalogs list " + type + " twice");
             rows.put(type, new String[] {cells[2].trim(), cells[3].trim()});
         }
-        assertFalse(rows.isEmpty(), "No event types found in " + file);
-        return rows;
+        assertTrue(rows.size() > before, "No event types found under " + heading + " in " + file);
     }
 
     /** Every {@code owner.name} of the class file's Methodref and InterfaceMethodref constants (JVMS 4.4). */

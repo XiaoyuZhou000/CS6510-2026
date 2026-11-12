@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * service-to-service mechanism: no gRPC, HTTP client, socket, or peer address (006 FR-006, SC-010).
  */
 class MicroserviceBoundaryTest {
-    private static final List<String> SERVICES = List.of("transaction", "inventory", "analytics");
+    private static final List<String> SERVICES = List.of("transaction", "inventory", "analytics", "notification");
     /**
      * The only business components allowed to hold in-memory state such as maps (Implementation Rule 4), plus
      * feature 006's catalog version buffer in {@code CatalogEventHandler} (data-model "In-memory projections").
@@ -142,7 +142,7 @@ class MicroserviceBoundaryTest {
         Path server = serverRoot();
         for (Path source : productionSources()) {
             String relative = server.relativize(source).toString().replace('\\', '/');
-            boolean adapter = relative.matches("(common|transaction|inventory|analytics)/src/messaging/.*");
+            boolean adapter = relative.matches("(common|transaction|inventory|analytics|notification)/src/messaging/.*");
             if (!adapter && KAFKA_REFERENCE.matcher(Files.readString(source)).find()) {
                 violations.add(source + " references org.apache.kafka outside a messaging adapter");
             }
@@ -236,7 +236,7 @@ class MicroserviceBoundaryTest {
                 "db/migrate-sql-materializer.sql", "server/benchmark-scan.ps1", "server/benchmark-materializer.ps1")) {
             if (Files.exists(repositoryRoot().resolve(retired))) violations.add(retired + " still exists");
         }
-        for (String owner : List.of("common", "transaction", "inventory", "analytics")) {
+        for (String owner : List.of("common", "transaction", "inventory", "analytics", "notification")) {
             try (Stream<Path> paths = Files.walk(server.resolve(owner + "/src"))) {
                 paths.map(path -> path.getFileName().toString())
                         .filter(name -> name.equals("ScanProfiler.java") || name.equals("JdbcScanMaterializer.java"))
@@ -293,7 +293,7 @@ class MicroserviceBoundaryTest {
         int checked = 0;
         Path server = serverRoot();
         List<URL> jars = new ArrayList<>();
-        for (String artifact : List.of("common", "contracts", "transaction", "inventory", "analytics")) {
+        for (String artifact : List.of("common", "contracts", "transaction", "inventory", "analytics", "notification")) {
             Path jar = server.resolve("out/" + artifact + ".jar");
             assertTrue(Files.isRegularFile(jar), "Missing artifact " + jar);
             jars.add(jar.toUri().toURL());
@@ -338,7 +338,7 @@ class MicroserviceBoundaryTest {
 
     private static List<Path> productionSources() throws Exception {
         List<Path> sources = new ArrayList<>();
-        for (String owner : List.of("common", "transaction", "inventory", "analytics")) {
+        for (String owner : List.of("common", "transaction", "inventory", "analytics", "notification")) {
             try (Stream<Path> paths = Files.walk(serverRoot().resolve(owner + "/src"))) {
                 paths.filter(path -> path.toString().endsWith(".java")).forEach(sources::add);
             }

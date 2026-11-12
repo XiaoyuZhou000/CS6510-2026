@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+jar=out/notification.jar
+connector=lib/mysql-connector-j-9.0.0.jar
+for required in out/common.jar out/contracts.jar "$jar" "$connector"; do
+  if [ ! -f "$required" ]; then
+    echo "Missing $required; run ./build.sh notification first" >&2
+    exit 1
+  fi
+done
+if [ -z "$(ls lib/messaging/kafka-clients-*.jar 2>/dev/null)" ]; then
+  echo "Missing messaging runtime in lib/messaging/; run ./build.sh notification first" >&2
+  exit 1
+fi
+case "$(uname -s)" in CYGWIN*|MINGW*|MSYS*) sep=';' ;; *) sep=':' ;; esac
+exec java -cp "$jar${sep}out/common.jar${sep}out/contracts.jar${sep}lib/messaging/*${sep}$connector" notification.NotificationMain "$@"

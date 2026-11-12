@@ -24,6 +24,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 
 /**
  * A deterministic stand-in for the Kafka broker (D14): a {@link RecordSender} and a factory of
@@ -32,6 +33,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <ul>
  *   <li><b>Partitions</b>: a keyed record goes to {@code murmur2(key) % partitions}, Kafka's default
  *       partitioner, with the production partition counts ({@link #withCatalogTopics}).</li>
+ *   <li><b>Channel topics</b> (007): a name of the form {@code <prefix>selfcheckout.notify.<subscriberId>.v1}
+ *       is created with one partition on its first send, assignment, or subscription, as Notification's
+ *       provisioning would have created it; any other unknown topic is still an error. {@link #assignedStream}
+ *       gives a consumer manually assigned to every partition of one topic, as the subscriber test application
+ *       reads its channel.</li>
  *   <li><b>Groups</b>: members of one group share a topic's partitions round-robin; a join or leave
  *       rebalances, calling {@code onRevoked} on the old owner and {@code onAssigned} on the new one from
  *       inside their next {@code poll}. A newly assigned partition starts at the group's committed offset,
@@ -55,6 +61,9 @@ public final class InMemoryEventBus implements RecordSender {
             for (int i = 0; i < count; i++) partitions.add(new ArrayList<>());
         }
     }
+
+    /** A channel topic name under any prefix (007 TopicNames.channel). */
+    private static final Pattern CHANNEL = Pattern.compile("^.*selfcheckout\\.notify\\.[A-Za-z0-9_-]{1,40}\\.v1$");
 
     private final Object lock = new Object();
     private final Map<String, Log> topics = new LinkedHashMap<>();
@@ -81,7 +90,7 @@ public final class InMemoryEventBus implements RecordSender {
         this.random = new Random(seed);
     }
 
-    /** A bus with the four catalog topics of {@code names} at their production partition counts. */
+    /** A bus with the five fixed catalog topics of {@code names} at their production partition counts. */
     public static InMemoryEventBus withCatalogTopics(TopicNames names, long seed) {
         InMemoryEventBus bus = new InMemoryEventBus(seed);
         for (TopicNames.Topic topic : TopicNames.Topic.values()) bus.createTopic(names.name(topic), topic.partitions());
@@ -92,6 +101,29 @@ public final class InMemoryEventBus implements RecordSender {
         synchronized (lock) {
             if (topics.containsKey(topic)) throw new IllegalStateException("topic exists: " + topic);
             topics.put(topic, new Log(partitions));
+        }
+    }
+
+    /** Creates {@code topic} unless it exists; returns whether it was created. */
+    public boolean createTopicIfAbsent(String topic, int partitions) {
+        synchronized (lock) {
+            if (topics.containsKey(topic)) return false;
+            topics.put(topic, new Log(partitions));
+            return true;
+        }
+    }
+
+    /** Whether {@code topic} exists. */
+    public boolean hasTopic(String topic) {
+        synchronized (lock) {
+            return topics.containsKey(topic);
+        }
+    }
+
+    /** Every topic name, in creation order. */
+    public List<String> topicNames() {
+        synchronized (lock) {
+            return List.copyOf(topics.keySet());
         }
     }
 
@@ -129,6 +161,17 @@ public final class InMemoryEventBus implements RecordSender {
     /** A new consumer, unsubscribed and unassigned. */
     public RecordStream stream() {
         return new Stream();
+    }
+
+    /** A new consumer without a group, manually assigned to every partition of {@code topic} from offset 0. */
+    public RecordStream assignedStream(String topic) {
+        Stream stream = new Stream();
+        List<RecordStream.Partition> partitions = new ArrayList<>();
+        synchronized (lock) {
+            for (int p = 0; p < log(topic).partitions.size(); p++) partitions.add(new RecordStream.Partition(topic, p));
+        }
+        stream.assign(partitions);
+        return stream;
     }
 
     // ---- fault controls ----
@@ -218,8 +261,13 @@ public final class InMemoryEventBus implements RecordSender {
         return List.copyOf(sendLog);
     }
 
+    /** Callers hold {@link #lock}. A channel topic is created with one partition on first use. */
     private Log log(String topic) {
         Log log = topics.get(topic);
+        if (log == null && CHANNEL.matcher(topic).matches()) {
+            log = new Log(1);
+            topics.put(topic, log);
+        }
         if (log == null) throw new IllegalArgumentException("unknown topic " + topic);
         return log;
     }

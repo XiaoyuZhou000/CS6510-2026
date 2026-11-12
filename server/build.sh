@@ -82,28 +82,36 @@ build_service() {
 
 case "${1:-all}" in
   all)
-    [ "$#" -eq 0 ] || { echo "Usage: ./build.sh [contracts|transaction|inventory|analytics]" >&2; exit 2; }
+    [ "$#" -eq 0 ] || { echo "Usage: ./build.sh [contracts|transaction|inventory|analytics|notification]" >&2; exit 2; }
     build_contracts
     build_common
     build_service transaction
     build_service inventory
     build_service analytics
+    build_service notification
     ;;
   transaction|inventory|analytics)
-    [ "$#" -eq 1 ] || { echo "Usage: ./build.sh [contracts|transaction|inventory|analytics]" >&2; exit 2; }
+    [ "$#" -eq 1 ] || { echo "Usage: ./build.sh [contracts|transaction|inventory|analytics|notification]" >&2; exit 2; }
     build_contracts
     build_common
     build_service "$1"
     ;;
+  notification)
+    # Notification Service (007), built like the three 006 services from server/notification/src.
+    [ "$#" -eq 1 ] || { echo "Usage: ./build.sh [contracts|transaction|inventory|analytics|notification]" >&2; exit 2; }
+    build_contracts
+    build_common
+    build_service notification
+    ;;
   contracts)
     # Only the generated event classes and the messaging runtime (out/contracts.jar, lib/messaging/),
     # which the subscriber test application also needs (007 contracts/subscriber-client-and-reconciliation.md).
-    [ "$#" -eq 1 ] || { echo "Usage: ./build.sh [contracts|transaction|inventory|analytics]" >&2; exit 2; }
+    [ "$#" -eq 1 ] || { echo "Usage: ./build.sh [contracts|transaction|inventory|analytics|notification]" >&2; exit 2; }
     build_contracts
     echo "Built out/contracts.jar"
     ;;
   *)
-    echo "Usage: ./build.sh [contracts|transaction|inventory|analytics]" >&2
+    echo "Usage: ./build.sh [contracts|transaction|inventory|analytics|notification]" >&2
     exit 2
     ;;
 esac

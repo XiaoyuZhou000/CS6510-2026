@@ -89,6 +89,6 @@ public final class CatalogPublisher {
         String eventId = UUID.randomUUID().toString();
         byte[] envelope = EnvelopeCodec.encode(eventId, type, key, version, EventTypes.INVENTORY, now.toEpochMilli(),
                 payload);
-        return new OutboxRow(eventId, names.name(type.topic()), key, type.typeName(), null, envelope, now);
+        return new OutboxRow(eventId, names.name(type.topic().orElseThrow()), key, type.typeName(), null, envelope, now);
     }
 }

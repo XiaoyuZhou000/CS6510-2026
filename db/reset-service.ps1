@@ -9,12 +9,18 @@
     <SERVICE>_DB_PASSWORD or a secure prompt and reaches mysql through MYSQL_PWD.
     Prints the resulting row counts. No other service's schema is touched.
 
+    Notification's user may only read and write rows (007 T012), so its
+    schema.sql runs with the admin credentials (DB_USER, default root, and
+    DB_PASSWORD) against cs6510_notification; its row counts are then read as
+    the Notification user, which checks that user's access too.
+
 .EXAMPLE
     ./reset-service.ps1 -Service inventory
     ./reset-service.ps1 -Service transaction -Port 3307
+    ./reset-service.ps1 -Service notification
 #>
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('transaction', 'inventory', 'analytics')][string]$Service,
+    [Parameter(Mandatory = $true)][ValidateSet('transaction', 'inventory', 'analytics', 'notification')][string]$Service,
     [string]$MySqlHost = "127.0.0.1",
     [int]$Port = 3307,
     [string]$MySqlExe
@@ -25,6 +31,8 @@ $ErrorActionPreference = "Stop"
 
 $mysql = Resolve-MySqlExe -Explicit $MySqlExe
 $credential = Get-ServiceDbCredential -Service $Service
+$schemaCredential = $credential
+if ($Service -eq 'notification') { $schemaCredential = Get-AdminDbCredential -Database $credential.Database }
 $scripts = @(Join-Path $PSScriptRoot "$Service/schema.sql")
 if ($Service -eq 'inventory') { $scripts += Join-Path $PSScriptRoot 'inventory/seed.sql' }
 
@@ -44,15 +52,22 @@ $counts = @{
                   "(SELECT COUNT(*) FROM product_name) AS product_names, " +
                   "(SELECT COUNT(*) FROM popular_window) AS popular_windows, " +
                   "(SELECT last_window_end FROM analytics_checkpoint WHERE checkpoint_key = 1) AS last_window_end"
+    notification = "SELECT (SELECT version FROM subscription_clock WHERE id = 1) AS subscription_version, " +
+                  "(SELECT COUNT(*) FROM subscriber) AS subscribers, " +
+                  "(SELECT COUNT(*) FROM subscription) AS subscriptions, " +
+                  "(SELECT COUNT(*) FROM subscription_change) AS subscription_changes, " +
+                  "(SELECT COUNT(*) FROM sale_selection) AS sale_selections, " +
+                  "(SELECT COUNT(*) FROM notification) AS notifications, " +
+                  "(SELECT COUNT(*) FROM dead_letter_event) AS parked_events"
 }
 
 try {
-    Write-Host "Resetting $Service schema '$($credential.Database)' on ${MySqlHost}:$Port as '$($credential.User)'..." -ForegroundColor Cyan
+    Write-Host "Resetting $Service schema '$($credential.Database)' on ${MySqlHost}:$Port as '$($schemaCredential.User)'..." -ForegroundColor Cyan
     foreach ($file in $scripts) {
         if (-not (Test-Path $file)) { throw "SQL script not found: $file" }
         Write-Host "  running $file" -ForegroundColor DarkGray
-        Invoke-MySql -MySql $mysql -MySqlHost $MySqlHost -Port $Port -User $credential.User `
-            -Password $credential.Password -Database $credential.Database `
+        Invoke-MySql -MySql $mysql -MySqlHost $MySqlHost -Port $Port -User $schemaCredential.User `
+            -Password $schemaCredential.Password -Database $schemaCredential.Database `
             -InputText (Get-Content -Raw -Encoding UTF8 $file) | Out-Null
     }
     Invoke-MySql -MySql $mysql -MySqlHost $MySqlHost -Port $Port -User $credential.User `

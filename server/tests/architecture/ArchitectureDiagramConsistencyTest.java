@@ -45,6 +45,22 @@ class ArchitectureDiagramConsistencyTest {
     private static final Pattern CREATE_TABLE = Pattern.compile("(?m)^CREATE TABLE `?(\\w+)`?");
     private static final Pattern MERMAID_CLI = Pattern.compile("@mermaid-js/mermaid-cli@\\d+\\.\\d+\\.\\d+");
 
+    /**
+     * The 006 diagram's topics: those of {@link TopicNames} without 007's sale-completed topic, which the
+     * Notification diagram draws (007 T118).
+     */
+    private static List<String> diagrammedTopics() {
+        TopicNames names = TopicNames.unprefixed();
+        return names.all().stream().filter(topic -> !topic.equals(names.saleCompleted())).toList();
+    }
+
+    /** The 006 diagram's event types: those on its topics, so neither of 007's two types (007 T118). */
+    private static List<EventTypes> diagrammedTypes() {
+        return java.util.Arrays.stream(EventTypes.values())
+                .filter(type -> type.topic().filter(topic -> topic != TopicNames.Topic.SALE_COMPLETED).isPresent())
+                .toList();
+    }
+
     record Node(String id, String label, String parent) {}
 
     record Edge(String from, String to, String label, int line) {}
@@ -88,7 +104,7 @@ class ArchitectureDiagramConsistencyTest {
             }
         }
         Node broker = diagram.labelled("Kafka");
-        for (String topic : TopicNames.unprefixed().all()) {
+        for (String topic : diagrammedTopics()) {
             Node node = diagram.labelled(topic);
             assertTrue(diagram.within(node, broker), topic + " is drawn inside the broker");
         }
@@ -103,15 +119,15 @@ class ArchitectureDiagramConsistencyTest {
     void everyProducerAndConsumerGroupEdgeOfTheEventCatalogIsDrawn() throws Exception {
         Diagram diagram = diagram();
         Map<String, String[]> topics = catalogTopics();
-        assertEquals(new TreeSet<>(TopicNames.unprefixed().all()), new TreeSet<>(topics.keySet()),
+        assertEquals(new TreeSet<>(diagrammedTopics()), new TreeSet<>(topics.keySet()),
                 "the event catalog lists the topics of TopicNames");
         Set<String> groups = new TreeSet<>();
         for (String[] row : topics.values()) if (!row[2].isEmpty()) groups.add(row[2]);
         assertEquals(new TreeSet<>(Set.of(TopicNames.INVENTORY_CHECKOUT_GROUP, TopicNames.TRANSACTION_CHECKOUT_OUTCOME_GROUP,
                 TopicNames.ANALYTICS_SCAN_INGEST_GROUP)), groups, "the event catalog names the consumer groups of TopicNames");
         List<String> violations = new ArrayList<>();
-        for (EventTypes type : EventTypes.values()) {
-            String topic = TopicNames.unprefixed().name(type.topic());
+        for (EventTypes type : diagrammedTypes()) {
+            String topic = TopicNames.unprefixed().name(type.topic().orElseThrow());
             String[] row = topics.get(topic);
             if (!row[0].equals(type.producer())) violations.add(type + ": catalog producer " + row[0]);
             Node topicNode = diagram.labelled(topic);
@@ -205,7 +221,7 @@ class ArchitectureDiagramConsistencyTest {
         assertTrue(Files.isRegularFile(svg), "Missing " + svg);
         String image = Files.readString(svg, StandardCharsets.UTF_8);
         assertTrue(image.contains("<svg"), SVG + " is an SVG document");
-        for (String topic : TopicNames.unprefixed().all()) assertTrue(image.contains(topic), SVG + " names " + topic);
+        for (String topic : diagrammedTopics()) assertTrue(image.contains(topic), SVG + " names " + topic);
         for (String group : List.of(TopicNames.INVENTORY_CHECKOUT_GROUP, TopicNames.TRANSACTION_CHECKOUT_OUTCOME_GROUP,
                 TopicNames.ANALYTICS_SCAN_INGEST_GROUP)) {
             assertTrue(image.contains(group), SVG + " names " + group);

@@ -68,7 +68,7 @@ These rules bind every task below.
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T007 Extend `server/common/src/events/TopicNames.java`:
+- [X] T007 Extend `server/common/src/events/TopicNames.java`:
   - add `Topic.SALE_COMPLETED("selfcheckout.sale-completed.v1", 16)`;
   - add `NOTIFICATION_SALE_COMPLETED_GROUP = "notification-sale-completed"`;
   - add `saleCompleted()`;
@@ -76,14 +76,14 @@ These rules bind every task below.
   - add `isChannel(String name)`.
 
   `all()` returns the five fixed topics in catalog order (catalog, checkout, checkout-outcome, scan-accepted, sale-completed).
-- [ ] T008 Extend `server/common/src/events/EventTypes.java`:
+- [X] T008 Extend `server/common/src/events/EventTypes.java`:
   - add the producer constant `NOTIFICATION = "notification"`;
   - add `SALE_COMPLETED("SaleCompleted", Topic.SALE_COMPLETED, TRANSACTION, SaleCompleted.parser(), p -> ((SaleCompleted) p).getTransactionId())`;
   - add `SUBSCRIBER_NOTIFIED` with producer `NOTIFICATION` and routing key `subscriber_id`; its topic is the subscriber's channel, so model it as a channel-family type whose `topic()` is empty and add `isChannelType()`.
 
   Add `server/common/src/events/EventIds.java` with `saleEventId(String transactionId)`, returning `UUID.nameUUIDFromBytes(("sale:" + transactionId).getBytes(UTF_8)).toString()`, and `notificationId(String saleId, String sku, String subscriberId)` over `"notification:" + saleId + ":" + sku + ":" + subscriberId`. Keep `EnvelopeCodec` validation working for channel-family types (producer and routing-key checks).
-- [ ] T009 [P] Add `KafkaClients.admin(String bootstrap)` to `server/common/src/messaging/KafkaClients.java`, returning a configured `org.apache.kafka.clients.admin.Admin` with `request.timeout.ms=5000` and `default.api.timeout.ms=10000`.
-- [ ] T010 Write `db/notification/schema.sql` exactly per [data-model.md](data-model.md) §2, with InnoDB tables and `utf8mb4`:
+- [X] T009 [P] Add `KafkaClients.admin(String bootstrap)` to `server/common/src/messaging/KafkaClients.java`, returning a configured `org.apache.kafka.clients.admin.Admin` with `request.timeout.ms=5000` and `default.api.timeout.ms=10000`.
+- [X] T010 Write `db/notification/schema.sql` exactly per [data-model.md](data-model.md) §2, with InnoDB tables and `utf8mb4`:
   - `subscription_clock` (`id` TINYINT PK with CHECK `id = 1`; `version` BIGINT NOT NULL), seeded with `(1, 0)`.
   - `subscriber`: `subscriber_id` VARCHAR(40) PK; `status` ENUM('ACTIVE','CANCELLED'); `channel_topic` VARCHAR(200) NOT NULL; `channel_ready` BOOLEAN NOT NULL DEFAULT FALSE; `created_version` and `updated_version` BIGINT NOT NULL; `created_at` and `updated_at` TIMESTAMP(3).
   - `subscription`: `subscriber_id` VARCHAR(40) FK → `subscriber`; `sku` VARCHAR(20); `added_version` BIGINT NOT NULL; PK (`subscriber_id`, `sku`); index (`sku`, `subscriber_id`).
@@ -91,34 +91,34 @@ These rules bind every task below.
   - `sale_selection`: `sale_id` VARCHAR(40) PK; `sale_event_id` CHAR(36) NOT NULL; `completed_at` TIMESTAMP(3) NOT NULL; `lines` TEXT NOT NULL; `subscription_version` BIGINT NOT NULL; `recipient_count` and `notification_count` INT NOT NULL; `selected_at` TIMESTAMP(3) NOT NULL.
   - `notification`: `notification_id` CHAR(36) PK; `sale_id` VARCHAR(40) NOT NULL FK → `sale_selection`; `sku` VARCHAR(20) NOT NULL; `subscriber_id` VARCHAR(40) NOT NULL; `quantity` INT NOT NULL with CHECK > 0; `completed_at` TIMESTAMP(3) NOT NULL; `state` ENUM('PENDING','DELIVERED','PARKED'); `attempt_count`, `charged_failures`, `uncharged_failures`, and `operator_retries` INT NOT NULL DEFAULT 0; `next_attempt_at` TIMESTAMP(3) NOT NULL; `last_error` VARCHAR(255) NULL; `created_at` TIMESTAMP(3) NOT NULL; `delivered_at` and `parked_at` TIMESTAMP(3) NULL; UNIQUE (`sale_id`, `sku`, `subscriber_id`); INDEX (`state`, `next_attempt_at`); INDEX (`subscriber_id`, `state`); CHECKs `(state = 'DELIVERED') = (delivered_at IS NOT NULL)` and `(state = 'PARKED') = (parked_at IS NOT NULL)`.
   - `dead_letter_event`: identical to `db/transaction/schema.sql`'s.
-- [ ] T011 [P] Write `db/notification/validate.sql`, covering:
+- [X] T011 [P] Write `db/notification/validate.sql`, covering:
   - `subscription_change.version` is contiguous from 1 to `subscription_clock.version`;
   - every `notification.sale_id` has a `sale_selection`;
   - `sale_selection.notification_count` equals its rows;
   - no `DELIVERED` row lacks `delivered_at`;
   - counts by state, and parked events.
-- [ ] T012 Extend `db/bootstrap.sql` and `db/bootstrap.ps1`:
+- [X] T012 Extend `db/bootstrap.sql` and `db/bootstrap.ps1`:
   - `CREATE DATABASE IF NOT EXISTS cs6510_notification`;
   - user `cs6510_notification_svc` at `localhost` and `127.0.0.1`, identified by the `{{NOTIFICATION_DB_PASSWORD}}` placeholder, with `REVOKE ALL` and then `SELECT, INSERT, UPDATE, DELETE` on `cs6510_notification.*` only, as for the other three users;
   - `bootstrap.ps1` reads `NOTIFICATION_DB_PASSWORD` from the user environment without printing it, and fails with a clear message if it is unset.
-- [ ] T013 Extend `db/reset-service.ps1` (new `-Service notification`, which applies `db/notification/schema.sql` with the admin credentials), `db/reset-all.ps1` (four services), and `db/reset-baseline.ps1`:
+- [X] T013 Extend `db/reset-service.ps1` (new `-Service notification`, which applies `db/notification/schema.sql` with the admin credentials), `db/reset-all.ps1` (four services), and `db/reset-baseline.ps1`:
   - refuse to run while 8081–8084 answer;
   - reset Notification to `subscription_clock.version = 0` and no other rows;
   - add `-RunDir`, which removes that run directory after the broker reset;
   - print the Notification counts and the five-topic list in the baseline summary.
-- [ ] T014 Add the `notification` target to `server/build.sh`, building `out/notification.jar` from `server/notification/src` against `out/common.jar`, `out/contracts.jar`, `lib/messaging/*`, and Connector/J; include it in `all`. Add `out/notification.jar` to the classpaths in `server/build-tests.sh` and `server/run-tests.sh`. Create `server/run-notification.sh`, mirroring `server/run-transaction.sh`, with main class `notification.NotificationMain`.
-- [ ] T015 Create `server/notification/src/notification/NotificationConfig.java`, reading every variable in the configuration table of [contracts/deployment-and-evidence.md](contracts/deployment-and-evidence.md#notification-configuration) with its defaults (`NOTIFICATION_HTTP_PORT` 8084, `NOTIFICATION_DB_POOL_SIZE` 12, `NOTIFICATION_DB_POOL_MAX_SIZE` 20, `NOTIFICATION_SALE_CONSUMER_THREADS` 4, `NOTIFICATION_LANE_IN_FLIGHT` 64, `NOTIFICATION_PARK_AFTER_CHARGED` 8, `NOTIFICATION_SWEEP_MS` 1000, `NOTIFICATION_TEST_FAULTS` unset). Create `server/notification/src/notification/NotificationMain.java` as the composition root:
+- [X] T014 Add the `notification` target to `server/build.sh`, building `out/notification.jar` from `server/notification/src` against `out/common.jar`, `out/contracts.jar`, `lib/messaging/*`, and Connector/J; include it in `all`. Add `out/notification.jar` to the classpaths in `server/build-tests.sh` and `server/run-tests.sh`. Create `server/run-notification.sh`, mirroring `server/run-transaction.sh`, with main class `notification.NotificationMain`.
+- [X] T015 Create `server/notification/src/notification/NotificationConfig.java`, reading every variable in the configuration table of [contracts/deployment-and-evidence.md](contracts/deployment-and-evidence.md#notification-configuration) with its defaults (`NOTIFICATION_HTTP_PORT` 8084, `NOTIFICATION_DB_POOL_SIZE` 12, `NOTIFICATION_DB_POOL_MAX_SIZE` 20, `NOTIFICATION_SALE_CONSUMER_THREADS` 4, `NOTIFICATION_LANE_IN_FLIGHT` 64, `NOTIFICATION_PARK_AFTER_CHARGED` 8, `NOTIFICATION_SWEEP_MS` 1000, `NOTIFICATION_TEST_FAULTS` unset). Create `server/notification/src/notification/NotificationMain.java` as the composition root:
   - the `ConnectionPool` for `cs6510_notification`, the JDK `HttpServer` on the port, and `StatusReporter`;
   - shutdown in the 006 order: HTTP, then consumers, dispatcher, workers, producers, and the pool;
   - it starts with the broker down, because producers are lazy.
-- [ ] T016 [P] Add to `deploy/nginx.conf` the upstream `notification_service { server 127.0.0.1:8084; }` and `location ^~ /notifications/ { proxy_pass http://notification_service; }` with the same proxy settings and `@upstream_unavailable` handling as the existing locations. Leave every existing location byte-identical.
-- [ ] T017 [P] Add `server/tests/support/NotificationTestSchema.java` (apply and reset `db/notification/schema.sql` in a test schema) and `server/tests/support/InProcessNotification.java` (start Notification's components against a schema and an `InMemoryEventBus`, with `restart()` and `crash()`). Extend `server/tests/support/InMemoryEventBus.java` so topics are created on first use, which channel topics need, and so consumers can be manually assigned per topic.
-- [ ] T018 Extend the architecture tests to four services:
+- [X] T016 [P] Add to `deploy/nginx.conf` the upstream `notification_service { server 127.0.0.1:8084; }` and `location ^~ /notifications/ { proxy_pass http://notification_service; }` with the same proxy settings and `@upstream_unavailable` handling as the existing locations. Leave every existing location byte-identical.
+- [X] T017 [P] Add `server/tests/support/NotificationTestSchema.java` (apply and reset `db/notification/schema.sql` in a test schema) and `server/tests/support/InProcessNotification.java` (start Notification's components against a schema and an `InMemoryEventBus`, with `restart()` and `crash()`). Extend `server/tests/support/InMemoryEventBus.java` so topics are created on first use, which channel topics need, and so consumers can be manually assigned per topic.
+- [X] T018 Extend the architecture tests to four services:
   - `server/tests/architecture/LayerDependencyTest.java`: Notification's `api` → business → `database`, with Kafka only in `messaging`;
   - `MicroserviceBoundaryTest.java`: no imports between `transaction`, `inventory`, `analytics`, and `notification`;
   - `CompositionRootTest.java`: `NotificationMain`'s shutdown order;
   - `OutboxOnlyPublishTest.java`: `NotificationDispatcher` is the only Notification caller of `RecordSender` (Implementation Rule 2).
-- [ ] T019 Extend `server/tests/messaging/EventSchemaCompatibilityTest.java` to the two new baselines (no renumbered or retyped field, and the parsers round-trip), and add `SALE_COMPLETED` and `SUBSCRIBER_NOTIFIED` to its producer and routing-key assertions.
+- [X] T019 Extend `server/tests/messaging/EventSchemaCompatibilityTest.java` to the two new baselines (no renumbered or retyped field, and the parsers round-trip), and add `SALE_COMPLETED` and `SUBSCRIBER_NOTIFIED` to its producer and routing-key assertions.
 
 **Checkpoint**: `server/build.sh all` and `server/run-tests.sh architecture messaging` pass. `server/run-notification.sh` starts, `GET :8084/notifications/ops/status` is not yet implemented (404 is fine), and `db/reset-baseline.ps1` resets four schemas and five topics.
 

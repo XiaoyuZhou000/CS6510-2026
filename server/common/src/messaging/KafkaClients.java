@@ -1,5 +1,7 @@
 package messaging;
 
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -32,6 +34,8 @@ import java.util.function.Supplier;
  *       {@code max.poll.records=500}, and {@code session.timeout.ms=10000} with {@code heartbeat.interval.ms=3000},
  *       so a crashed member's partitions are reassigned within about 10 s. A consumer without a group (the
  *       catalog reader) never commits.</li>
+ *   <li><b>Admin</b> (007, channel provisioning): {@code request.timeout.ms=5000} and
+ *       {@code default.api.timeout.ms=10000}, so a call against a stopped broker fails within seconds.</li>
  * </ul>
  */
 public final class KafkaClients {
@@ -46,6 +50,8 @@ public final class KafkaClients {
      */
     static final String SESSION_TIMEOUT_MS = "10000";
     static final String HEARTBEAT_INTERVAL_MS = "3000";
+    static final String ADMIN_REQUEST_TIMEOUT_MS = "5000";
+    static final String ADMIN_API_TIMEOUT_MS = "10000";
 
     private KafkaClients() { }
 
@@ -104,6 +110,20 @@ public final class KafkaClients {
 
     public static KafkaConsumer<String, byte[]> consumer(Map<String, String> environment, String clientId, String group) {
         return new KafkaConsumer<>(consumerProperties(environment, clientId, group));
+    }
+
+    public static Properties adminProperties(String bootstrap) {
+        if (bootstrap == null || bootstrap.isBlank()) throw new IllegalArgumentException("bootstrap is required");
+        Properties properties = new Properties();
+        properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap.trim());
+        properties.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, ADMIN_REQUEST_TIMEOUT_MS);
+        properties.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, ADMIN_API_TIMEOUT_MS);
+        return properties;
+    }
+
+    /** An admin client for {@code bootstrap}, for creating and describing channel topics; the caller closes it. */
+    public static Admin admin(String bootstrap) {
+        return Admin.create(adminProperties(bootstrap));
     }
 
     /**

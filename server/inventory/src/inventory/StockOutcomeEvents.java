@@ -112,7 +112,7 @@ public final class StockOutcomeEvents {
         Instant now = clock.instant().truncatedTo(ChronoUnit.MILLIS);
         String key = attempt.transactionId();
         byte[] envelope = EnvelopeCodec.encode(eventId, type, key, key, EventTypes.INVENTORY, now.toEpochMilli(), payload);
-        return new OutboxRow(eventId, names.name(type.topic()), key, type.typeName(),
+        return new OutboxRow(eventId, names.name(type.topic().orElseThrow()), key, type.typeName(),
                 EventTypes.attemptKey(attempt.transactionId(), attempt.attemptNumber()), envelope, now);
     }
 

@@ -77,7 +77,7 @@ public final class KafkaTestSupport {
         return new TopicNames("t-" + UUID.randomUUID().toString().substring(0, 8) + ".");
     }
 
-    /** Creates the four catalog topics under {@code names}' prefix with their production configuration. */
+    /** Creates the five fixed catalog topics under {@code names}' prefix with their production configuration. */
     public static void createCatalogTopics(TopicNames names) {
         List<NewTopic> topics = new ArrayList<>();
         for (TopicNames.Topic topic : TopicNames.Topic.values()) {

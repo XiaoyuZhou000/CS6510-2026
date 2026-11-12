@@ -12,7 +12,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Static gate over every production source in the four build roots. */
+/** Static gate over every production source in the five build roots (common and the four services, 007). */
 class LayerDependencyTest {
     private static final Pattern PACKAGE = Pattern.compile("(?m)^package\\s+([a-zA-Z0-9_.]+)\\s*;");
     private static final Pattern SQL = Pattern.compile(
@@ -27,7 +27,7 @@ class LayerDependencyTest {
         Path server = serverRoot();
         List<String> violations = new ArrayList<>();
         int count = 0;
-        for (String owner : List.of("common", "transaction", "inventory", "analytics")) {
+        for (String owner : OWNERS) {
             Path root = server.resolve(owner + "/src");
             assertTrue(Files.isDirectory(root), "Missing source root: " + root);
             try (Stream<Path> paths = Files.walk(root)) {
@@ -78,12 +78,12 @@ class LayerDependencyTest {
     void domainSourcesDoNotImportPeersAndCommonHasNoBusinessPackage() throws Exception {
         Path server = serverRoot();
         List<String> violations = new ArrayList<>();
-        for (String owner : List.of("transaction", "inventory", "analytics")) {
+        for (String owner : SERVICES) {
             Path root = server.resolve(owner + "/src");
             try (Stream<Path> paths = Files.walk(root)) {
                 for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
                     String body = Files.readString(source);
-                    for (String peer : List.of("transaction", "inventory", "analytics")) {
+                    for (String peer : SERVICES) {
                         if (!peer.equals(owner) && (Pattern.compile("(?m)^import\\s+" + peer + "\\.").matcher(body).find()
                                 || Pattern.compile("\\b" + peer + "\\.[A-Z]").matcher(body).find())) {
                             violations.add(source + " imports peer domain " + peer);
@@ -96,19 +96,19 @@ class LayerDependencyTest {
         assertTrue(Files.isRegularFile(jar), "Missing common artifact: " + jar);
         try (java.util.jar.JarFile archive = new java.util.jar.JarFile(jar.toFile())) {
             archive.stream().map(java.util.zip.ZipEntry::getName)
-                    .filter(name -> name.matches("^(transaction|inventory|analytics)/.*\\.class$"))
+                    .filter(name -> name.matches("^(transaction|inventory|analytics|notification)/.*\\.class$"))
                     .forEach(name -> violations.add("common.jar contains business class " + name));
         }
         try (Stream<Path> paths = Files.walk(server.resolve("common/src"))) {
             for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
                 String body = Files.readString(source);
                 Matcher declared = PACKAGE.matcher(body);
-                if (!declared.find() || List.of("transaction", "inventory", "analytics")
+                if (!declared.find() || SERVICES
                         .stream().anyMatch(domain -> declared.group(1).equals(domain)
                                 || declared.group(1).startsWith(domain + "."))) {
                     violations.add(source + " contains business package");
                 }
-                for (String domain : List.of("transaction", "inventory", "analytics")) {
+                for (String domain : SERVICES) {
                     if (Pattern.compile("(?m)^import\\s+" + domain + "\\.").matcher(body).find()) {
                         violations.add(source + " imports business package " + domain);
                     }
@@ -128,7 +128,7 @@ class LayerDependencyTest {
     void messagingAdaptersAreWiredOnlyByCompositionRoots() throws Exception {
         Path server = serverRoot();
         List<String> violations = new ArrayList<>();
-        for (String owner : List.of("common", "transaction", "inventory", "analytics")) {
+        for (String owner : OWNERS) {
             if (Files.exists(server.resolve(owner + "/src/rpc"))) violations.add(owner + "/src/rpc/ still exists");
             try (Stream<Path> paths = Files.walk(server.resolve(owner + "/src"))) {
                 for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
@@ -168,7 +168,7 @@ class LayerDependencyTest {
                     Matcher imports = IMPORT.matcher(Files.readString(source));
                     while (imports.find()) {
                         String imported = imports.group(1);
-                        if (imported.matches("(messaging|org\\.apache\\.kafka|transaction|inventory|analytics)(\\..*)?")) {
+                        if (imported.matches("(messaging|org\\.apache\\.kafka|transaction|inventory|analytics|notification)(\\..*)?")) {
                             violations.add(source + " imports " + imported);
                         }
                     }
@@ -196,8 +196,8 @@ class LayerDependencyTest {
                 continue;
             }
             String forbidden = shared.equals("events")
-                    ? "(transaction|inventory|analytics|api)(\\..*)?"
-                    : "(transaction|inventory|analytics|api|database)(\\..*)?";
+                    ? "(transaction|inventory|analytics|notification|api)(\\..*)?"
+                    : "(transaction|inventory|analytics|notification|api|database)(\\..*)?";
             try (Stream<Path> paths = Files.walk(root)) {
                 for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
                     String body = Files.readString(source);
@@ -236,7 +236,7 @@ class LayerDependencyTest {
                 if (!name.endsWith(".class")) continue;
                 if (name.startsWith("selfcheckout/events/")) events++;
                 else violations.add("contracts.jar contains a non-event class " + name);
-                if (name.matches("^(transaction|inventory|analytics|api|database|rpc|metrics|events|messaging|contracts)/.*")) {
+                if (name.matches("^(transaction|inventory|analytics|notification|api|database|rpc|metrics|events|messaging|contracts)/.*")) {
                     violations.add("contracts.jar contains business, shared, or gRPC class " + name);
                 }
                 if (name.contains("Grpc")) violations.add("contracts.jar contains a gRPC stub " + name);
@@ -246,6 +246,50 @@ class LayerDependencyTest {
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
     }
 
+    /**
+     * Notification's layers (007 T018): {@code api} → business ({@code notification}) → {@code database}. The
+     * business and database layers never import {@code api}, the database layer never imports the business
+     * layer's entry point, and Kafka types appear only in {@code messaging}; {@code NotificationMain} wires them.
+     */
+    @Test
+    void notificationKeepsApiBusinessDatabaseLayersAndKafkaOnlyInMessaging() throws Exception {
+        Path root = serverRoot().resolve("notification/src");
+        assertTrue(Files.isDirectory(root.resolve("notification")), "Missing Notification business package");
+        List<String> violations = new ArrayList<>();
+        int count = 0;
+        try (Stream<Path> paths = Files.walk(root)) {
+            for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
+                count++;
+                String body = Files.readString(source);
+                Matcher declared = PACKAGE.matcher(body);
+                if (!declared.find()) continue;
+                String packageName = declared.group(1);
+                boolean compositionRoot = source.getFileName().toString().equals("NotificationMain.java");
+                Matcher imports = IMPORT.matcher(body);
+                while (imports.find()) {
+                    String imported = imports.group(1);
+                    if (imported.startsWith("org.apache.kafka.") && !packageName.equals("messaging")) {
+                        violations.add(source + ": Kafka type outside messaging: " + imported);
+                    }
+                    if (imported.startsWith("api.") && !packageName.equals("api") && !compositionRoot) {
+                        violations.add(source + ": " + packageName + " imports the api layer: " + imported);
+                    }
+                    if (packageName.equals("database") && imported.equals("notification.NotificationMain")) {
+                        violations.add(source + ": the database layer imports the composition root");
+                    }
+                }
+                if (!List.of("api", "notification", "database", "messaging").contains(packageName)) {
+                    violations.add(source + ": package " + packageName + " is not one of Notification's four layers");
+                }
+            }
+        }
+        assertTrue(count > 0, "No Notification sources found");
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    /** The build roots: the shared code and the four services. */
+    private static final List<String> OWNERS = List.of("common", "transaction", "inventory", "analytics", "notification");
+    private static final List<String> SERVICES = List.of("transaction", "inventory", "analytics", "notification");
     private static final Pattern IMPORT = Pattern.compile("(?m)^import\\s+(?:static\\s+)?([a-zA-Z0-9_.]+)\\s*;");
     private static final Pattern MESSAGING_REFERENCE = Pattern.compile(
             "(?m)(^import\\s+(?:static\\s+)?messaging\\.)|(?<![A-Za-z0-9_.])messaging\\.[A-Z]");

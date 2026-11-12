@@ -157,6 +157,54 @@ class CompositionRootTest {
         }
     }
 
+    /**
+     * {@code NotificationMain} is an independent composition root like the other three (007 T015, T018): its own
+     * HTTP server on virtual threads, its own pool, configuration, metrics, and status, no import of a peer
+     * domain, and only lazy producers ({@code KafkaClients.sender}), so it starts while the broker is down.
+     * Its shutdown hook keeps 006's order: HTTP, then the consumers, the dispatcher, the workers, and the
+     * producers, then the pool. Each stage a story adds is appended here as it is wired.
+     */
+    @Test
+    void notificationMainIsAnIndependentRootAndShutsDownInTheContractOrder() throws Exception {
+        Path main = mainSource("notification");
+        String source = Files.readString(main);
+        for (String wired : List.of("HttpServer.create", "newVirtualThreadPerTaskExecutor", "new ConnectionPool(",
+                "NotificationConfig.fromEnvironment(", "MetricsReporter.start(\"notification\")",
+                "StatusReporter.start(\"notification\"", "new NotificationStatusQueries(pool)", "addShutdownHook")) {
+            assertTrue(source.contains(wired), main + " wires " + wired);
+        }
+        for (String peer : List.of("transaction", "inventory", "analytics")) {
+            assertFalse(source.matches("(?s).*import\\s+" + peer + "\\..*"), main + " imports peer domain " + peer);
+        }
+        assertFalse(source.contains("KafkaClients.producer("), main + " creates no eager producer");
+        assertFalse(source.contains("KafkaClients.admin("), main + " opens no admin client at startup");
+        String config = Files.readString(serverRoot().resolve("notification/src/notification/NotificationConfig.java"));
+        assertTrue(config.contains("DatabaseConfig.fromEnvironment(settings, PREFIX, DEFAULT_SCHEMA, DEFAULT_USER"),
+                "NotificationConfig reads only the NOTIFICATION_DB_* settings");
+        assertTrue(config.contains("DEFAULT_SCHEMA = \"cs6510_notification\"")
+                && config.contains("DEFAULT_USER = \"cs6510_notification_svc\""), "Notification's own schema and user");
+
+        List<List<String>> stages = List.of(List.of("server.stop("), List.of("status.stop()", "reporter.stop()"),
+                List.of("pool.close()"));
+        String hook = shutdownHook(source, main);
+        int previousLast = -1;
+        String previousStage = "start";
+        for (List<String> stage : stages) {
+            int first = Integer.MAX_VALUE;
+            int last = -1;
+            for (String call : stage) {
+                int at = hook.indexOf(call);
+                assertTrue(at >= 0, main + "'s shutdown hook calls " + call);
+                assertEquals(at, hook.lastIndexOf(call), main + "'s shutdown hook calls " + call + " once");
+                first = Math.min(first, at);
+                last = Math.max(last, at);
+            }
+            assertTrue(first > previousLast, main + " shuts down " + stage + " after " + previousStage);
+            previousLast = last;
+            previousStage = stage.toString();
+        }
+    }
+
     /** The body of the {@code Runtime.addShutdownHook(new Thread(() -> { ... }))} lambda. */
     private static String shutdownHook(String source, Path main) {
         String opening = "addShutdownHook(new Thread(() -> {";

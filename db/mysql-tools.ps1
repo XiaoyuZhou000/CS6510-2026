@@ -7,6 +7,10 @@
     - Resolve-MySqlExe finds the mysql client the same way the retired db/init-db.ps1 did.
     - Get-ServiceDbCredential reads <SERVICE>_DB_NAME, <SERVICE>_DB_USER, and
       <SERVICE>_DB_PASSWORD, prompting securely for a missing password.
+    - Get-AdminDbCredential reads DB_USER (default root) and DB_PASSWORD, prompting
+      securely for a missing password; Notification's schema is applied with it.
+    - Get-EnvironmentText reads a variable from this process, then the user, then the
+      machine environment, so a user variable set after this shell started is found.
     - Invoke-MySql runs SQL text on stdin or one query, passing the password only
       through MYSQL_PWD, never as a command-line argument.
 #>
@@ -14,7 +18,17 @@
 # Windows PowerShell 5.1 pipes text to native commands as ASCII unless told otherwise.
 $OutputEncoding = New-Object System.Text.UTF8Encoding $false
 
-$script:ServiceNames = @('transaction', 'inventory', 'analytics')
+# The four services, each with its own schema and user (007 adds Notification).
+$script:ServiceNames = @('transaction', 'inventory', 'analytics', 'notification')
+
+function Get-EnvironmentText {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    foreach ($scope in @('Process', 'User', 'Machine')) {
+        $value = [Environment]::GetEnvironmentVariable($Name, $scope)
+        if ($null -ne $value -and $value -ne '') { return $value }
+    }
+    return $null
+}
 
 function Resolve-MySqlExe {
     param([string]$Explicit)
@@ -54,17 +68,30 @@ function Read-SecretText {
 }
 
 function Get-ServiceDbCredential {
-    param([Parameter(Mandatory = $true)][ValidateSet('transaction', 'inventory', 'analytics')][string]$Service)
+    param([Parameter(Mandatory = $true)][ValidateSet('transaction', 'inventory', 'analytics', 'notification')][string]$Service)
     $prefix = $Service.ToUpperInvariant()
-    $database = [Environment]::GetEnvironmentVariable("${prefix}_DB_NAME")
+    $database = Get-EnvironmentText "${prefix}_DB_NAME"
     if (-not $database) { $database = "cs6510_$Service" }
-    $user = [Environment]::GetEnvironmentVariable("${prefix}_DB_USER")
+    $user = Get-EnvironmentText "${prefix}_DB_USER"
     if (-not $user) { $user = "cs6510_${Service}_svc" }
-    $password = [Environment]::GetEnvironmentVariable("${prefix}_DB_PASSWORD")
+    $password = Get-EnvironmentText "${prefix}_DB_PASSWORD"
     if ($null -eq $password -or $password -eq '') {
         $password = Read-SecretText -Prompt "MySQL password for '$user' (${prefix}_DB_PASSWORD)"
     }
     return [pscustomobject]@{ Service = $Service; Database = $database; User = $user; Password = $password }
+}
+
+# The MySQL administrator, for the DDL that a service user is not granted (Notification's schema).
+# -Database is the default database of the connection, as in a service credential.
+function Get-AdminDbCredential {
+    param([Parameter(Mandatory = $true)][string]$Database)
+    $user = Get-EnvironmentText 'DB_USER'
+    if (-not $user) { $user = 'root' }
+    $password = Get-EnvironmentText 'DB_PASSWORD'
+    if ($null -eq $password) {
+        $password = Read-SecretText -Prompt "MySQL admin password for '$user' (DB_PASSWORD)"
+    }
+    return [pscustomobject]@{ Service = 'admin'; Database = $Database; User = $user; Password = $password }
 }
 
 <#

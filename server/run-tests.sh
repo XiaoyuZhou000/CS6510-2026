@@ -2,7 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 if [ ! -f out/common.jar ] || [ ! -f out/contracts.jar ] || [ ! -d lib/messaging ] ||
-   [ ! -f out/transaction.jar ] || [ ! -f out/inventory.jar ] || [ ! -f out/analytics.jar ]; then
+   [ ! -f out/transaction.jar ] || [ ! -f out/inventory.jar ] || [ ! -f out/analytics.jar ] ||
+   [ ! -f out/notification.jar ]; then
   echo "Build artifacts missing - running build.sh first..."
   ./build.sh
 fi
@@ -67,7 +68,7 @@ mkdir -p "$REPORT_DIR"
 # lib/* does not reach lib/messaging/, so the messaging runtime is listed separately.
 set +e
 java "${JVM_ARGS[@]}" ${CALLER_JVM_ARGS[@]+"${CALLER_JVM_ARGS[@]}"} \
-  -cp "lib/*${SEP}lib/messaging/*${SEP}out/common.jar${SEP}out/contracts.jar${SEP}out/transaction.jar${SEP}out/inventory.jar${SEP}out/analytics.jar${SEP}out/test" \
+  -cp "lib/*${SEP}lib/messaging/*${SEP}out/common.jar${SEP}out/contracts.jar${SEP}out/transaction.jar${SEP}out/inventory.jar${SEP}out/analytics.jar${SEP}out/notification.jar${SEP}out/test" \
   org.junit.platform.console.ConsoleLauncher execute "${SELECTORS[@]}" --reports-dir "$REPORT_DIR"
 STATUS=$?
 set -e
