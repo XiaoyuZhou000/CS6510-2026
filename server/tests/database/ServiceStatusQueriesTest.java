@@ -30,12 +30,13 @@ class ServiceStatusQueriesTest {
         try (TransactionTestSchema schema = TransactionTestSchema.create()) {
             TransactionStatusQueries queries = new TransactionStatusQueries(schema.pool(), Clock.fixed(NOW, ZoneOffset.UTC));
             TransactionStatusQueries.Status empty = queries.read();
-            assertEquals(new TransactionStatusQueries.Status(0, 0, 0, 0, 0, null, 0, null, 0, 0, 0), empty);
+            assertEquals(new TransactionStatusQueries.Status(0, 0, 0, 0, 0, null, 0, null, 0, 0, 0, 0, 0), empty);
             assertFalse(empty.pendingWork());
             assertEquals("status service=transaction pending_work=no pending_attempts=0 alarmed_attempts=0 "
                     + "unpublished_scans=0 background_completions=0 completions_without_response=0 "
                     + "replica_version=none replica_products=0 replica_age_seconds=none "
-                    + "unpublished_outbox=0 parked_events=0 stuck_attempts=0", empty.line());
+                    + "unpublished_outbox=0 parked_events=0 stuck_attempts=0 sale_events_unpublished=0 "
+                    + "sale_events_total=0", empty.line());
 
             attempt(schema, "pending", "PENDING", "NONE", null);
             attempt(schema, "retrying", "PENDING", "PENDING_ERROR", "UNAVAILABLE: inventory is down");
@@ -53,6 +54,9 @@ class ServiceStatusQueriesTest {
             outbox(schema, false);
             outbox(schema, false);
             outbox(schema, true);
+            outbox(schema, "SaleCompleted", false);
+            outbox(schema, "SaleCompleted", true);
+            outbox(schema, "SaleCompleted", true);
             park(schema);
             schema.insertScan("pending", 1, "SKU-000001");
             schema.insertScan("pending", 2, "SKU-000002");
@@ -64,12 +68,13 @@ class ServiceStatusQueriesTest {
 
             TransactionStatusQueries.Status status = queries.read();
             assertEquals(new TransactionStatusQueries.Status(6, 3, 2, 1, 1, "catalog-v1", 5, Duration.ofSeconds(42),
-                    2, 1, 1), status, "PENDING for 61 s is stuck; 59 s is not");
+                    3, 1, 1, 1, 3), status, "PENDING for 61 s is stuck; 59 s is not");
             assertTrue(status.pendingWork());
             assertEquals("status service=transaction pending_work=yes pending_attempts=6 alarmed_attempts=3 "
                     + "unpublished_scans=2 background_completions=1 completions_without_response=1 "
                     + "replica_version=catalog-v1 replica_products=5 replica_age_seconds=42 "
-                    + "unpublished_outbox=2 parked_events=1 stuck_attempts=1", status.line());
+                    + "unpublished_outbox=3 parked_events=1 stuck_attempts=1 sale_events_unpublished=1 "
+                    + "sale_events_total=3", status.line());
         }
     }
 
@@ -145,9 +150,13 @@ class ServiceStatusQueriesTest {
 
     /** One outbox row, confirmed by the broker or not. */
     private static void outbox(TestSchema schema, boolean published) throws Exception {
+        outbox(schema, "StockDeducted", published);
+    }
+
+    private static void outbox(TestSchema schema, String eventType, boolean published) throws Exception {
         schema.update("INSERT INTO outbox_event (event_id, topic, routing_key, event_type, envelope, created_at, "
-                + "published_at) VALUES (UUID(), 't', 'k', 'StockDeducted', x'00', NOW(3), "
-                + (published ? "NOW(3)" : "NULL") + ")");
+                + "published_at) VALUES (UUID(), 't', 'k', ?, x'00', NOW(3), "
+                + (published ? "NOW(3)" : "NULL") + ")", eventType);
     }
 
     private static void park(TestSchema schema) throws Exception {

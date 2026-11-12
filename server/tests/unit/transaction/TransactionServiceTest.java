@@ -59,7 +59,8 @@ class TransactionServiceTest {
     private final InMemoryEventBus bus = InMemoryEventBus.withCatalogTopics(names, 7);
     private final FakeInventoryReactor inventory = FakeInventoryReactor.deducting(bus, names).start();
     private final OutboxDispatcher dispatcher = new OutboxDispatcher("transaction", database.outbox,
-            Map.of(names.checkout(), bus), List.of(names.checkout()), OutboxDispatcher.Settings.defaults(),
+            Map.of(names.checkout(), bus, names.saleCompleted(), bus), List.of(names.checkout(), names.saleCompleted()),
+            OutboxDispatcher.Settings.defaults(),
             Clock.systemUTC());
     private final List<ConsumerLoop> consumers = new ArrayList<>();
     private final ProductCatalogReplica replica = replica("v1", "1.25", "2.50");
@@ -402,7 +403,8 @@ class TransactionServiceTest {
         for (ConsumerLoop previous : consumers) previous.stop(Duration.ofSeconds(5));
         consumers.clear();
         ConsumerLoop outcomes = CheckoutOutcomeConsumer.create(names, bus::stream,
-                new CheckoutOutcomeHandler(database, cache, registry, CheckoutOrchestrator.Timing.SYSTEM),
+                new CheckoutOutcomeHandler(database, cache, registry, CheckoutOrchestrator.Timing.SYSTEM,
+                        new transaction.SaleEvents(names), dispatcher),
                 new InMemoryDeadLetterStore(), ConsumerLoop.Settings.defaults().withThreads(1));
         outcomes.start();
         consumers.add(outcomes);
@@ -534,7 +536,8 @@ class TransactionServiceTest {
         }
 
         @Override
-        public synchronized WriteResult complete(AttemptKey key, Instant completedAt, boolean answering) {
+        public synchronized WriteResult complete(AttemptKey key, Instant completedAt, boolean answering,
+                                                 events.OutboxRow saleCompleted) {
             Row row = rows.get(key.transactionId());
             if (row == null || !Integer.valueOf(key.attemptNumber()).equals(row.activeAttempt())) {
                 return WriteResult.GUARD_MISS;
@@ -542,7 +545,16 @@ class TransactionServiceTest {
             rows.put(key.transactionId(), new Row(row.stationId(), TransactionStatus.COMPLETED, row.itemCount(),
                     row.total(), row.attemptCount(), null, row.startedAt(), completedAt));
             settle(key, State.COMPLETED, null, null, completedAt, answering ? ClientOutcome.SUCCESS : null);
+            outbox.add(saleCompleted);
             return WriteResult.OK;
+        }
+
+        @Override
+        public synchronized Optional<SaleSource> findSaleSource(AttemptKey key) {
+            AttemptRecord attempt = attempts.get(key);
+            Row row = rows.get(key.transactionId());
+            if (attempt == null || row == null) return Optional.empty();
+            return Optional.of(new SaleSource(key, attempt.lines(), attempt.itemCount(), row.stationId()));
         }
 
         @Override

@@ -1,5 +1,8 @@
 package database;
 
+import events.OutboxRow;
+import faults.FaultHooks;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -14,8 +17,12 @@ import java.util.Optional;
 /**
  * JDBC adapter for {@code checkout_attempt} and the Saga's guarded writes to {@code transaction}
  * (006 contracts/checkout-saga.md "Steps"). T1 is three statements and one commit: the guarded UPDATE,
- * the attempt INSERT, and the {@code CheckoutRequested} outbox INSERT. T3 and reopen are two statements
- * and one commit each. None reads; every timestamp is supplied by the service.
+ * the attempt INSERT, and the {@code CheckoutRequested} outbox INSERT. T3 is three statements and one commit:
+ * the guarded UPDATE, the attempt UPDATE, and the {@code SaleCompleted} outbox INSERT (007 FR-002, research N2).
+ * Reopen is two statements and one commit. None reads; every timestamp is supplied by the service.
+ *
+ * <p>Test-only fault hook: {@code transaction.sale.beforeT3Commit}, after T3's outbox INSERT and before its
+ * commit; a {@code throw} there rolls the whole completion back.</p>
  */
 public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
     private static final int LAST_ERROR_LENGTH = 255;
@@ -49,6 +56,9 @@ public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
             + "`lines`, item_count, total_amount, client_outcome, created_at, settled_at, retry_count, next_retry_at, "
             + "last_error, request_event_id FROM checkout_attempt";
     private static final String FIND = COLUMNS + " WHERE transaction_id = ? AND attempt_number = ?";
+    private static final String SALE_SOURCE = "SELECT a.`lines`, a.item_count, t.station_id FROM checkout_attempt a "
+            + "JOIN `transaction` t ON t.transaction_id = a.transaction_id "
+            + "WHERE a.transaction_id = ? AND a.attempt_number = ?";
     /** The index is forced so the bounded recovery scan never degrades into a full scan of every attempt. */
     private static final String DUE = COLUMNS + " FORCE INDEX (idx_checkout_attempt_due) "
             + "WHERE state = 'PENDING' AND next_retry_at <= ?";
@@ -92,9 +102,10 @@ public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
     }
 
     @Override
-    public WriteResult complete(AttemptKey key, Instant completedAt, boolean answering) {
+    public WriteResult complete(AttemptKey key, Instant completedAt, boolean answering, OutboxRow saleCompleted) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(completedAt, "completedAt");
+        Objects.requireNonNull(saleCompleted, "saleCompleted");
         return JdbcUnitOfWork.inTransaction(pool, "transaction.store.complete", connection -> {
             try (PreparedStatement guard = connection.prepareStatement(COMPLETE_GUARD)) {
                 guard.setTimestamp(1, Timestamp.from(completedAt));
@@ -109,6 +120,8 @@ public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
                 attempt.setInt(4, key.attemptNumber());
                 requireSettled(attempt.executeUpdate(), key);
             }
+            JdbcOutboxStore.insertRow(connection, saleCompleted);
+            FaultHooks.hit("transaction.sale.beforeT3Commit");
             return WriteResult.OK;
         });
     }
@@ -207,6 +220,21 @@ public final class JdbcCheckoutAttemptStore implements CheckoutAttemptStore {
     public Optional<AttemptRecord> findAttempt(AttemptKey key) {
         Objects.requireNonNull(key, "key");
         return JdbcUnitOfWork.read(pool, "transaction.store.findAttempt", connection -> find(connection, key));
+    }
+
+    @Override
+    public Optional<SaleSource> findSaleSource(AttemptKey key) {
+        Objects.requireNonNull(key, "key");
+        return JdbcUnitOfWork.read(pool, "transaction.store.findSaleSource", connection -> {
+            try (PreparedStatement select = connection.prepareStatement(SALE_SOURCE)) {
+                select.setString(1, key.transactionId());
+                select.setInt(2, key.attemptNumber());
+                try (ResultSet row = select.executeQuery()) {
+                    return row.next() ? Optional.of(new SaleSource(key, row.getString(1), row.getInt(2), row.getString(3)))
+                            : Optional.empty();
+                }
+            }
+        });
     }
 
     private static Optional<AttemptRecord> find(Connection connection, AttemptKey key) throws SQLException {

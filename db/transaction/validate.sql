@@ -51,6 +51,18 @@ CALL assert_zero('each completed transaction has exactly one completed attempt',
     WHERE (t.status = 'COMPLETED') <> (COALESCE(a.completed, 0) = 1)
        OR COALESCE(a.completed, 0) > 1));
 
+-- 007 SC-001: exactly one SaleCompleted outbox row per COMPLETED transaction, recorded by T3 with
+-- aggregate_key sale:<transaction_id>, and none for any other transaction.
+CALL assert_zero('completed transactions equal SaleCompleted outbox rows',
+    (SELECT ABS((SELECT COUNT(*) FROM `transaction` WHERE status = 'COMPLETED')
+              - (SELECT COUNT(*) FROM outbox_event WHERE event_type = 'SaleCompleted'))));
+CALL assert_zero('each completed transaction has exactly one SaleCompleted row keyed sale:<id>',
+    (SELECT COUNT(*) FROM `transaction` t LEFT JOIN (
+        SELECT aggregate_key, COUNT(*) sale_rows FROM outbox_event
+        WHERE event_type = 'SaleCompleted' GROUP BY aggregate_key
+    ) o ON o.aggregate_key = CONCAT('sale:', t.transaction_id)
+    WHERE (t.status = 'COMPLETED') <> (COALESCE(o.sale_rows, 0) = 1) OR COALESCE(o.sale_rows, 0) > 1));
+
 -- The completed attempt's line snapshot equals the transaction's grouped scans.
 CREATE TEMPORARY TABLE validate_attempt_line AS
 SELECT a.transaction_id, j.sku, j.quantity
@@ -83,6 +95,7 @@ SELECT 'PASS' invariant_status,
        (SELECT COUNT(*) FROM accepted_scan) accepted_scans,
        (SELECT COUNT(*) FROM accepted_scan WHERE published_at IS NULL) unpublished_scans,
        (SELECT COUNT(*) FROM outbox_event WHERE published_at IS NULL) unpublished_outbox,
+       (SELECT COUNT(*) FROM outbox_event WHERE event_type = 'SaleCompleted') sale_events,
        (SELECT COUNT(*) FROM dead_letter_event) parked_events,
        (SELECT COUNT(*) FROM checkout_attempt) checkout_attempts,
        (SELECT COUNT(*) FROM checkout_attempt WHERE state = 'COMPLETED' AND client_outcome = 'SUCCESS') completed_success,

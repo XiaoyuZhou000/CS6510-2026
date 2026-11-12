@@ -208,7 +208,10 @@ class TransactionCacheCorrectnessTest {
             @Override
             void arrange(TransactionTestSchema schema, InProcessTransaction service, String id, FakeInventoryReactor inventory) {
                 inventory.thenAnswer(call -> {
-                    service.attempts.complete(call.key(), Instant.now().truncatedTo(ChronoUnit.MILLIS), false);
+                    Instant at = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+                    service.attempts.complete(call.key(), at, false, new transaction.SaleEvents(service.names)
+                            .saleCompleted(id, call.key().attemptNumber(), at, "station",
+                                    java.util.List.of(new transaction.CheckoutEvents.Line("other-instance", 1))));
                     return Reply.deduct();
                 });
             }

@@ -27,11 +27,13 @@ public interface CheckoutAttemptStore {
     WriteResult begin(Begin begin) throws StoreFailure;
 
     /**
-     * T3: completes the transaction whose active attempt is {@code key}, and settles the attempt as
-     * COMPLETED, in one commit. {@code answering} records {@code client_outcome = SUCCESS} for the request
-     * whose response the outcome handler claimed (D7), unless another outcome is recorded already.
+     * T3: completes the transaction whose active attempt is {@code key}, settles the attempt as COMPLETED, and
+     * inserts the sale's {@code SaleCompleted} outbox row {@code saleCompleted}, in one commit (007 FR-002).
+     * {@code answering} records {@code client_outcome = SUCCESS} for the request whose response the outcome
+     * handler claimed (D7), unless another outcome is recorded already. A guard miss inserts nothing.
      */
-    WriteResult complete(AttemptKey key, Instant completedAt, boolean answering) throws StoreFailure;
+    WriteResult complete(AttemptKey key, Instant completedAt, boolean answering, OutboxRow saleCompleted)
+            throws StoreFailure;
 
     /** Compensates T1: clears the active attempt, leaving the transaction OPEN with its basket, and settles it REJECTED. */
     WriteResult reopen(AttemptKey key, RejectionReason reason, String rejectedSku, Instant settledAt, boolean answering)
@@ -54,6 +56,13 @@ public interface CheckoutAttemptStore {
     List<AttemptRecord> findPending(Instant dueBefore, PageCursor after, int limit) throws StoreFailure;
 
     Optional<AttemptRecord> findAttempt(AttemptKey key) throws StoreFailure;
+
+    /**
+     * What T3 needs to build the sale's {@code SaleCompleted} when the state cache has no entry: the attempt's
+     * canonical {@code lines} and {@code item_count} and the transaction's {@code station_id}, in one read
+     * (007 T029). Empty when Transaction never recorded the attempt.
+     */
+    Optional<SaleSource> findSaleSource(AttemptKey key) throws StoreFailure;
 
     /**
      * Republish bookkeeping: one more retry, due at {@code nextRetryAt}, with {@code lastError}
@@ -97,6 +106,14 @@ public interface CheckoutAttemptStore {
             Objects.requireNonNull(createdAt, "createdAt");
             Objects.requireNonNull(nextRetryAt, "nextRetryAt");
             Objects.requireNonNull(request, "request");
+        }
+    }
+
+    /** The attempt's canonical line snapshot and unit count, and its transaction's station. */
+    record SaleSource(AttemptKey key, String lines, int itemCount, String stationId) {
+        public SaleSource {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(lines, "lines");
         }
     }
 

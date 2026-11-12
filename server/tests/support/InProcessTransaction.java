@@ -22,6 +22,7 @@ import messaging.CheckoutOutcomeConsumer;
 import transaction.CatalogEventHandler;
 import transaction.CheckoutEvents;
 import transaction.CheckoutOrchestrator;
+import transaction.SaleEvents;
 import transaction.CheckoutOutcomeHandler;
 import transaction.CheckoutRecoveryWorker;
 import transaction.ProductCatalogReplica;
@@ -131,12 +132,13 @@ public final class InProcessTransaction implements AutoCloseable {
         }
         outbox = new JdbcOutboxStore(pool, "transaction.outbox");
         deadLetters = new JdbcDeadLetterStore(pool, "transaction.deadLetter");
-        dispatcher = new OutboxDispatcher("transaction", outbox, Map.of(names.checkout(), sender),
-                List.of(names.checkout()), builder.outboxSettings, Clock.systemUTC());
+        dispatcher = new OutboxDispatcher("transaction", outbox, Map.of(names.checkout(), sender,
+                names.saleCompleted(), sender), List.of(names.checkout(), names.saleCompleted()),
+                builder.outboxSettings, Clock.systemUTC());
         OutboxSignal signal = builder.signal != null ? builder.signal : dispatcher;
         checkout = new CheckoutOrchestrator(transactions, attempts, new CheckoutEvents(names), signal, cache, registry,
                 schedule, builder.settings, builder.timing);
-        outcomes = new CheckoutOutcomeHandler(attempts, cache, registry, builder.timing);
+        outcomes = new CheckoutOutcomeHandler(attempts, cache, registry, builder.timing, new SaleEvents(names), signal);
         outcomeConsumer = CheckoutOutcomeConsumer.create(names, streams, outcomes, deadLetters, builder.consumerSettings);
         catalogConsumer = catalogHandler == null ? null : CatalogConsumer.create(names, catalogStreams, catalogHandler,
                 deadLetters, ConsumerLoop.Settings.defaults());

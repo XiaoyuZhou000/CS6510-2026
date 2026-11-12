@@ -3,7 +3,10 @@ package events;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import selfcheckout.events.v1.EventEnvelope;
+import selfcheckout.events.v1.SaleCompleted;
 import selfcheckout.events.v1.ScanAccepted;
+import selfcheckout.events.v1.SoldLine;
+import selfcheckout.events.v1.SubscriberNotified;
 
 import java.util.Optional;
 
@@ -20,8 +23,11 @@ import java.util.Optional;
  *   <li>{@code schema_version} is supported: else {@link ParkReason#UNSUPPORTED_VERSION}.</li>
  *   <li>{@code producer} is the type's owner, and the payload parses: else {@link ParkReason#INVALID_PAYLOAD}.</li>
  *   <li>The record key equals {@code routing_key}, the payload's identity field equals {@code routing_key},
- *       and a scan's {@code event_id} is {@code scan:<transaction_id>:<scan_sequence>}: else
- *       {@link ParkReason#PAYLOAD_MISMATCH}.</li>
+ *       a scan's {@code event_id} is {@code scan:<transaction_id>:<scan_sequence>}, a sale's {@code sale_id}
+ *       equals its {@code transaction_id} and its {@code event_id} is {@link EventIds#saleEventId}, and a
+ *       notification's {@code event_id} is its {@code notification_id}: else {@link ParkReason#PAYLOAD_MISMATCH}.</li>
+ *   <li>A sale's lines are non-empty, have unique SKUs in ascending order, and each has a quantity of at least
+ *       1 (007 contracts/sale-completed-event.md "Consumption rules"): else {@link ParkReason#INVALID_PAYLOAD}.</li>
  * </ol>
  */
 public final class EnvelopeCodec {
@@ -108,8 +114,43 @@ public final class EnvelopeCodec {
                         envelope, null);
             }
         }
+        if (type == EventTypes.SALE_COMPLETED) checkSale((SaleCompleted) payload, envelope);
+        if (type == EventTypes.SUBSCRIBER_NOTIFIED) {
+            String notificationId = ((SubscriberNotified) payload).getNotificationId();
+            if (!notificationId.equals(eventId)) {
+                throw failure(ParkReason.PAYLOAD_MISMATCH, "notification event_id " + eventId + " is not its notification_id "
+                        + notificationId, envelope, null);
+            }
+        }
         return new DecodedEvent(eventId, type, version, routingKey, envelope.getOccurredAtMs(),
                 envelope.getCorrelationId(), envelope.getProducer(), payload, null, -1, -1L);
+    }
+
+    /** The {@code SaleCompleted} identity and line rules; the routing key was already checked. */
+    private static void checkSale(SaleCompleted sale, EventEnvelope envelope) {
+        if (!sale.getSaleId().equals(sale.getTransactionId())) {
+            throw failure(ParkReason.PAYLOAD_MISMATCH, "sale_id " + sale.getSaleId() + " differs from transaction_id "
+                    + sale.getTransactionId(), envelope, null);
+        }
+        String expected = EventIds.saleEventId(sale.getTransactionId());
+        if (!expected.equals(envelope.getEventId())) {
+            throw failure(ParkReason.PAYLOAD_MISMATCH, "sale event_id " + envelope.getEventId() + " is not " + expected,
+                    envelope, null);
+        }
+        if (sale.getLinesCount() == 0) throw failure(ParkReason.INVALID_PAYLOAD, "a sale has no lines", envelope, null);
+        String previous = null;
+        for (SoldLine line : sale.getLinesList()) {
+            if (line.getSku().isEmpty()) throw failure(ParkReason.INVALID_PAYLOAD, "a sale line has no SKU", envelope, null);
+            if (line.getQuantity() < 1) {
+                throw failure(ParkReason.INVALID_PAYLOAD, "SKU " + line.getSku() + " has quantity " + line.getQuantity(),
+                        envelope, null);
+            }
+            if (previous != null && previous.compareTo(line.getSku()) >= 0) {
+                throw failure(ParkReason.INVALID_PAYLOAD, "sale lines are not unique and ascending at " + line.getSku(),
+                        envelope, null);
+            }
+            previous = line.getSku();
+        }
     }
 
     private static EventDecodeException failure(ParkReason reason, String message, EventEnvelope envelope,

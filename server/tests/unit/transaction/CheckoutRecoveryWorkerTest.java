@@ -410,10 +410,16 @@ class CheckoutRecoveryWorkerTest {
         }
 
         @Override
-        public synchronized WriteResult complete(AttemptKey key, Instant completedAt, boolean answering) {
+        public synchronized WriteResult complete(AttemptKey key, Instant completedAt, boolean answering,
+                                                 events.OutboxRow saleCompleted) {
             calls.add("complete");
             answered |= answering;
             throw new AssertionError("recovery never settles an attempt");
+        }
+
+        @Override
+        public Optional<SaleSource> findSaleSource(AttemptKey key) {
+            throw new AssertionError("recovery never builds a sale event");
         }
 
         @Override

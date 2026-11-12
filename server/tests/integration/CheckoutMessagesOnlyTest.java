@@ -68,7 +68,10 @@ class CheckoutMessagesOnlyTest {
                         record.key()), "linked from checkout_operation.outcome_event_id");
             }
             assertEquals(0, saga.transactionSchema.queryLong("SELECT COUNT(*) FROM outbox_event WHERE event_id NOT IN "
-                    + "(SELECT request_event_id FROM checkout_attempt)"), "Transaction recorded no other checkout event");
+                    + "(SELECT request_event_id FROM checkout_attempt) AND event_type <> 'SaleCompleted'"),
+                    "Transaction recorded no other checkout event");
+            assertEquals(1, saga.transactionSchema.queryLong("SELECT COUNT(*) FROM outbox_event WHERE event_type = 'SaleCompleted'"),
+                    "besides one SaleCompleted for the one completed sale (007 FR-002)");
         }
     }
 

@@ -71,16 +71,20 @@ public final class TransactionMain {
         TopicNames names = TopicNames.fromEnvironment(environment);
         KafkaRecordSender checkoutSender = KafkaClients.sender(environment, "transaction-checkout",
             KafkaClients.IMMEDIATE_LINGER_MS);
+        // The SaleCompleted rows T3 records (007 FR-002) leave through the same producer as the checkout events:
+        // acks=all, idempotent, linger 0, and the dispatcher's one sender thread.
         OutboxDispatcher dispatcher = new OutboxDispatcher("transaction", new JdbcOutboxStore(pool, "transaction.outbox"),
-            Map.of(names.checkout(), checkoutSender), List.of(names.checkout()),
+            Map.of(names.checkout(), checkoutSender, names.saleCompleted(), checkoutSender),
+            List.of(names.checkout(), names.saleCompleted()),
             OutboxDispatcher.Settings.fromEnvironment(environment), Clock.systemUTC());
+        SaleEvents sales = new SaleEvents(names);
         CheckoutOrchestrator checkout = new CheckoutOrchestrator(transactions, attempts, new CheckoutEvents(names),
             dispatcher, cache, registry, schedule, CheckoutOrchestrator.Settings.fromEnvironment(environment));
         CheckoutRecoveryWorker.Settings recoverySettings = CheckoutRecoveryWorker.Settings.fromEnvironment(environment);
         CheckoutRecoveryWorker recovery = new CheckoutRecoveryWorker(attempts, dispatcher, cache, registry, schedule,
             recoverySettings, Clock.systemUTC());
         ConsumerLoop outcomes = CheckoutOutcomeConsumer.create(names, CheckoutOutcomeConsumer.kafkaStreams(environment, names),
-            new CheckoutOutcomeHandler(attempts, cache, registry, CheckoutOrchestrator.Timing.SYSTEM),
+            new CheckoutOutcomeHandler(attempts, cache, registry, CheckoutOrchestrator.Timing.SYSTEM, sales, dispatcher),
             new JdbcDeadLetterStore(pool, "transaction.deadLetter"),
             ConsumerLoop.Settings.defaults().withThreads(CheckoutOutcomeConsumer.threads(environment))
                 .withPolicy(ParkingPolicy.fromEnvironment(environment)));

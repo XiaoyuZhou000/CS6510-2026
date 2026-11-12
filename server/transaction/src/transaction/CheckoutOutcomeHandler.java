@@ -5,10 +5,13 @@ import database.CheckoutAttemptStore.AttemptKey;
 import database.CheckoutAttemptStore.AttemptRecord;
 import database.CheckoutAttemptStore.ClientOutcome;
 import database.CheckoutAttemptStore.RejectionReason;
+import database.CheckoutAttemptStore.SaleSource;
 import database.CheckoutAttemptStore.WriteResult;
 import database.StoreFailure;
 import events.DecodedEvent;
 import events.EventHandler;
+import events.OutboxRow;
+import events.OutboxSignal;
 import events.ParkReason;
 import events.PermanentEventFailure;
 import events.TransientEventFailure;
@@ -31,13 +34,17 @@ import java.util.concurrent.atomic.LongAdder;
  * handler rules"). Only an outcome event settles an attempt.
  *
  * <ul>
- *   <li>{@code StockDeducted} runs T3; {@code StockRejected} and {@code StockDeductionRefused} reopen with
+ *   <li>{@code StockDeducted} runs T3, which also records the sale's {@code SaleCompleted} outbox row (007
+ *       FR-002): its lines come from the cached state of the active attempt, or else from one read of the
+ *       attempt and its transaction ({@link CheckoutAttemptStore#findSaleSource}); lines whose quantities do not
+ *       add up to the attempt's {@code item_count} are an integrity fault. After the commit the row's event ID
+ *       is signalled to the dispatcher. {@code StockRejected} and {@code StockDeductionRefused} reopen with
  *       the reason and SKU; the reserved {@code StockRestored} reopens with {@code STOCK_RESTORED};
  *       {@code RestorationNotNeeded} changes nothing.</li>
  *   <li>Each action runs under the transaction's stripe lock: it claims the waiting responder, if this
  *       process has one, and the guarded write records {@code client_outcome} exactly when the claim
- *       succeeded. The warm path is that guarded write alone, two statements and one commit; the state
- *       cache is then updated and the settlement future completed.</li>
+ *       succeeded. The warm path is that guarded write alone: three statements and one commit for T3 (two
+ *       for a reopen); the state cache is then updated and the settlement future completed.</li>
  *   <li>A guard miss reads the attempt: the same result already recorded is a no-op, and so is an outcome
  *       for an older attempt. A contradiction is an integrity fault (FR-038): {@code last_error} records
  *       {@code INTEGRITY:<reason>} in its own commit and the record is parked as {@link ParkReason#INTEGRITY};
@@ -48,7 +55,8 @@ import java.util.concurrent.atomic.LongAdder;
  * </ul>
  *
  * <p>Test-only fault hooks: {@code checkout.outcome.beforeCommit} before the first write, and
- * {@code checkout.afterRecordCompletion} after the T3 commit, before the future completes.</p>
+ * {@code checkout.afterRecordCompletion} and then {@code transaction.sale.afterT3Commit} after the T3 commit,
+ * before the dispatcher is signalled and the future completes.</p>
  */
 public final class CheckoutOutcomeHandler implements EventHandler {
     public static final List<Duration> DEFAULT_RETRY_DELAYS = List.of(Duration.ofMillis(50), Duration.ofMillis(100),
@@ -64,19 +72,24 @@ public final class CheckoutOutcomeHandler implements EventHandler {
     private final TransactionLocks locks;
     private final SettlementRegistry registry;
     private final CheckoutOrchestrator.Timing timing;
+    private final SaleEvents sales;
+    private final OutboxSignal signal;
     private final List<Duration> retryDelays;
 
     public CheckoutOutcomeHandler(CheckoutAttemptStore attempts, TransactionStateCache cache, SettlementRegistry registry,
-                                  CheckoutOrchestrator.Timing timing) {
-        this(attempts, cache, registry, timing, DEFAULT_RETRY_DELAYS);
+                                  CheckoutOrchestrator.Timing timing, SaleEvents sales, OutboxSignal signal) {
+        this(attempts, cache, registry, timing, sales, signal, DEFAULT_RETRY_DELAYS);
     }
 
     public CheckoutOutcomeHandler(CheckoutAttemptStore attempts, TransactionStateCache cache, SettlementRegistry registry,
-                                  CheckoutOrchestrator.Timing timing, List<Duration> retryDelays) {
+                                  CheckoutOrchestrator.Timing timing, SaleEvents sales, OutboxSignal signal,
+                                  List<Duration> retryDelays) {
         this.attempts = Objects.requireNonNull(attempts, "attempts");
         this.cache = Objects.requireNonNull(cache, "cache");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.timing = Objects.requireNonNull(timing, "timing");
+        this.sales = Objects.requireNonNull(sales, "sales");
+        this.signal = Objects.requireNonNull(signal, "signal");
         this.retryDelays = List.copyOf(retryDelays);
         this.locks = cache.locks();
         if (registry.locks() != locks) throw new IllegalArgumentException("The registry must check the cache's locks");
@@ -104,10 +117,19 @@ public final class CheckoutOutcomeHandler implements EventHandler {
                     ? cached.startedAt() : now;
             boolean claimed = claim(key);
             FaultHooks.hit("checkout.outcome.beforeCommit");
+            OutboxRow sale = null;
             for (int retry = 0; ; retry++) {
                 WriteResult result;
                 try {
-                    result = attempts.complete(key, completedAt, claimed);
+                    if (sale == null) {
+                        Optional<OutboxRow> built = saleCompleted(key, cached, completedAt, claimed);
+                        if (built.isEmpty()) {
+                            settledBefore(key, claimed, Kind.COMPLETED, false);
+                            return;
+                        }
+                        sale = built.get();
+                    }
+                    result = attempts.complete(key, completedAt, claimed, sale);
                 } catch (StoreFailure failure) {
                     cache.invalidate(id);
                     if (pause(retry)) continue;
@@ -116,6 +138,8 @@ public final class CheckoutOutcomeHandler implements EventHandler {
                 if (result == WriteResult.OK) {
                     cache.evict(id);
                     FaultHooks.hit("checkout.afterRecordCompletion");
+                    FaultHooks.hit("transaction.sale.afterT3Commit");
+                    signal.signal(List.of(sale.eventId()));
                     registry.complete(key, Settlement.completed(completedAt, claimed));
                     return;
                 }
@@ -165,6 +189,41 @@ public final class CheckoutOutcomeHandler implements EventHandler {
             }
         } finally {
             REOPEN.record(System.nanoTime() - started);
+        }
+    }
+
+    /**
+     * The sale's {@code SaleCompleted} row for attempt {@code key}: from the cached state when it holds this
+     * attempt as active (the basket is frozen while it is pending, FR-035), otherwise from one read. Empty when
+     * Transaction never recorded the attempt. Lines that do not add up to the attempt's unit count are an
+     * integrity fault.
+     */
+    private Optional<OutboxRow> saleCompleted(AttemptKey key, State cached, Instant completedAt, boolean claimed) {
+        List<CheckoutEvents.Line> lines;
+        int itemCount;
+        String stationId;
+        if (cached != null && cached.stationId() != null && Objects.equals(cached.activeAttemptNumber(), key.attemptNumber())) {
+            lines = cached.lines().values().stream().map(line -> new CheckoutEvents.Line(line.sku(), line.quantity())).toList();
+            itemCount = cached.itemCount();
+            stationId = cached.stationId();
+        } else {
+            Optional<SaleSource> source = attempts.findSaleSource(key);
+            if (source.isEmpty()) return Optional.empty();
+            lines = CheckoutOrchestrator.parseCanonical(source.get().lines());
+            itemCount = source.get().itemCount();
+            stationId = source.get().stationId();
+        }
+        int units = lines.stream().mapToInt(CheckoutEvents.Line::quantity).sum();
+        if (lines.isEmpty() || units != itemCount) {
+            if (claimed) registry.complete(key, Settlement.failed());
+            throw integrity(ParkReason.INTEGRITY, key, "sale-lines-mismatch", "the attempt lines hold " + units
+                    + " units but its item_count is " + itemCount);
+        }
+        try {
+            return Optional.of(sales.saleCompleted(key.transactionId(), key.attemptNumber(), completedAt, stationId, lines));
+        } catch (IllegalArgumentException invalid) {
+            if (claimed) registry.complete(key, Settlement.failed());
+            throw integrity(ParkReason.INTEGRITY, key, "sale-lines-invalid", invalid.getMessage());
         }
     }
 

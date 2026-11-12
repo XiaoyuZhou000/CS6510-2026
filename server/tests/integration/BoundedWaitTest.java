@@ -305,8 +305,14 @@ class BoundedWaitTest {
         }
 
         @Override
-        public WriteResult complete(AttemptKey key, Instant completedAt, boolean answering) {
-            return note(key, store.complete(key, completedAt, answering));
+        public WriteResult complete(AttemptKey key, Instant completedAt, boolean answering,
+                                    events.OutboxRow saleCompleted) {
+            return note(key, store.complete(key, completedAt, answering, saleCompleted));
+        }
+
+        @Override
+        public java.util.Optional<SaleSource> findSaleSource(AttemptKey key) {
+            return store.findSaleSource(key);
         }
 
         @Override

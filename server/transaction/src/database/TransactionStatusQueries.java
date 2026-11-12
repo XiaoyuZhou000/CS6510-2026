@@ -10,8 +10,9 @@ import java.util.Objects;
 /**
  * Transaction's operational status (FR-039, FR-046; contracts/service-deployment.md): pending, alarmed, and
  * stuck checkout attempts, unpublished scan events and outbox rows, parked events, the FR-054 completion
- * counts, and the product replica's version and age. One read-only statement on Transaction's own pool; the
- * pending-attempt and unpublished counts use their indexes. An attempt is stuck once it has been PENDING for
+ * counts, the product replica's version and age, and (007 T031) the {@code SaleCompleted} outbox rows, in total
+ * and still unpublished. One read-only statement on Transaction's own pool; the pending-attempt and unpublished
+ * counts use their indexes. An attempt is stuck once it has been PENDING for
  * {@code CHECKOUT_STUCK_ALARM_SECONDS} (60) (FR-038).
  */
 public final class TransactionStatusQueries {
@@ -25,7 +26,9 @@ public final class TransactionStatusQueries {
             + "catalog_version, product_count, refreshed_at, "
             + "(SELECT COUNT(*) FROM outbox_event WHERE published_at IS NULL), "
             + "(SELECT COUNT(*) FROM dead_letter_event), "
-            + "(SELECT COUNT(*) FROM checkout_attempt WHERE state = 'PENDING' AND created_at < ?) "
+            + "(SELECT COUNT(*) FROM checkout_attempt WHERE state = 'PENDING' AND created_at < ?), "
+            + "(SELECT COUNT(*) FROM outbox_event WHERE event_type = 'SaleCompleted' AND published_at IS NULL), "
+            + "(SELECT COUNT(*) FROM outbox_event WHERE event_type = 'SaleCompleted') "
             + "FROM product_replica_meta WHERE meta_key = 1";
     public static final Duration DEFAULT_STUCK_AFTER = Duration.ofSeconds(60);
 
@@ -56,10 +59,13 @@ public final class TransactionStatusQueries {
      * @param unpublishedOutbox {@code outbox_event} rows the broker has not confirmed yet
      * @param parkedEvents    {@code dead_letter_event} rows of Transaction's consumers
      * @param stuckAttempts   attempts PENDING for {@code CHECKOUT_STUCK_ALARM_SECONDS} or longer
+     * @param saleEventsUnpublished {@code SaleCompleted} outbox rows the broker has not confirmed yet (007)
+     * @param saleEventsTotal {@code SaleCompleted} outbox rows, one per completed sale (007 SC-001)
      */
     public record Status(long pendingAttempts, long alarmedAttempts, long unpublishedScans, long backgroundCompletions,
                          long completionsWithoutResponse, String replicaVersion, int replicaProducts, Duration replicaAge,
-                         long unpublishedOutbox, long parkedEvents, long stuckAttempts) {
+                         long unpublishedOutbox, long parkedEvents, long stuckAttempts, long saleEventsUnpublished,
+                         long saleEventsTotal) {
         /** Recovery or delivery work remains while an attempt is pending or an event is unpublished. */
         public boolean pendingWork() {
             return pendingAttempts > 0 || unpublishedScans > 0 || unpublishedOutbox > 0;
@@ -74,7 +80,8 @@ public final class TransactionStatusQueries {
                     + " replica_products=" + replicaProducts
                     + " replica_age_seconds=" + (replicaAge == null ? "none" : Long.toString(replicaAge.toSeconds()))
                     + " unpublished_outbox=" + unpublishedOutbox + " parked_events=" + parkedEvents
-                    + " stuck_attempts=" + stuckAttempts;
+                    + " stuck_attempts=" + stuckAttempts + " sale_events_unpublished=" + saleEventsUnpublished
+                    + " sale_events_total=" + saleEventsTotal;
         }
     }
 
@@ -88,7 +95,8 @@ public final class TransactionStatusQueries {
                     Duration age = refreshed == null ? null
                             : Duration.ofSeconds(Duration.between(refreshed.toInstant(), clock.instant()).toSeconds());
                     return new Status(row.getLong(1), row.getLong(2), row.getLong(3), row.getLong(4), row.getLong(5),
-                            row.getString(6), row.getInt(7), age, row.getLong(9), row.getLong(10), row.getLong(11));
+                            row.getString(6), row.getInt(7), age, row.getLong(9), row.getLong(10), row.getLong(11),
+                            row.getLong(12), row.getLong(13));
                 }
             }
         });

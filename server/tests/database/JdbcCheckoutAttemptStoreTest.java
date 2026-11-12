@@ -39,6 +39,7 @@ class JdbcCheckoutAttemptStoreTest {
     /** {@code CHECKOUT_REPUBLISH_AFTER_MS}: T1 makes the first republish due this long after creation. */
     private static final Duration REPUBLISH_AFTER = Duration.ofMillis(2_000);
     private static final CheckoutEvents EVENTS = new CheckoutEvents(TopicNames.unprefixed());
+    private static final transaction.SaleEvents SALES = new transaction.SaleEvents(TopicNames.unprefixed());
 
     @Test
     void beginIsGuardedAndCommitsThePendingAttemptWithItsSnapshot() throws Exception {
@@ -117,7 +118,7 @@ class JdbcCheckoutAttemptStoreTest {
             String id = basket(schema.pool(), 1);
             AttemptKey key = new AttemptKey(id, 1);
             store.begin(begin(id, 1, 1, now()));
-            store.complete(key, now(), false);
+            store.complete(key, now(), false, sale(key));
             assertEquals(ClientOutcome.NONE, store.findAttempt(key).orElseThrow().clientOutcome(),
                     "a settler that is not answering records nothing");
 
@@ -139,11 +140,12 @@ class JdbcCheckoutAttemptStoreTest {
             AttemptKey key = new AttemptKey(id, 1);
             store.begin(begin(id, 1, 3, now()));
 
-            assertEquals(WriteResult.GUARD_MISS, store.complete(new AttemptKey(id, 2), now(), true), "not the active attempt");
+            assertEquals(WriteResult.GUARD_MISS, store.complete(new AttemptKey(id, 2), now(), true, sale(new AttemptKey(id, 2))), "not the active attempt");
             Instant completedAt = now().plusMillis(5);
             try (CountingConnections.Scope scope = counting.scope()) {
-                assertEquals(WriteResult.OK, store.complete(key, completedAt, true));
+                assertEquals(WriteResult.OK, store.complete(key, completedAt, true, sale(key)));
                 assertEquals(2, scope.counts().updates());
+                assertEquals(1, scope.counts().inserts(), "the SaleCompleted outbox row (007 FR-002)");
                 assertEquals(0, scope.counts().selects());
                 assertEquals(1, scope.counts().commits());
             }
@@ -157,9 +159,64 @@ class JdbcCheckoutAttemptStoreTest {
             assertEquals(completedAt, attempt.settledAt());
             assertEquals(ClientOutcome.SUCCESS, attempt.clientOutcome());
 
-            assertEquals(WriteResult.GUARD_MISS, store.complete(key, now(), true), "a duplicate completion misses");
+            assertEquals(WriteResult.GUARD_MISS, store.complete(key, now(), true, sale(key)), "a duplicate completion misses");
             assertEquals(1, schema.queryLong("SELECT COUNT(*) FROM checkout_attempt WHERE state = 'COMPLETED'"));
         }
+    }
+
+    /**
+     * 007 T021: T3 inserts exactly one {@code SaleCompleted} outbox row, with {@code aggregate_key sale:<id>} and the
+     * deterministic {@code event_id}, in the commit that sets {@code status = 'COMPLETED'}; a guard miss inserts
+     * nothing; a failure after the INSERT rolls the whole completion back; and the event ID is unique.
+     */
+    @Test
+    void t3RecordsExactlyOneSaleCompletedRowInItsCommitAndAGuardMissOrFailureRecordsNone() throws Exception {
+        try (TransactionTestSchema schema = TransactionTestSchema.create()) {
+            JdbcCheckoutAttemptStore store = new JdbcCheckoutAttemptStore(schema.pool());
+            String id = basket(schema.pool(), 3);
+            AttemptKey key = new AttemptKey(id, 1);
+            store.begin(begin(id, 1, 3, now()));
+            String eventId = events.EventIds.saleEventId(id);
+
+            assertEquals(WriteResult.GUARD_MISS, store.complete(new AttemptKey(id, 2), now(), false,
+                    sale(new AttemptKey(id, 2))), "not the active attempt");
+            assertEquals(0, saleRows(schema, id), "a guard miss inserts nothing");
+
+            String previous = System.getProperty(faults.FaultHooks.PROPERTY);
+            System.setProperty(faults.FaultHooks.PROPERTY, "transaction.sale.beforeT3Commit:throw");
+            try {
+                assertThrows(faults.FaultHooks.InjectedFault.class, () -> store.complete(key, now(), false, sale(key)));
+            } finally {
+                if (previous == null) System.clearProperty(faults.FaultHooks.PROPERTY);
+                else System.setProperty(faults.FaultHooks.PROPERTY, previous);
+            }
+            assertEquals(0, saleRows(schema, id), "the failed T3 rolled its outbox INSERT back");
+            var pending = schema.transaction(id).orElseThrow();
+            assertEquals("OPEN", pending.status(), "and its completion");
+            assertEquals(Integer.valueOf(1), pending.activeAttemptNumber(), "the transaction keeps its pending attempt");
+            assertEquals(State.PENDING, store.findAttempt(key).orElseThrow().state());
+
+            assertEquals(WriteResult.OK, store.complete(key, now(), false, sale(key)));
+            assertEquals(1, saleRows(schema, id), "exactly one row");
+            assertEquals(eventId, schema.queryString("SELECT event_id FROM outbox_event WHERE aggregate_key = ?", "sale:" + id));
+            assertEquals("SaleCompleted", schema.queryString("SELECT event_type FROM outbox_event WHERE event_id = ?", eventId));
+            assertEquals("selfcheckout.sale-completed.v1", schema.queryString("SELECT topic FROM outbox_event WHERE event_id = ?",
+                    eventId));
+            assertEquals(id, schema.queryString("SELECT routing_key FROM outbox_event WHERE event_id = ?", eventId));
+            assertEquals("COMPLETED", schema.transaction(id).orElseThrow().status(), "in the same commit");
+            assertEquals(WriteResult.GUARD_MISS, store.complete(key, now(), false, sale(key)), "a repeated T3 misses");
+            assertEquals(1, saleRows(schema, id), "and inserts no second row");
+
+            SQLException duplicate = assertThrows(SQLIntegrityConstraintViolationException.class, () -> schema.update(
+                    "INSERT INTO outbox_event (event_id, topic, routing_key, event_type, aggregate_key, envelope, created_at) "
+                            + "VALUES (?, 't', ?, 'SaleCompleted', ?, x'00', NOW(3))", eventId, id, "sale:" + id));
+            assertTrue(duplicate.getMessage().contains("uq_outbox_event_id"), duplicate.getMessage());
+        }
+    }
+
+    private static long saleRows(TransactionTestSchema schema, String id) throws SQLException {
+        return schema.queryLong("SELECT COUNT(*) FROM outbox_event WHERE event_type = 'SaleCompleted' AND aggregate_key = ?",
+                "sale:" + id);
     }
 
     @Test
@@ -173,7 +230,7 @@ class JdbcCheckoutAttemptStoreTest {
                     () -> insertAttempt(schema, id, 2, "PENDING"));
             assertTrue(pending.getMessage().contains("uq_checkout_attempt_pending"), pending.getMessage());
 
-            store.complete(new AttemptKey(id, 1), now(), true);
+            store.complete(new AttemptKey(id, 1), now(), true, sale(new AttemptKey(id, 1)));
             SQLException completed = assertThrows(SQLIntegrityConstraintViolationException.class,
                     () -> insertAttempt(schema, id, 3, "COMPLETED"));
             assertTrue(completed.getMessage().contains("uq_checkout_attempt_completed"), completed.getMessage());
@@ -241,7 +298,7 @@ class JdbcCheckoutAttemptStoreTest {
             String settled = basket(schema.pool(), 1);
             AttemptKey done = new AttemptKey(settled, 1);
             store.begin(begin(settled, 1, 1, now()));
-            store.complete(done, now(), false);
+            store.complete(done, now(), false, sale(done));
             assertFalse(store.markPendingError(done, now()), "only PENDING attempts change");
             assertEquals(ClientOutcome.NONE, store.findAttempt(done).orElseThrow().clientOutcome());
         }
@@ -267,7 +324,7 @@ class JdbcCheckoutAttemptStoreTest {
             store.begin(begin(future, 1, 1, now()));
             String settled = basket(schema.pool(), 1);
             store.begin(beginDue(settled, base));
-            store.complete(new AttemptKey(settled, 1), now(), false);
+            store.complete(new AttemptKey(settled, 1), now(), false, sale(new AttemptKey(settled, 1)));
 
             Instant dueBefore = now();
             List<AttemptKey> paged = new ArrayList<>();
@@ -404,5 +461,11 @@ class JdbcCheckoutAttemptStoreTest {
 
     private static String suffix() {
         return UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    /** The SaleCompleted row T3 records for {@code key}, over the basket of {@link #LINES}. */
+    private static OutboxRow sale(AttemptKey key) {
+        return SALES.saleCompleted(key.transactionId(), key.attemptNumber(), Instant.now().truncatedTo(ChronoUnit.MILLIS),
+                "station-1", List.of(new CheckoutEvents.Line("SKU-000001", 2), new CheckoutEvents.Line("SKU-000002", 1)));
     }
 }

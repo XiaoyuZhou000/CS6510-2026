@@ -93,7 +93,14 @@ class DatabaseIsolationTest {
             grants.computeIfAbsent(grant.group(3), user -> new ArrayList<>())
                     .add(grant.group(1).toUpperCase(Locale.ROOT) + " ON " + grant.group(2) + " @" + grant.group(4));
         }
-        assertEquals(3, grants.size(), "bootstrap.sql grants exactly the three service users: " + grants);
+        assertEquals(4, grants.size(), "bootstrap.sql grants exactly the four service users: " + grants);
+        assertEquals(List.of("SELECT, INSERT, UPDATE, DELETE ON `cs6510_notification`.* @localhost",
+                "SELECT, INSERT, UPDATE, DELETE ON `cs6510_notification`.* @127.0.0.1"), grants.get("cs6510_notification_svc"),
+                "the Notification user may only read and write its own rows (007 T012)");
+        for (String host : List.of("localhost", "127.0.0.1")) {
+            assertTrue(bootstrap.contains("REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'cs6510_notification_svc'@'" + host + "'"),
+                    "bootstrap.sql narrows cs6510_notification_svc@" + host + " before granting");
+        }
         for (String service : SERVICES) {
             String user = "cs6510_" + service + "_svc";
             assertEquals(List.of("ALL PRIVILEGES ON `cs6510_" + service + "`.* @localhost",

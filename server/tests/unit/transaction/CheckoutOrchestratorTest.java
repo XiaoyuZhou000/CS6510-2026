@@ -71,10 +71,12 @@ class CheckoutOrchestratorTest {
     private final InMemoryEventBus bus = InMemoryEventBus.withCatalogTopics(names, 21);
     private final FakeInventoryReactor inventory = FakeInventoryReactor.deducting(bus, names).start();
     private final RecordingSignal signal = new RecordingSignal(new OutboxDispatcher("transaction", db.outbox,
-            java.util.Map.of(names.checkout(), bus), List.of(names.checkout()), OutboxDispatcher.Settings.defaults(),
+            java.util.Map.of(names.checkout(), bus, names.saleCompleted(), bus),
+            List.of(names.checkout(), names.saleCompleted()), OutboxDispatcher.Settings.defaults(),
             Clock.systemUTC()));
     private final ConsumerLoop outcomes = CheckoutOutcomeConsumer.create(names, bus::stream,
-            new CheckoutOutcomeHandler(db, cache, registry, timing), new InMemoryDeadLetterStore(),
+            new CheckoutOutcomeHandler(db, cache, registry, timing, new transaction.SaleEvents(names), signal.dispatcher),
+            new InMemoryDeadLetterStore(),
             ConsumerLoop.Settings.defaults().withThreads(2));
     private final CheckoutOrchestrator orchestrator = new CheckoutOrchestrator(db, db, new CheckoutEvents(names), signal,
             cache, registry, schedule, CheckoutOrchestrator.Settings.defaults(), timing);
@@ -306,7 +308,7 @@ class CheckoutOrchestratorTest {
         db.open(ID, line("A", "Apple", "1.25", 1));
         Instant foreignAt = BASE.plusSeconds(3);
         inventory.thenAnswer(call -> {
-            db.complete(call.key(), foreignAt, false);
+            db.complete(call.key(), foreignAt, false, foreignSale(call.key(), foreignAt));
             return Reply.deduct();
         });
         var receipt = orchestrator.complete(ID);
@@ -327,7 +329,7 @@ class CheckoutOrchestratorTest {
         String failing = "tx-unrecorded";
         db.open(failing, line("A", "Apple", "1.25", 1));
         inventory.thenAnswer(call -> {
-            db.complete(call.key(), foreignAt, false);
+            db.complete(call.key(), foreignAt, false, foreignSale(call.key(), foreignAt));
             return Reply.deduct();
         });
         db.clientOutcomeFailure = new StoreFailure("database down");
@@ -377,7 +379,11 @@ class CheckoutOrchestratorTest {
         loads = db.loads;
         assertCode(TransactionFailure.Code.EMPTY_BASKET, () -> orchestrator.complete(reallyEmpty));
         assertEquals(loads + 1, db.loads);
-        assertEquals(1, db.outbox.ordered().size(), "404, 409 NOT_OPEN, and 409 EMPTY_BASKET record no event (FR-032)");
+        assertEquals(1, db.outbox.ordered().stream().filter(entry -> entry.row.eventType().equals("CheckoutRequested")).count(),
+                "404, 409 NOT_OPEN, and 409 EMPTY_BASKET record no event (FR-032)");
+        assertEquals(List.of("CheckoutRequested", "SaleCompleted"),
+                db.outbox.ordered().stream().map(entry -> entry.row.eventType()).toList(),
+                "only the one completed sale recorded its SaleCompleted (007 FR-002)");
 
         String pending = "tx-pending";
         db.open(pending, line("A", "Apple", "1.25", 1));
@@ -542,5 +548,11 @@ class CheckoutOrchestratorTest {
         void advance(Duration duration) {
             nanos += duration.toNanos();
         }
+    }
+
+    /** The SaleCompleted row another instance's T3 would record for {@code key}. */
+    private events.OutboxRow foreignSale(database.CheckoutAttemptStore.AttemptKey key, Instant at) {
+        return new transaction.SaleEvents(names).saleCompleted(key.transactionId(), key.attemptNumber(), at, "station",
+                List.of(new CheckoutEvents.Line("foreign", 1)));
     }
 }

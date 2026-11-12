@@ -118,6 +118,7 @@ class CompleteStatementBudgetTest {
                 assertNotNull(settled, "T3 ran on the outcome consumer");
                 assertEquals(0, settled.selects(), "T3 reads nothing");
                 assertEquals(2, settled.updates());
+                assertEquals(1, settled.inserts(), "the SaleCompleted outbox row (007 FR-002)");
                 StatementBudgets.assertWithin("complete.t3.statements", settled.statements());
                 StatementBudgets.assertWithin("complete.t3.commits", settled.commits());
             }

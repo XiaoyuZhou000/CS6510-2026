@@ -146,6 +146,15 @@ try {
     $fr054 = (Invoke-ServiceQuery 'transaction' ("SELECT (SELECT COUNT(*) FROM ``transaction`` WHERE status = 'COMPLETED'), " +
         "(SELECT COUNT(*) FROM checkout_attempt WHERE state = 'COMPLETED' AND client_outcome = 'PENDING_ERROR'), " +
         "(SELECT COUNT(*) FROM checkout_attempt WHERE state = 'COMPLETED' AND client_outcome = 'NONE')"))[0] -split "`t"
+    # 007 SC-001: one SaleCompleted outbox row per COMPLETED transaction (also asserted in transaction/validate.sql).
+    $sales = (Invoke-ServiceQuery 'transaction' ("SELECT (SELECT COUNT(*) FROM ``transaction`` WHERE status = 'COMPLETED'), " +
+        "(SELECT COUNT(*) FROM outbox_event WHERE event_type = 'SaleCompleted'), " +
+        "(SELECT COUNT(*) FROM ``transaction`` t WHERE t.status = 'COMPLETED' AND (SELECT COUNT(*) FROM outbox_event o " +
+        "WHERE o.event_type = 'SaleCompleted' AND o.aggregate_key = CONCAT('sale:', t.transaction_id)) <> 1)"))[0] -split "`t"
+    Write-Host "  completed_transactions=$($sales[0]) sale_events=$($sales[1]) completed_without_one_sale_event=$($sales[2])"
+    if ([long]$sales[0] -ne [long]$sales[1] -or [long]$sales[2] -ne 0) {
+        $violations.Add("SaleCompleted rows: $($sales[1]) for $($sales[0]) COMPLETED transactions, $($sales[2]) without exactly one")
+    }
 } catch {
     $violations.Add("reconciliation query failed: $($_.Exception.Message)")
     $fr054 = $null

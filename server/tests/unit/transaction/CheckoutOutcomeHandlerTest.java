@@ -44,7 +44,13 @@ class CheckoutOutcomeHandlerTest {
     private final TransactionStateCache cache = new TransactionStateCache(locks, 100);
     private final SettlementRegistry registry = new SettlementRegistry(locks);
     private final Clock timing = new Clock();
-    private final CheckoutOutcomeHandler handler = new CheckoutOutcomeHandler(db, cache, registry, timing);
+    /** Event IDs the handler signalled after its T3 commits (007 T029). */
+    private final List<String> signalled = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final CheckoutOutcomeHandler handler = new CheckoutOutcomeHandler(db, cache, registry, timing,
+            new transaction.SaleEvents(events.TopicNames.unprefixed()), new events.OutboxSignal() {
+                @Override public void signal(List<String> eventIds) { signalled.addAll(eventIds); }
+                @Override public void resend(String eventId) { throw new AssertionError("the handler never re-sends"); }
+            });
 
     @Test
     void stockDeductedForThePendingActiveAttemptRunsT3AndCompletesTheClaimedFuture() throws Exception {

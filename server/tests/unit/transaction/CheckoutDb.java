@@ -46,6 +46,8 @@ final class CheckoutDb implements TransactionStore, CheckoutAttemptStore {
     java.util.function.Consumer<String> onSettle = id -> { };
     int loads;
     int finds;
+    /** T3 reads of an attempt's lines and station, made when the state cache has no entry (007 T029). */
+    int saleSourceFinds;
     int guardMisses;
     int clientOutcomeWrites;
 
@@ -92,9 +94,18 @@ final class CheckoutDb implements TransactionStore, CheckoutAttemptStore {
         int number = r.attemptCount() + 1;
         rows.put(id, new Row(r.stationId(), r.status(), r.itemCount(), r.total(), number, number, r.startedAt(), null));
         AttemptKey key = new AttemptKey(id, number);
-        attempts.put(key, new AttemptRecord(key, State.PENDING, null, null, "[]", r.itemCount(), r.total(),
-                ClientOutcome.NONE, base, null, 0, base.plusSeconds(2), null, "request-" + key));
+        attempts.put(key, new AttemptRecord(key, State.PENDING, null, null, canonical(lines.get(id)), r.itemCount(),
+                r.total(), ClientOutcome.NONE, base, null, 0, base.plusSeconds(2), null, "request-" + key));
         return key;
+    }
+
+    /** The canonical snapshot T1 records for a basket: one {@code {sku, quantity}} per SKU, in SKU order. */
+    static String canonical(List<TransactionLine> basket) {
+        Map<String, Integer> units = new java.util.TreeMap<>();
+        for (TransactionLine line : basket) units.merge(line.sku(), line.quantity(), Integer::sum);
+        List<String> entries = new ArrayList<>();
+        units.forEach((sku, quantity) -> entries.add("{\"sku\":\"" + sku + "\",\"quantity\":" + quantity + "}"));
+        return "[" + String.join(",", entries) + "]";
     }
 
     synchronized void foreignScan(String id, TransactionLine line) {
@@ -168,7 +179,8 @@ final class CheckoutDb implements TransactionStore, CheckoutAttemptStore {
     }
 
     @Override
-    public synchronized WriteResult complete(AttemptKey key, Instant completedAt, boolean answering) {
+    public synchronized WriteResult complete(AttemptKey key, Instant completedAt, boolean answering,
+                                             events.OutboxRow saleCompleted) {
         onSettle.accept(key.transactionId());
         Failure failure = completeFailures.poll();
         if (failure != null && !failure.afterCommit()) throw failure.failure();
@@ -180,9 +192,19 @@ final class CheckoutDb implements TransactionStore, CheckoutAttemptStore {
         rows.put(key.transactionId(), new Row(r.stationId(), TransactionStatus.COMPLETED, r.itemCount(), r.total(),
                 r.attemptCount(), null, r.startedAt(), completedAt));
         settle(key, State.COMPLETED, null, null, completedAt, answering ? ClientOutcome.SUCCESS : null);
+        outbox.add(saleCompleted);
         calls.add("complete " + key);
         if (failure != null) throw failure.failure();
         return WriteResult.OK;
+    }
+
+    @Override
+    public synchronized Optional<SaleSource> findSaleSource(AttemptKey key) {
+        saleSourceFinds++;
+        AttemptRecord attempt = attempts.get(key);
+        Row row = rows.get(key.transactionId());
+        if (attempt == null || row == null) return Optional.empty();
+        return Optional.of(new SaleSource(key, attempt.lines(), attempt.itemCount(), row.stationId()));
     }
 
     @Override

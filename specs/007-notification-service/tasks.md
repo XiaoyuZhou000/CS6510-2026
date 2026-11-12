@@ -132,42 +132,42 @@ These rules bind every task below.
 
 ### Tests for User Story 1 ⚠️
 
-- [ ] T020 [P] [US1] Write `server/tests/unit/transaction/SaleEventsTest.java`:
+- [X] T020 [P] [US1] Write `server/tests/unit/transaction/SaleEventsTest.java`:
   - building from lines {B:1, A:3} gives `lines` [A×3, B×1] in ascending, unique order;
   - `sale_id = transaction_id`;
   - `event_id = EventIds.saleEventId(transactionId)`;
   - envelope `routing_key` and `correlation_id` are the transaction ID and `producer` is `transaction`;
   - a zero quantity, a duplicate SKU, or an empty basket throws.
-- [ ] T021 [P] [US1] Extend `server/tests/database/JdbcCheckoutAttemptStoreTest.java`:
+- [X] T021 [P] [US1] Extend `server/tests/database/JdbcCheckoutAttemptStoreTest.java`:
   - `complete` inserts exactly one `outbox_event` row with `event_type = 'SaleCompleted'`, `aggregate_key = 'sale:<id>'`, and the deterministic `event_id`, in the same commit as `status = 'COMPLETED'`;
   - a guard miss inserts nothing;
   - a forced failure of the outbox INSERT rolls back the completion, so the transaction keeps its pending attempt;
   - a second insert of the same `event_id` violates `uq_outbox_event_id`.
-- [ ] T022 [P] [US1] Write `server/tests/integration/SaleCompletedEventTest.java` on `InProcessCheckout` with `InMemoryEventBus`, covering spec US1 acceptance scenarios 1–5 and 7:
+- [X] T022 [P] [US1] Write `server/tests/integration/SaleCompletedEventTest.java` on `InProcessCheckout` with `InMemoryEventBus`, covering spec US1 acceptance scenarios 1–5 and 7:
   - 3×A + 1×B gives one event with A = 3 and B = 1;
   - a rejection followed by a successful second attempt gives one event, for attempt 2;
   - a repeated Complete, a redelivered `StockDeducted`, and a Transaction restart give no additional event;
   - scans, pending attempts, and rejected attempts give no event;
   - a background completion after `500` gives one event;
   - the payload has no recipient field.
-- [ ] T023 [P] [US1] Write `server/tests/messaging/SaleEventPublishLiveTest.java` (live Kafka, per-run prefix), covering US1 scenario 6: with the broker stopped through `KafkaTestSupport`, a completion commits and Complete answers 200; after the broker restarts, the `SaleCompleted` record appears exactly once on `selfcheckout.sale-completed.v1`, keyed by the transaction ID.
-- [ ] T024 [P] [US1] Write `server/tests/architecture/TransactionHasNoRecipientLogicTest.java`, which scans `server/transaction/src/**` for `subscri`, `recipient`, `cs6510_notification`, and imports of `notification.*` (FR-004). Write `server/tests/architecture/SaleEventOnlyFromT3Test.java`: the only references to `SaleEvents`/`SALE_COMPLETED` in Transaction are in `CheckoutOutcomeHandler`, `JdbcCheckoutAttemptStore`, `SaleEvents`, and `TransactionMain`.
-- [ ] T025 [P] [US1] Write `server/tests/messaging/SaleEventContractTest.java`: a `SaleCompleted` produced by the Transaction code passes `EnvelopeCodec` validation as a Notification consumer would apply it, and records with a wrong producer, a wrong routing key, an unsupported version, unsorted lines, or a non-positive quantity are rejected as permanent.
-- [ ] T026 [US1] Update `server/tests/performance/statement-budgets.properties` to `complete.t3.statements=3` and `complete.t3.statements.design=3` (commits stay 1), with a comment citing FR-002 and research N2. Extend `server/tests/performance/OutcomeHandlerStatementBudgetTest.java` so T3 is measured at exactly 3 statements and 1 commit on the warm path, and at 4 statements on a cache miss (the extra read is `CheckoutAttemptStore.find`, before T3).
+- [X] T023 [P] [US1] Write `server/tests/messaging/SaleEventPublishLiveTest.java` (live Kafka, per-run prefix), covering US1 scenario 6: with the broker stopped through `KafkaTestSupport`, a completion commits and Complete answers 200; after the broker restarts, the `SaleCompleted` record appears exactly once on `selfcheckout.sale-completed.v1`, keyed by the transaction ID.
+- [X] T024 [P] [US1] Write `server/tests/architecture/TransactionHasNoRecipientLogicTest.java`, which scans `server/transaction/src/**` for `subscri`, `recipient`, `cs6510_notification`, and imports of `notification.*` (FR-004). Write `server/tests/architecture/SaleEventOnlyFromT3Test.java`: the only references to `SaleEvents`/`SALE_COMPLETED` in Transaction are in `CheckoutOutcomeHandler`, `JdbcCheckoutAttemptStore`, `SaleEvents`, and `TransactionMain`.
+- [X] T025 [P] [US1] Write `server/tests/messaging/SaleEventContractTest.java`: a `SaleCompleted` produced by the Transaction code passes `EnvelopeCodec` validation as a Notification consumer would apply it, and records with a wrong producer, a wrong routing key, an unsupported version, unsorted lines, or a non-positive quantity are rejected as permanent.
+- [X] T026 [US1] Update `server/tests/performance/statement-budgets.properties` to `complete.t3.statements=3` and `complete.t3.statements.design=3` (commits stay 1), with a comment citing FR-002 and research N2. Extend `server/tests/performance/OutcomeHandlerStatementBudgetTest.java` so T3 is measured at exactly 3 statements and 1 commit on the warm path, and at 4 statements on a cache miss (the extra read is `CheckoutAttemptStore.find`, before T3).
 
 ### Implementation for User Story 1
 
-- [ ] T027 [US1] Create `server/transaction/src/transaction/SaleEvents.java`. It builds the `SaleCompleted` `OutboxRow` from `(transactionId, attemptNumber, completedAt, stationId, lines)` using `EventIds.saleEventId`, `EnvelopeCodec`, and `TopicNames.saleCompleted()`; it validates lines as in T020; and it sets `aggregateKey = "sale:" + transactionId`.
-- [ ] T028 [US1] Change `server/transaction/src/database/CheckoutAttemptStore.java` and `JdbcCheckoutAttemptStore.java` so that `complete(AttemptKey key, Instant completedAt, boolean answering, OutboxRow saleCompleted)` runs, in one `JdbcUnitOfWork`, `COMPLETE_GUARD`, then `COMPLETE_ATTEMPT`, then `JdbcOutboxStore.insert(connection, saleCompleted)`, then `FaultHooks.hit("transaction.sale.beforeT3Commit")`, then commit. A guard miss still rolls back with `GUARD_MISS` and inserts nothing.
-- [ ] T029 [US1] Adapt `server/transaction/src/transaction/CheckoutOutcomeHandler.java`:
+- [X] T027 [US1] Create `server/transaction/src/transaction/SaleEvents.java`. It builds the `SaleCompleted` `OutboxRow` from `(transactionId, attemptNumber, completedAt, stationId, lines)` using `EventIds.saleEventId`, `EnvelopeCodec`, and `TopicNames.saleCompleted()`; it validates lines as in T020; and it sets `aggregateKey = "sale:" + transactionId`.
+- [X] T028 [US1] Change `server/transaction/src/database/CheckoutAttemptStore.java` and `JdbcCheckoutAttemptStore.java` so that `complete(AttemptKey key, Instant completedAt, boolean answering, OutboxRow saleCompleted)` runs, in one `JdbcUnitOfWork`, `COMPLETE_GUARD`, then `COMPLETE_ATTEMPT`, then `JdbcOutboxStore.insert(connection, saleCompleted)`, then `FaultHooks.hit("transaction.sale.beforeT3Commit")`, then commit. A guard miss still rolls back with `GUARD_MISS` and inserts nothing.
+- [X] T029 [US1] Adapt `server/transaction/src/transaction/CheckoutOutcomeHandler.java`:
   - in `complete(AttemptKey)`, take the attempt's lines from the cached `TransactionStateCache.State` when present, otherwise from `attempts.find(key)`'s canonical `lines`;
   - check that the line quantities sum to the attempt's `item_count`, and raise an integrity fault (existing `integrity(...)` path) on a mismatch;
   - build the row with `SaleEvents`, and call the new `complete`;
   - after a successful commit, call `FaultHooks.hit("transaction.sale.afterT3Commit")` and signal the existing `OutboxSignal` with the event ID, before completing the settlement future.
-- [ ] T030 [US1] Wire `SaleEvents` (with `TopicNames.fromEnvironment`) into `server/transaction/src/transaction/TransactionMain.java`, passing it to `CheckoutOutcomeHandler`. The existing `OutboxDispatcher` publishes the new rows unchanged.
-- [ ] T031 [US1] Add `saleEventsUnpublished` (`COUNT(*) FROM outbox_event WHERE event_type = 'SaleCompleted' AND published_at IS NULL`) and `saleEventsTotal` to `server/transaction/src/database/TransactionStatusQueries.java`, show them in the Transaction status line, and extend `server/tests/database/ServiceStatusQueriesTest.java` to cover them.
-- [ ] T032 [US1] Add the SC-001 invariant to `db/transaction/validate.sql`: the number of COMPLETED transactions equals the number of `SaleCompleted` outbox rows, and every COMPLETED transaction has exactly one row with `aggregate_key = CONCAT('sale:', transaction_id)`. Make `db/validate-invariants.ps1` report the check and fail on it.
-- [ ] T033 [US1] Run `server/run-tests.sh unit database integration messaging architecture performance` and confirm that T020–T026 pass and every 006 test still passes.
+- [X] T030 [US1] Wire `SaleEvents` (with `TopicNames.fromEnvironment`) into `server/transaction/src/transaction/TransactionMain.java`, passing it to `CheckoutOutcomeHandler`. The existing `OutboxDispatcher` publishes the new rows unchanged.
+- [X] T031 [US1] Add `saleEventsUnpublished` (`COUNT(*) FROM outbox_event WHERE event_type = 'SaleCompleted' AND published_at IS NULL`) and `saleEventsTotal` to `server/transaction/src/database/TransactionStatusQueries.java`, show them in the Transaction status line, and extend `server/tests/database/ServiceStatusQueriesTest.java` to cover them.
+- [X] T032 [US1] Add the SC-001 invariant to `db/transaction/validate.sql`: the number of COMPLETED transactions equals the number of `SaleCompleted` outbox rows, and every COMPLETED transaction has exactly one row with `aggregate_key = CONCAT('sale:', transaction_id)`. Make `db/validate-invariants.ps1` report the check and fail on it.
+- [X] T033 [US1] Run `server/run-tests.sh unit database integration messaging architecture performance` and confirm that T020–T026 pass and every 006 test still passes.
 - [ ] T034 [US1] Execute quickstart scenario A by hand with the Notification process absent, and record the commands and results in `load-client/reports/notification-service/us1-scenario-a.md`.
 - [ ] T035 [US1] Run CP1: `server/benchmark-event-based.ps1` with this tree, default twice (`cp1-default-1`, `cp1-default-2`) and stress once (`cp1-stress-1`), under `load-client/reports/notification-service/cp1/`. Add the comparison with CP0 to `checkpoints.md`, and investigate and explain any drop of more than 5% before continuing (the design estimate is ≤ 3%, research N15).
 

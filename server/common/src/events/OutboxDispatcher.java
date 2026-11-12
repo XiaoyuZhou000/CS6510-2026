@@ -44,7 +44,8 @@ import java.util.concurrent.atomic.LongAdder;
  *
  * <p>Because every send goes through the one sender thread, a key's events leave in commit order; Kafka's
  * idempotent producer keeps that order on the partition. Test-only fault hooks, for rows with an aggregate key
- * (checkout events) only: {@code outbox.beforeSend}, {@code outbox.afterConfirm} (on the marker thread, before
+ * (checkout events) only, not for 007's {@code SaleCompleted} rows, whose aggregate key names the sale rather than
+ * a Saga attempt: {@code outbox.beforeSend}, {@code outbox.afterConfirm} (on the marker thread, before
  * the ID joins a batch), and {@code outbox.beforeMark}. Timers {@code outbox.commitToSend} (signal to send) and
  * {@code outbox.sendToConfirm}; counters {@code outbox.markBatches} and {@code outbox.markedEvents}, whose
  * ratio is the mean marking batch size, plus {@code outbox.resends} and {@code outbox.sendFailures}.</p>
@@ -360,7 +361,7 @@ public final class OutboxDispatcher implements OutboxSignal, AutoCloseable {
      * aggregate, the checkout events; catalog rows, which have none, never trigger them at startup.
      */
     private static boolean hooked(OutboxRow row) {
-        return row.aggregateKey() != null;
+        return row.aggregateKey() != null && !EventTypes.SALE_COMPLETED.typeName().equals(row.eventType());
     }
 
     private List<String> drainConfirmed(List<String> batch) {
