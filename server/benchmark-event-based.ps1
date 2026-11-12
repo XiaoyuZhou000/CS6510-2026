@@ -85,6 +85,9 @@ $dbDir = Join-Path $repo 'db'
 $kafkaDir = Join-Path $repo 'deploy/kafka'
 . (Join-Path $dbDir 'mysql-tools.ps1')
 . (Join-Path $kafkaDir 'kafka-tools.ps1')
+# Set-ProcessEnv, Get-Prop, Test-Http, Stop-ProcessTree, Wait-Until, Start-BenchService, Start-ReadyService,
+# and Invoke-IdleGate, shared with benchmark-notification.ps1.
+. (Join-Path $server 'benchmark-common.ps1')
 
 $out = Join-Path $repo "load-client/reports/event-based-architecture/$OutputLabel"
 if ((Test-Path $out) -and (Get-ChildItem $out -Force | Select-Object -First 1)) {
@@ -140,12 +143,6 @@ $gateOn = $IdleCpuCores -gt 0 -or $BlockingProcess.Count -gt 0
 # Credentials for every service, kept in this process so the services and resets inherit them.
 $credentials = @{}
 $savedEnv = @{}
-function Set-ProcessEnv([string]$Name, [string]$Value) {
-    if (-not $script:savedEnv.ContainsKey($Name)) {
-        $script:savedEnv[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
-    }
-    [Environment]::SetEnvironmentVariable($Name, $Value, 'Process')
-}
 foreach ($service in $script:ServiceNames) {
     $credentials[$service] = Get-ServiceDbCredential -Service $service
     Set-ProcessEnv "$($service.ToUpperInvariant())_DB_PASSWORD" $credentials[$service].Password
@@ -162,83 +159,6 @@ $finalStatusFile = Join-Path $out 'kafka-status-final.json'
 $statusProbe = $null
 $nextProbeAt = Get-Date
 $lagSamples = New-Object System.Collections.Generic.List[object]
-
-function Get-Prop($Object, [string]$Name) {
-    if ($null -eq $Object) { return $null }
-    $property = $Object.PSObject.Properties[$Name]
-    if ($property) { return $property.Value }
-    return $null
-}
-
-function Test-Http([string]$Url, [int[]]$Accept) {
-    try {
-        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2
-        return $Accept -contains [int]$response.StatusCode
-    } catch {
-        $response = $_.Exception.Response
-        if ($null -ne $response) { return $Accept -contains [int]$response.StatusCode }
-        return $false
-    }
-}
-
-# Stops a process and every process it started, children first.
-function Stop-ProcessTree([int]$ProcessId) {
-    Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId" -ErrorAction SilentlyContinue |
-        ForEach-Object { Stop-ProcessTree ([int]$_.ProcessId) }
-    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
-}
-
-function Wait-Until([string]$What, [int]$Seconds, [scriptblock]$Condition) {
-    $deadline = (Get-Date).AddSeconds($Seconds)
-    while ((Get-Date) -lt $deadline) {
-        foreach ($name in @($script:running.Keys)) {
-            $process = $script:running[$name]
-            $process.Refresh()
-            if ($process.HasExited) { throw "$name exited (code $($process.ExitCode)) while waiting for: $What" }
-        }
-        if (& $Condition) { return }
-        Start-Sleep -Milliseconds 500
-    }
-    throw "Timed out after $Seconds s waiting for: $What"
-}
-
-function Start-BenchService([string]$Service) {
-    $title = $Service.Substring(0, 1).ToUpperInvariant() + $Service.Substring(1)
-    $cp = "out/$Service.jar;out/common.jar;out/contracts.jar;lib/messaging/*;lib/mysql-connector-j-9.0.0.jar"
-    $process = Start-Process -FilePath $JavaExe -ArgumentList @('-cp', $cp, "$Service.${title}Main") `
-        -WorkingDirectory $server -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput (Join-Path $out "$Service-stdout.log") `
-        -RedirectStandardError (Join-Path $out "$Service-stderr.log")
-    $null = $process.Handle
-    $script:running[$Service] = $process
-}
-
-<#
-    Starts a service and waits for its readiness condition. On this shared machine an outbound
-    connection can briefly hold a service port, so a start that fails with a BindException is
-    repeated (its logs are kept with an attempt suffix).
-#>
-function Start-ReadyService([string]$Service, [string]$What, [scriptblock]$Condition, [int]$Attempts = 3) {
-    for ($attempt = 1; ; $attempt++) {
-        Start-BenchService $Service
-        try {
-            Wait-Until $What 60 $Condition
-            return
-        } catch {
-            $process = $script:running[$Service]
-            $stderr = Join-Path $out "$Service-stderr.log"
-            $bind = $process.HasExited -and (Test-Path $stderr) -and (Select-String -Path $stderr -Pattern 'BindException' -Quiet)
-            if (-not $bind -or $attempt -ge $Attempts) { throw }
-            $script:running.Remove($Service)
-            foreach ($stream in @('stdout', 'stderr')) {
-                $log = Join-Path $out "$Service-$stream.log"
-                if (Test-Path $log) { Move-Item $log (Join-Path $out "$Service-$stream.attempt$attempt.log") }
-            }
-            Write-Host "$Service could not bind its port (attempt $attempt); retrying" -ForegroundColor Yellow
-            Start-Sleep -Seconds 3
-        }
-    }
-}
 
 function Get-ServiceRow([string]$Service, [string]$Query) {
     return Get-MySqlRow -MySql $mysql -Credential $credentials[$Service] -Query $Query
@@ -473,21 +393,6 @@ function Get-ConfigurationEnv {
         if ($name -match $pattern -and $name -notmatch 'PASSWORD') { $configuration[$name] = [string]$variables[$name] }
     }
     return $configuration
-}
-
-<#
-    benchmark-compare.ps1's idle-machine gate. Dot-sourcing that script binds its parameters as
-    variables, so it is loaded inside this function's scope, never into the harness's.
-#>
-function Invoke-IdleGate([string]$Action, $Before, [datetime]$Started) {
-    $cores = $IdleCpuCores
-    if ($cores -le 0) { $cores = 64 }
-    . (Join-Path $PSScriptRoot 'benchmark-compare.ps1') -IdleCpuCores $cores -BlockingProcess $BlockingProcess
-    switch ($Action) {
-        'wait' { Wait-IdleMachine (Join-Path $out 'idle-gate.log') }
-        'snapshot' { return Get-BackgroundCpuSnapshot }
-        'measure' { return Measure-BackgroundLoad $Before (Get-BackgroundCpuSnapshot) ((Get-Date) - $Started).TotalSeconds $BlockingProcess }
-    }
 }
 
 function Get-LastMetrics([string]$Service) {

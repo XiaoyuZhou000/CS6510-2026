@@ -135,6 +135,8 @@ class MicroserviceBoundaryTest {
         List<Path> scripts = new ArrayList<>(serverScripts().stream()
                 .filter(path -> path.toString().endsWith(".sh")).toList());
         scripts.add(server.resolve("benchmark-event-based.ps1"));
+        scripts.add(server.resolve("benchmark-common.ps1"));
+        scripts.add(server.resolve("benchmark-notification.ps1"));
         for (Path script : scripts) {
             if (Files.readString(script).contains("lib/grpc/*")) violations.add(script + " puts lib/grpc/* on a classpath");
         }
