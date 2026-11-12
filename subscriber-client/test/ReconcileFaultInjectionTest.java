@@ -184,4 +184,12 @@ class ReconcileFaultInjectionTest {
                 SyntheticRun.setField(SyntheticRun.exports(run, "sale-events.tsv"), "e-txn-3\t", 5,
                         "[{\"sku\":\"SKU-000004\",\"quantity\":4}]"));
     }
+
+    // The 2026-11-12 time zone bug: every exported DATETIME was 8 hours late against the event's own time.
+    @Test
+    void aSaleEventCompletionTimeThatDiffersFromTheSaleFailsTheSaleEventCheck(@TempDir Path dir) throws Exception {
+        assertFailsWithExactly(dir, "saleEvents", "txn-2", run ->
+                SyntheticRun.setField(SyntheticRun.exports(run, "sale-events.tsv"), "e-txn-2\t", 4,
+                        String.valueOf(SyntheticRun.T0 + 1_000 - 28_800_000L)));
+    }
 }

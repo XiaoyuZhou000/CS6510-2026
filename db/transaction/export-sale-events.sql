@@ -6,7 +6,7 @@
 -- =============================================================================
 SELECT event_id,
        aggregate_key,
-       CAST(ROUND(UNIX_TIMESTAMP(published_at) * 1000) AS SIGNED) AS published_at_ms,
+       TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', published_at) DIV 1000 AS published_at_ms,
        HEX(envelope) AS envelope_hex
 FROM outbox_event
 WHERE event_type = 'SaleCompleted'

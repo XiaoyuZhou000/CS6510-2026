@@ -17,7 +17,8 @@ import java.util.TreeSet;
  * <p>Each failing key is reported in exactly one category:
  * <ul>
  *   <li>{@code saleEvents} (SC-001): a COMPLETED transaction with zero or several {@code SaleCompleted} rows, or with
- *       lines that differ from its sale; a sale event of no completed sale, or one that cannot be decoded.</li>
+ *       lines or a completion time that differ from its sale; a sale event of no completed sale, or one that cannot be
+ *       decoded.</li>
  *   <li>{@code fixedSubscriptions} (FR-023): a history version above {@code ready.json}'s, or a subscription state at
  *       that version that differs from {@code snapshot.json}.</li>
  *   <li>{@code selectionMismatch}: a completed sale with no selection or several, a selection whose version is not the
@@ -111,6 +112,8 @@ public final class Reconciler {
         long readyVersion = data.ready.subscriptionVersion();
 
         // Sale events (SC-001).
+        Map<String, Long> completedAt = new HashMap<>();
+        for (RunData.SaleLine line : data.sales) completedAt.put(line.transactionId(), line.completedAtMs());
         Map<String, List<RunData.SaleEvent>> eventsBySale = new TreeMap<>();
         for (RunData.SaleEvent event : data.saleEvents) {
             Map<String, Integer> lines = RunData.parseLines(event.lines());
@@ -127,7 +130,10 @@ public final class Reconciler {
                 return;
             }
             RunData.SaleEvent event = events.get(0);
-            if (!lines.equals(RunData.parseLines(event.lines())) || !("sale:" + sale).equals(event.aggregateKey())) {
+            // The event carries the sale's own completion instant, so the two times must agree to the millisecond;
+            // this also catches an export that reads the DATETIME columns in the wrong time zone.
+            if (!lines.equals(RunData.parseLines(event.lines())) || !("sale:" + sale).equals(event.aggregateKey())
+                    || !completedAt.get(sale).equals(event.completedAtMs())) {
                 findings.add(SALE_EVENTS, sale);
             }
         });

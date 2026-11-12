@@ -171,7 +171,7 @@ function Add-BacklogSample([string]$Phase) {
 
 $result = [ordered]@{ clientOk = $false; subscriberReady = $false; drained = $false; validatorPassed = $false
     exported = $false; reconciliationPassed = $false }
-$drainSeconds = $null
+$drainElapsedSeconds = $null
 $clientReportPath = $null
 $report = $null
 $idle = $null
@@ -271,7 +271,7 @@ try {
     while ((Get-Date) -lt $deadline) {
         $sample = Add-BacklogSample 'drain'
         if ($sample.drained) { $zeroInRow++ } else { $zeroInRow = 0 }
-        if ($zeroInRow -ge 2) { $result.drained = $true; $drainSeconds = [Math]::Round(((Get-Date) - $clientEnded).TotalSeconds, 1); break }
+        if ($zeroInRow -ge 2) { $result.drained = $true; $drainElapsedSeconds = [Math]::Round(((Get-Date) - $clientEnded).TotalSeconds, 1); break }
         Start-Sleep -Seconds 2
     }
     if (-not $result.drained) { Write-Host "The run did not drain within $DrainSeconds s" -ForegroundColor Red }
@@ -351,7 +351,7 @@ $runInfo = [ordered]@{
     faults = 'none'
     faultSubscriber = $null
     backgroundCompletions = $background
-    drainSeconds = $drainSeconds
+    drainSeconds = $drainElapsedSeconds
     drainDeadlineSeconds = $DrainSeconds
     extraEnv = $ExtraEnv
     idleGate = $idle
@@ -376,7 +376,7 @@ if ($result.exported) {
 foreach ($entry in $savedEnv.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
 
 Write-Host ("{0}: totalTransactions={1} ready={2} drained={3} ({4} s) validator={5} reconciliation={6} -> {7}" -f $RunName,
-    (Get-Prop $report 'totalTransactions'), $result.subscriberReady, $result.drained, $drainSeconds, $result.validatorPassed,
+    (Get-Prop $report 'totalTransactions'), $result.subscriberReady, $result.drained, $drainElapsedSeconds, $result.validatorPassed,
     $result.reconciliationPassed, $out)
 if ($result.clientOk -and $result.subscriberReady -and $result.drained -and $result.validatorPassed -and $result.reconciliationPassed) { exit 0 }
 exit 1

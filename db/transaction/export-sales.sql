@@ -6,7 +6,7 @@
 -- test. Times are epoch milliseconds.
 -- =============================================================================
 SELECT t.transaction_id,
-       CAST(ROUND(UNIX_TIMESTAMP(t.completed_at) * 1000) AS SIGNED) AS completed_at_ms,
+       TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', t.completed_at) DIV 1000 AS completed_at_ms,
        s.sku,
        COUNT(*) AS quantity
 FROM `transaction` t

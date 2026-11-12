@@ -14,6 +14,12 @@
     Values are mysql --batch text (NULL for SQL NULL); times are epoch milliseconds. No service reads another's
     data, and passwords travel only through MYSQL_PWD (db/mysql-tools.ps1).
 
+    Times: the services connect with serverTimezone=UTC, so Connector/J writes each instant as its UTC wall clock
+    into a session in the server's own zone (SYSTEM), and reads it back the same way. The SQL therefore converts
+    the session's wall clock as UTC, TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', col) DIV 1000, and never
+    uses UNIX_TIMESTAMP, which was 8 hours late on this machine (UTC-8). This holds only for columns the services
+    write; the reconciler checks every sale's exported completion time against its SaleCompleted event.
+
     The sale-event decoding needs subscriber-client/build.sh to have run. The script never changes any data.
 
 .EXAMPLE
