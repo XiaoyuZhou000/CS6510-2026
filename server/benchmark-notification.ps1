@@ -20,6 +20,8 @@
          broker-outage                 deploy/kafka/stop-broker.ps1, -OutageSeconds, start-broker.ps1 -NoTopics;
          subscriber-outage             stop SubscriberMain (stop file), -OutageSeconds, restart it with --resume;
          malformed-sale                support.PublishRawRecord sends a malformed record to the sale topic.
+       -Disruption notification-stopped (quickstart scenario G, T109) instead stops Notification once the subscribers
+       are ready, runs the whole load without it, and starts it again when the Load Client exits.
        The Notification crashes set NOTIFICATION_TEST_FAULTS=1 for the run. Each step is logged in run.json.
     6. Runs the unchanged Load Client, `java -cp out Main` (default) or `java -cp out Main --stations=100
        --duration=120` (stress), sampling every 2 s into backlog.tsv: Transaction's unpublished SaleCompleted rows
@@ -56,7 +58,7 @@ param(
     [ValidateRange(0, 64)][double]$IdleCpuCores = 0,
     [string[]]$BlockingProcess = @(),
     [ValidateSet('none', 'notification-selection-crash', 'notification-send-crash', 'transaction-restart',
-        'broker-outage', 'subscriber-outage', 'malformed-sale')][string]$Disruption = 'none',
+        'broker-outage', 'subscriber-outage', 'malformed-sale', 'notification-stopped')][string]$Disruption = 'none',
     [ValidateRange(1, 600)][int]$DisruptAfterSeconds = 20,
     [ValidateRange(1, 600)][int]$OutageSeconds = 30
 )
@@ -373,11 +375,21 @@ try {
     New-Item -ItemType Directory -Force -Path $reportsDir | Out-Null
     $before = @(Get-ChildItem $reportsDir -Filter 'report-*.json' | ForEach-Object Name)
     $null = Add-BacklogSample 'start'
+    if ($Disruption -eq 'notification-stopped') {
+        # Scenario G (T109): the whole load runs without Notification. Every stop is a forced kill on Windows; before
+        # the load Notification has no sale to work on.
+        $process = $running['notification']
+        $running.Remove('notification')
+        Stop-ProcessTree $process.Id
+        $process.WaitForExit()
+        Save-ServiceLogs 'notification' 'before-load'
+        Add-DisruptionEvent "Notification stopped before the load (pid $($process.Id))"
+    }
     $client = Start-Process -FilePath $JavaExe -ArgumentList $clientArgs -WorkingDirectory $clientDir -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $out 'client-stdout.txt') -RedirectStandardError (Join-Path $out 'client-stderr.txt')
     $null = $client.Handle
     $loadStarted = Get-Date
-    $disrupted = $Disruption -eq 'none'
+    $disrupted = $Disruption -in @('none', 'notification-stopped')
     while (-not $client.HasExited) {
         Start-Sleep -Seconds 2
         $null = Add-BacklogSample 'load'
@@ -392,6 +404,14 @@ try {
     if (-not $disrupted) { Write-Host "The load ended before -DisruptAfterSeconds; nothing was injected" -ForegroundColor Red }
     $client.WaitForExit()
     $clientEnded = Get-Date
+    if ($Disruption -eq 'notification-stopped') {
+        $null = Add-BacklogSample 'disruption'
+        Start-ReadyService 'notification' 'Notification catalog loaded' {
+            $ops = Get-OpsStatus
+            $null -ne $ops -and $ops.catalogLoaded -eq $true
+        }
+        Add-DisruptionEvent "Notification started after the load (pid $($running['notification'].Id))"
+    }
     $result.clientOk = $client.ExitCode -eq 0
     if (-not $result.clientOk) { Write-Host "Load client exited with code $($client.ExitCode)" -ForegroundColor Red }
 

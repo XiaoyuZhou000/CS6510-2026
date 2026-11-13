@@ -1,0 +1,68 @@
+{
+    "harness":  "benchmark-notification",
+    "id":  "us6-unchanged/g-notification-stopped",
+    "startedAt":  "2026-11-13T10:09:28.9310467+00:00",
+    "deploymentCommit":  "4ee0f4fe207e34a9b119e998155fe743da9e955d",
+    "gitDirty":  true,
+    "workload":  "default",
+    "command":  "java -cp out Main",
+    "loadClient":  {
+                       "stations":  10,
+                       "durationSeconds":  60
+                   },
+    "subscribers":  100,
+    "seed":  20261111,
+    "skusPerSubscriber":  20,
+    "faults":  "none",
+    "faultSubscriber":  null,
+    "disruption":  {
+                       "kind":  "notification-stopped",
+                       "afterSeconds":  20,
+                       "outageSeconds":  30,
+                       "injected":  true,
+                       "events":  [
+                                      {
+                                          "utcMs":  1794564663187,
+                                          "step":  "Notification stopped before the load (pid 44512)"
+                                      },
+                                      {
+                                          "utcMs":  1794564736510,
+                                          "step":  "Notification started after the load (pid 39216)"
+                                      }
+                                  ]
+                   },
+    "backgroundCompletions":  0,
+    "drainSeconds":  17.6,
+    "drainDeadlineSeconds":  300,
+    "extraEnv":  {
+
+                 },
+    "idleGate":  {
+                     "idleCpuCores":  64,
+                     "blockingProcesses":  [
+                                               "WardogsClient-Win64-Shipping",
+                                               "ROTTR",
+                                               "Arknights"
+                                           ],
+                     "backgroundCpuCores":  3.026,
+                     "blockingSeen":  [
+
+                                      ],
+                     "heaviest":  [
+                                      "BioShockInfinite=2.64",
+                                      "claude=0.16",
+                                      "asus_framework=0.03"
+                                  ],
+                     "passed":  true
+                 },
+    "subscriberExitCode":  0,
+    "validatorExitCode":  0,
+    "result":  {
+                   "clientOk":  true,
+                   "subscriberReady":  true,
+                   "drained":  true,
+                   "validatorPassed":  true,
+                   "exported":  true,
+                   "reconciliationPassed":  true
+               }
+}

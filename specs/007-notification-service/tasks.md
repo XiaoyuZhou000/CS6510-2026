@@ -428,18 +428,18 @@ These rules bind every task below.
 
 ### Tests for User Story 6 ⚠️
 
-- [ ] T104 [P] [US6] Write `server/tests/integration/NotificationOutageCheckoutTest.java`:
+- [X] T104 [P] [US6] Write `server/tests/integration/NotificationOutageCheckoutTest.java`:
   - with Notification stopped, Start, Scan, Lookup, and Complete behave as in 006, with the same responses and the same commit counts;
   - with a slow Notification consumer (a 2 s `FaultHooks` delay in selection), Complete latency is unchanged within the test tolerance and `saleEventsUnpublished` stays 0, because the events are on the broker;
   - after Notification starts, every sale is selected once.
-- [ ] T105 [P] [US6] Write `server/tests/integration/AnalyticsUnaffectedByNotificationsTest.java`: for one fixed scan stream, the published windows and ranks are identical with Notification running at 100 subscribers and without it.
-- [ ] T106 [P] [US6] Write `server/tests/architecture/ClientAndContractUnchangedTest.java`: every file under `load-client/src/` and `spec/self-checkout-openapi.yaml` is byte-identical to `git show 4a91686:<path>`; `deploy/nginx.conf` differs from `4a91686` only by the added upstream and `/notifications/` location.
-- [ ] T107 [P] [US6] Extend `server/tests/integration/GatewayServiceOutageTest.java`: with Notification unreachable, `/notifications/**` returns the gateway's existing 502 body, and all seven existing routes are unaffected.
+- [X] T105 [P] [US6] Write `server/tests/integration/AnalyticsUnaffectedByNotificationsTest.java`: for one fixed scan stream, the published windows and ranks are identical with Notification running at 100 subscribers and without it.
+- [X] T106 [P] [US6] Write `server/tests/architecture/ClientAndContractUnchangedTest.java`: every file under `load-client/src/` and `spec/self-checkout-openapi.yaml` is byte-identical to `git show 4a91686:<path>`; `deploy/nginx.conf` differs from `4a91686` only by the added upstream and `/notifications/` location.
+- [X] T107 [P] [US6] Extend `server/tests/integration/GatewayServiceOutageTest.java`: with Notification unreachable, `/notifications/**` returns the gateway's existing 502 body, and all seven existing routes are unaffected.
 
 ### Implementation for User Story 6
 
-- [ ] T108 [US6] Fix any regression that T104–T107 reveal in `server/notification/src/**` or `server/transaction/src/**` without changing 006 behavior or assertions, and record any changed 006 test, with its reason, in `server/tests/COVERAGE-LEDGER.md` under a new "Feature 007" section. The expected entry is the T3 budget only.
-- [ ] T109 [US6] Run the full `server/run-tests.sh` (no selector) with `STRICT_LIVE_GATES=1`. Execute quickstart scenario G (Load Client default with Notification stopped, then Notification started, drain, and `ReconcileMain --mode=fixed`) into `load-client/reports/notification-service/us6-unchanged/`, with `README.md`.
+- [X] T108 [US6] Fix any regression that T104–T107 reveal in `server/notification/src/**` or `server/transaction/src/**` without changing 006 behavior or assertions, and record any changed 006 test, with its reason, in `server/tests/COVERAGE-LEDGER.md` under a new "Feature 007" section. The expected entry is the T3 budget only.
+- [X] T109 [US6] Run the full `server/run-tests.sh` (no selector) with `STRICT_LIVE_GATES=1`. Execute quickstart scenario G (Load Client default with Notification stopped, then Notification started, drain, and `ReconcileMain --mode=fixed`) into `load-client/reports/notification-service/us6-unchanged/`, with `README.md`.
 
 **Checkpoint**: nothing a client or Analytics can observe has changed.
 

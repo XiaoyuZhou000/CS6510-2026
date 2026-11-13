@@ -552,3 +552,28 @@ The columns and statuses are those of the feature 005 section, with these differ
 | `unit/transaction/TransactionServiceTest` | `completeReportsMissingEmptyInsufficientAndDuplicateCases` [FakeInventoryReactor outcomes] | ADAPTED | T074 (US1) | — | Scripted deductions and rejections come through `FakeInventoryReactor`; T136 (US2) adds new methods only (FR-031) | T077 |
 | `unit/transaction/TransactionServiceTest` | `aRepeatedCompleteAfterCompletionNeverCallsInventory` | RETAINED | T023 (Foundational) | — | T023 needed no edit: the file uses neither moved class, only `CheckoutOrchestrator.Settings.withResponseBudget` (FR-065) | T045 |
 | `unit/transaction/TransactionServiceTest` | `aRepeatedCompleteAfterCompletionNeverCallsInventory` [FakeInventoryReactor outcomes] | ADAPTED | T074 (US1) | — | A repeated Complete publishes no `CheckoutRequested` instead of making no Inventory call (FR-031, FR-043) | T077 |
+
+## Feature 007 (Notification service)
+
+This section records, for T108 (FR-031, SC-008), every test source under `server/tests/` that existed at 006's final commit `4a91686` and that feature 007 changed, with the reason. It is a plain record: `CoverageParityLedgerTest` does not parse it, so its first column is not backticked. 007 changes no 006 behavior; the tasks expected the T3 budget to be the only changed 006 assertion. In fact, changes fall into three groups: assertions that changed because Transaction now records `SaleCompleted` in T3 or because a fourth service exists, assertions that were only added, and call sites that only follow a changed signature. No 006 assertion was weakened or removed without a stricter replacement. T104–T107 found no regression, so T108 changed no production code.
+
+### Changed 006 assertions
+
+| Test file (at `4a91686`) | Change | Reason |
+|---|---|---|
+| performance/statement-budgets.properties, performance/OutcomeHandlerStatementBudgetTest | `complete.t3.statements` 2 → 3 and new `complete.t3.coldStatements` = 4; `t3AndTheReopenAreTwoStatementsAndOneCommitWithNoRead` became `t3IsThreeStatementsAndTheReopenTwoInOneCommitWithNoRead`, which asserts the one extra INSERT and still one commit; the reopen budget is unchanged | The T3 budget (T026): the sale's `SaleCompleted` outbox row is inserted in T3's own commit (FR-002, research N2) |
+| database/ServiceStatusQueriesTest | Transaction's status record and line gain `sale_events_unpublished` and `sale_events_total`; the fixture adds `SaleCompleted` rows, so `unpublished_outbox` is 3 instead of 2; every 006 field keeps its meaning | `saleEventsUnpublished` is part of Transaction's status (FR-002, the drain condition) |
+| integration/CheckoutMessagesOnlyTest | "no other checkout event" excludes `SaleCompleted`, and a new assertion requires exactly one `SaleCompleted` for the one sale | T3 now records the sale event (FR-002) |
+| unit/transaction/CheckoutOrchestratorTest | The FR-032 count ("404, 409 NOT_OPEN, and 409 EMPTY_BASKET record no event") counts `CheckoutRequested` rows only; a new assertion lists the outbox as `CheckoutRequested`, `SaleCompleted` | The outbox also holds the completed sale's `SaleCompleted` (FR-002) |
+| integration/DatabaseIsolationTest | `bootstrap.sql` grants exactly four service users instead of three; the Notification user is DML-only on its own schema | The fourth service's own user (T012) |
+| architecture/ArchitectureDiagramConsistencyTest | The 006 diagram is checked against 006's topics and event types only (without the sale-completed topic and 007's two types) | 007's flow is drawn in its own diagram (T118) |
+| architecture/OutboxOnlyPublishTest | The scanned artifacts include `notification`; ten event types become twelve; the dispatcher's channel sender may be wrapped only by `ChannelFaults`, constructed only in `NotificationMain` | 007's two event types and the Notification dispatcher (FR-011) |
+| architecture/LayerDependencyTest, architecture/MicroserviceBoundaryTest | The service lists include `notification`; the SQL detector ignores a string literal that is only a keyword (`"DELETE"`), which flagged an HTTP method name | The fourth service is held to the same layer and boundary rules |
+
+### Assertions added only
+
+architecture/CompositionRootTest (Notification's composition root), messaging/EventSchemaCompatibilityTest (007's two `.proto` baselines, T019), performance/CompleteStatementBudgetTest (the settled Complete inserts the `SaleCompleted` row), database/JdbcCheckoutAttemptStoreTest (T3 records exactly one sale row; a guard miss or failure records none), integration/GatewayServiceOutageTest (T107: `/notifications/**` answers the gateway's 502 while Notification is unreachable).
+
+### Signature changes only
+
+`CheckoutAttemptStore.complete` takes the sale's outbox row, and `CheckoutOutcomeHandler` takes `SaleEvents` and the outbox signal, so these call sites pass them without changing what they assert: integration/BoundedWaitTest, performance/TransactionCacheCorrectnessTest, unit/transaction/CheckoutDb, unit/transaction/CheckoutOutcomeHandlerTest, unit/transaction/CheckoutRecoveryWorkerTest, unit/transaction/TransactionServiceTest. Support classes: support/InMemoryEventBus and support/KafkaTestSupport (the fifth topic), support/InProcessTransaction (the sale topic in its dispatcher), integration/PublicRouterTestSupport (the Notification upstream's port).

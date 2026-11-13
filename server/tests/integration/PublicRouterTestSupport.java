@@ -30,6 +30,12 @@ final class PublicRouterTestSupport implements AutoCloseable {
 
     static PublicRouterTestSupport start(int transactionPort, int inventoryPort,
             int analyticsPort) throws Exception {
+        return start(transactionPort, inventoryPort, analyticsPort, 8084);
+    }
+
+    /** As {@link #start(int, int, int)}, with the Notification upstream on {@code notificationPort} (007). */
+    static PublicRouterTestSupport start(int transactionPort, int inventoryPort,
+            int analyticsPort, int notificationPort) throws Exception {
         String nginx = System.getenv().getOrDefault("NGINX_BIN", "nginx");
         try {
             Process version = new ProcessBuilder(nginx, "-v").start();
@@ -48,7 +54,9 @@ final class PublicRouterTestSupport implements AutoCloseable {
             .replace("server 127.0.0.1:8082;",
                 "server 127.0.0.1:" + inventoryPort + ";")
             .replace("server 127.0.0.1:8083;",
-                "server 127.0.0.1:" + analyticsPort + ";");
+                "server 127.0.0.1:" + analyticsPort + ";")
+            .replace("server 127.0.0.1:8084;",
+                "server 127.0.0.1:" + notificationPort + ";");
         var listener = Pattern.compile("listen (\\d+);").matcher(config);
         if (!listener.find()) throw new AssertionError("Public Nginx config has no listener");
         String base = "http://127.0.0.1:" + listener.group(1);

@@ -2,8 +2,10 @@ package integration;
 
 import org.junit.jupiter.api.Test;
 import support.CheckoutDeployment;
+import support.InProcessNotification;
 import support.InventoryTestSchema;
 import support.KafkaTestSupport;
+import support.NotificationTestSchema;
 import support.ServiceHttp;
 import support.TransactionTestSchema;
 
@@ -50,6 +52,48 @@ class GatewayServiceOutageTest {
                     awaitServing(gateway, stopped, deployment);
                 }
                 assertOwnersServe(gateway, SERVICES, deployment);
+            }
+        }
+    }
+
+    /**
+     * 007 US6 (T107, FR-031): Notification's {@code /notifications/} prefix is forwarded to it while it runs; once it is
+     * unreachable, every {@code /notifications/**} request gets the gateway's existing 502 body (the same body a stopped
+     * Analytics gets), and the seven existing routes are served as before.
+     */
+    @Test
+    void withNotificationUnreachableOnlyNotificationRoutesAnswerTheGateways502() throws Exception {
+        try (CheckoutDeployment deployment = CheckoutDeployment.withAnalytics(3, 100, null);
+             NotificationTestSchema schema = NotificationTestSchema.create()) {
+            deployment.startAnalytics();
+            InProcessNotification notification = InProcessNotification.over(schema);
+            try (PublicRouterTestSupport router = PublicRouterTestSupport.start(deployment.transactionHttpPort,
+                    deployment.inventoryHttpPort, deployment.analyticsHttpPort, notification.httpPort())) {
+                ServiceHttp gateway = new ServiceHttp(router.baseUrl());
+                assertEquals(200, gateway.get("/notifications/ops/status").statusCode(), "forwarded while it runs");
+                assertEquals(404, gateway.get("/notifications/subscribers/nobody").statusCode(),
+                        "Notification itself answers an unknown subscriber");
+                assertOwnersServe(gateway, SERVICES, deployment);
+
+                notification.close();
+                List<HttpResponse<String>> unreachable = List.of(gateway.get("/notifications/ops/status"),
+                        gateway.get("/notifications/subscribers/nobody"),
+                        gateway.post("/notifications/subscribers", "{\"subscriberId\":\"gw-1\",\"skus\":[\"" + SKU + "\"]}"),
+                        gateway.get("/notifications/anything/else"));
+                for (HttpResponse<String> response : unreachable) {
+                    assertEquals(502, response.statusCode(), response.request().method() + " " + response.uri().getPath());
+                }
+                assertOwnersServe(gateway, SERVICES, deployment);
+                assertEquals(200, gateway.get("/items").statusCode());
+
+                deployment.stopAnalytics();
+                HttpResponse<String> analyticsDown = gateway.get("/analytics/popular-items");
+                assertEquals(502, analyticsDown.statusCode());
+                for (HttpResponse<String> response : unreachable) {
+                    assertEquals(analyticsDown.body(), response.body(), "the gateway's existing 502 body");
+                }
+            } finally {
+                notification.close();
             }
         }
     }
