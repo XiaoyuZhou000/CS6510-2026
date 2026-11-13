@@ -56,7 +56,8 @@ public interface SubscriptionStore {
     /** An idempotent repeat: nothing was written, and {@code state} is the current one. */
     record Unchanged(SubscriberState state) implements ChangeResult { }
 
-    enum Rejection { SUBSCRIBER_EXISTS, UNKNOWN_SKU }
+    /** Why a request was rejected; {@link SubscriptionChangeRules} decides it in the HTTP contract's precedence. */
+    enum Rejection { INVALID_REQUEST, SUBSCRIBER_NOT_FOUND, SUBSCRIBER_EXISTS, SUBSCRIBER_CANCELLED, LAST_SKU, UNKNOWN_SKU }
 
     /** Rejected under the clock lock; nothing was written. */
     record Rejected(Rejection reason, String detail) implements ChangeResult { }
@@ -70,6 +71,20 @@ public interface SubscriptionStore {
      */
     ChangeResult register(String subscriberId, SortedSet<String> skus, String channelTopic, String firstUnknownSku,
                           Instant at);
+
+    /**
+     * Adds {@code add} to and removes {@code remove} from an active subscriber's SKUs ({@link SubscriptionChangeRules#update}):
+     * an effective change is one {@code UPDATE} row with the effective SKUs; adding held SKUs and removing absent ones
+     * is {@link Unchanged}.
+     */
+    ChangeResult update(String subscriberId, SortedSet<String> add, SortedSet<String> remove, String firstUnknownSku,
+                        Instant at);
+
+    /**
+     * Cancels every subscription of {@code subscriberId} with one {@code CANCEL} row, keeping its identity and channel
+     * for a later registration; a cancelled subscriber is {@link Unchanged} at the version that cancelled it.
+     */
+    ChangeResult cancel(String subscriberId, Instant at);
 
     Optional<SubscriberState> find(String subscriberId);
 

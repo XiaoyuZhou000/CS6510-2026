@@ -125,6 +125,111 @@ class NotificationSubscribersEndpointTest {
         assertError(get("bad.id"), 400, "INVALID_SUBSCRIBER_ID");
     }
 
+    /** T085: PATCH, an effective change and a no-op. */
+    @Test
+    void anEffectivePatchIs200AtANewVersionAndANoOpIs200AtTheSameVersion() throws Exception {
+        assertEquals(201, post("{\"subscriberId\":\"sub-0101\",\"skus\":[\"SKU-000001\",\"SKU-000002\"]}").statusCode());
+        long registered = version(get("sub-0101"));
+        HttpResponse<String> changed = patch("sub-0101", "{\"add\":[\"SKU-000003\"],\"remove\":[\"SKU-000001\"]}");
+        assertEquals(200, changed.statusCode(), changed.body());
+        Map<String, Object> view = Json.parseObject(changed.body());
+        assertEquals(List.of("SKU-000002", "SKU-000003"), view.get("skus"));
+        assertEquals("ACTIVE", view.get("status"));
+        assertEquals(schema.subscriptionVersion(), version(changed), "the confirmation carries the commit's version");
+        assertTrue(version(changed) > registered);
+
+        long before = schema.subscriptionVersion();
+        HttpResponse<String> noOp = patch("sub-0101", "{\"add\":[\"SKU-000002\"],\"remove\":[\"SKU-000004\"]}");
+        assertEquals(200, noOp.statusCode(), noOp.body());
+        assertEquals(view, Json.parseObject(noOp.body()), "a no-op answers the current view");
+        assertEquals(before, schema.subscriptionVersion(), "a no-op writes no version");
+        assertEquals(view, Json.parseObject(get("sub-0101").body()));
+        assertEquals(200, patch("sub-0101", "{\"remove\":[\"SKU-000002\"]}").statusCode(), "add may be omitted");
+        assertEquals(200, patch("sub-0101", "{\"add\":[\"SKU-000004\"]}").statusCode(), "remove may be omitted");
+    }
+
+    @Test
+    void aPatchThatWouldLeaveNoSkuIs409LastSku() throws Exception {
+        assertEquals(201, post("{\"subscriberId\":\"sub-0102\",\"skus\":[\"SKU-000001\"]}").statusCode());
+        long before = schema.subscriptionVersion();
+        assertError(patch("sub-0102", "{\"remove\":[\"SKU-000001\"]}"), 409, "LAST_SKU");
+        assertError(patch("sub-0102", "{\"remove\":[\"SKU-000001\",\"SKU-999999\"]}"), 409, "LAST_SKU",
+                "a state conflict comes before SKU validity");
+        assertEquals(before, schema.subscriptionVersion());
+        assertEquals(List.of("SKU-000001"), Json.getList(Json.parseObject(get("sub-0102").body()), "skus"));
+    }
+
+    @Test
+    void deleteCancelsOnceAndARepeatedDeleteIsIdempotent() throws Exception {
+        assertEquals(201, post("{\"subscriberId\":\"sub-0103\",\"skus\":[\"SKU-000001\",\"SKU-000002\"]}").statusCode());
+        HttpResponse<String> cancelled = delete("sub-0103");
+        assertEquals(200, cancelled.statusCode(), cancelled.body());
+        Map<String, Object> view = Json.parseObject(cancelled.body());
+        assertEquals("CANCELLED", view.get("status"));
+        assertEquals(List.of(), view.get("skus"));
+        assertEquals("selfcheckout.notify.sub-0103.v1", view.get("channel"));
+        assertEquals(schema.subscriptionVersion(), version(cancelled));
+
+        long before = schema.subscriptionVersion();
+        HttpResponse<String> repeat = delete("sub-0103");
+        assertEquals(200, repeat.statusCode(), repeat.body());
+        assertEquals(view, Json.parseObject(repeat.body()), "a repeated DELETE answers the first one's version");
+        assertEquals(before, schema.subscriptionVersion());
+        assertEquals(view, Json.parseObject(get("sub-0103").body()));
+
+        assertError(patch("sub-0103", "{\"add\":[\"SKU-000003\"]}"), 409, "SUBSCRIBER_CANCELLED");
+        assertError(patch("sub-0103", "{\"add\":[\"SKU-999999\"]}"), 409, "SUBSCRIBER_CANCELLED",
+                "a state conflict comes before SKU validity");
+        HttpResponse<String> again = post("{\"subscriberId\":\"sub-0103\",\"skus\":[\"SKU-000004\"]}");
+        assertEquals(201, again.statusCode(), "a cancelled subscriber registers again");
+        assertEquals(List.of("SKU-000004"), Json.parseObject(again.body()).get("skus"));
+    }
+
+    @Test
+    void aPatchOrDeleteOfAnUnknownSubscriberIs404() throws Exception {
+        long before = schema.subscriptionVersion();
+        assertError(patch("nobody-0104", "{\"add\":[\"SKU-000001\"]}"), 404, "SUBSCRIBER_NOT_FOUND");
+        assertError(patch("nobody-0104", "{\"add\":[\"SKU-999999\"]}"), 404, "SUBSCRIBER_NOT_FOUND",
+                "existence comes before SKU validity");
+        assertError(delete("nobody-0104"), 404, "SUBSCRIBER_NOT_FOUND");
+        assertEquals(before, schema.subscriptionVersion());
+    }
+
+    @Test
+    void anInvalidPatchBodyIs400InvalidRequestAndAnInvalidIdIs400InvalidSubscriberId() throws Exception {
+        assertEquals(201, post("{\"subscriberId\":\"sub-0105\",\"skus\":[\"SKU-000001\"]}").statusCode());
+        long before = schema.subscriptionVersion();
+        for (String body : List.of("{not json", "", "[]", "{}", "{\"add\":[],\"remove\":[]}",
+                "{\"add\":[\"SKU-000002\"],\"remove\":[\"SKU-000002\"]}", "{\"add\":\"SKU-000002\"}", "{\"add\":[2]}",
+                "{\"remove\":null,\"add\":null}")) {
+            assertError(patch("sub-0105", body), 400, "INVALID_REQUEST", body);
+        }
+        assertError(patch("nobody-0105", "{\"add\":[\"SKU-000002\"],\"remove\":[\"SKU-000002\"]}"), 400, "INVALID_REQUEST",
+                "the request shape comes before existence");
+        assertError(patch("bad.id", "{\"add\":[\"SKU-000002\"]}"), 400, "INVALID_SUBSCRIBER_ID");
+        assertError(delete("bad.id"), 400, "INVALID_SUBSCRIBER_ID");
+        assertEquals(before, schema.subscriptionVersion());
+    }
+
+    @Test
+    void aPatchWithAnSkuOutsideTheCatalogIs400UnknownSku() throws Exception {
+        assertEquals(201, post("{\"subscriberId\":\"sub-0106\",\"skus\":[\"SKU-000001\"]}").statusCode());
+        long before = schema.subscriptionVersion();
+        HttpResponse<String> unknown = patch("sub-0106", "{\"add\":[\"SKU-000002\",\"SKU-888888\"]}");
+        assertError(unknown, 400, "UNKNOWN_SKU");
+        assertTrue(Json.getString(Json.parseObject(unknown.body()), "message").contains("SKU-888888"), unknown.body());
+        assertError(patch("sub-0106", "{\"remove\":[\"SKU-888888\"]}"), 400, "UNKNOWN_SKU");
+        assertEquals(before, schema.subscriptionVersion());
+        assertEquals(List.of("SKU-000001"), Json.getList(Json.parseObject(get("sub-0106").body()), "skus"));
+    }
+
+    @Test
+    void otherMethodsOnASubscriberAre405() throws Exception {
+        HttpResponse<String> put = CLIENT.send(HttpRequest.newBuilder(uri("/sub-0101"))
+                .PUT(HttpRequest.BodyPublishers.ofString("{}")).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(405, put.statusCode());
+    }
+
     @Test
     void theOpenApiDocumentDescribesTheseRoutesAndCodes() throws Exception {
         Path spec = Path.of("").toAbsolutePath().normalize();
@@ -136,7 +241,8 @@ class NotificationSubscribersEndpointTest {
         for (String required : List.of("/notifications/subscribers:", "/notifications/subscribers/{subscriberId}:",
                 "\"201\":", "\"200\":", "\"400\":", "\"404\":", "\"409\":", "\"500\":", "SubscriberView:", "ApiError:",
                 "INVALID_SUBSCRIBER_ID", "MISSING_SKUS", "UNKNOWN_SKU", "INVALID_REQUEST", "SUBSCRIBER_EXISTS",
-                "SUBSCRIBER_NOT_FOUND", "INTERNAL_ERROR", "channelReady", "subscriptionVersion")) {
+                "SUBSCRIBER_NOT_FOUND", "INTERNAL_ERROR", "channelReady", "subscriptionVersion",
+                "patch:", "delete:", "SubscriptionChange:", "LAST_SKU", "SUBSCRIBER_CANCELLED", "CANCELLED")) {
             assertTrue(yaml.contains(required), "notification-openapi.yaml documents " + required);
         }
     }
@@ -166,6 +272,19 @@ class NotificationSubscribersEndpointTest {
     private static HttpResponse<String> post(String body) throws Exception {
         return CLIENT.send(HttpRequest.newBuilder(uri("")).header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static HttpResponse<String> patch(String subscriberId, String body) throws Exception {
+        return CLIENT.send(HttpRequest.newBuilder(uri("/" + subscriberId)).header("Content-Type", "application/json")
+                .method("PATCH", HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static HttpResponse<String> delete(String subscriberId) throws Exception {
+        return CLIENT.send(HttpRequest.newBuilder(uri("/" + subscriberId)).DELETE().build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static long version(HttpResponse<String> response) {
+        return ((Number) Json.parseObject(response.body()).get("subscriptionVersion")).longValue();
     }
 
     private static HttpResponse<String> get(String subscriberId) throws Exception {

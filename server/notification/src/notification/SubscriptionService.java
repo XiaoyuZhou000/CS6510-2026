@@ -1,6 +1,7 @@
 package notification;
 
 import database.StoreFailure;
+import database.SubscriptionChangeRules;
 import database.SubscriptionStore;
 import database.SubscriptionStore.Applied;
 import database.SubscriptionStore.ChangeResult;
@@ -33,7 +34,10 @@ import java.util.TreeSet;
  *
  * <p>A failure before or during the commit, or a commit whose outcome is unknown, is {@code INTERNAL_ERROR} and
  * leaves the index untouched; repeating the identical request is safe, and the next selection's version check
- * reconciles the index either way (FR-008).</p>
+ * reconciles the index either way (FR-008). Register, update, and cancel share the store's change transaction and
+ * {@link SubscriptionChangeRules}; the index only moves forward through {@link SubscriptionIndex#apply} of the
+ * change just committed or {@link SubscriptionIndex#catchUpTo}, which also covers changes another Notification
+ * process committed.</p>
  */
 public final class SubscriptionService {
     /** A registration's result: {@code created} for a new or re-registered subscriber (201), else a repeat (200). */
@@ -79,10 +83,69 @@ public final class SubscriptionService {
                     "the catalog is not loaded yet; the request was not applied");
         }
         // The first unknown SKU in order; the store rejects with it only after the state checks (409 before 400).
-        String unknown = requested.stream().filter(sku -> !knownSkus.contains(sku)).findFirst().orElse(null);
-        ChangeResult result;
+        String unknown = firstUnknown(requested);
+        ChangeResult result = inChangeTransaction(() -> store.register(subscriberId, requested, topics.channel(subscriberId), unknown,
+                clock.instant()));
+        return switch (result) {
+            case Applied applied -> {
+                applyCommitted(applied.change());
+                yield new Registration(applied.created(), readyState(applied.state()));
+            }
+            case Unchanged unchanged -> {
+                catchUp(unchanged.state().updatedVersion());
+                yield new Registration(false, readyState(unchanged.state()));
+            }
+            case Rejected rejected -> throw failure(subscriberId, rejected);
+        };
+    }
+
+    /**
+     * Adds {@code add} to and removes {@code remove} from an active subscriber's SKUs (T088). The answer is the
+     * committed state: at the change's version, or at the current version for a no-op.
+     */
+    public SubscriberState update(String subscriberId, Collection<String> add, Collection<String> remove) {
+        requireSubscriberId(subscriberId);
+        SortedSet<String> adding = skuSet(add);
+        SortedSet<String> removing = skuSet(remove);
+        String problem = SubscriptionChangeRules.updateRequestProblem(adding, removing);
+        if (problem != null) throw new SubscriptionFailure(SubscriptionFailure.Code.INVALID_REQUEST, problem);
+        if (!knownSkus.loaded()) {
+            throw new SubscriptionFailure(SubscriptionFailure.Code.INTERNAL_ERROR,
+                    "the catalog is not loaded yet; the request was not applied");
+        }
+        SortedSet<String> requested = new TreeSet<>(adding);
+        requested.addAll(removing);
+        String unknown = firstUnknown(requested);
+        return settled(subscriberId, inChangeTransaction(() -> store.update(subscriberId, adding, removing, unknown, clock.instant())));
+    }
+
+    /**
+     * Cancels every subscription of {@code subscriberId} (T088). Notifications already selected for it are still
+     * delivered (rule 5); a repeated cancel answers the first one's version.
+     */
+    public SubscriberState cancel(String subscriberId) {
+        requireSubscriberId(subscriberId);
+        return settled(subscriberId, inChangeTransaction(() -> store.cancel(subscriberId, clock.instant())));
+    }
+
+    private SubscriberState settled(String subscriberId, ChangeResult result) {
+        return switch (result) {
+            case Applied applied -> {
+                applyCommitted(applied.change());
+                yield withKnownChannel(applied.state());
+            }
+            case Unchanged unchanged -> {
+                catchUp(unchanged.state().updatedVersion());
+                yield withKnownChannel(unchanged.state());
+            }
+            case Rejected rejected -> throw failure(subscriberId, rejected);
+        };
+    }
+
+    /** Runs one change transaction; any failure is {@code INTERNAL_ERROR}, and memory is untouched. */
+    private static ChangeResult inChangeTransaction(java.util.function.Supplier<ChangeResult> change) {
         try {
-            result = store.register(subscriberId, requested, topics.channel(subscriberId), unknown, clock.instant());
+            return change.get();
         } catch (StoreFailure failure) {
             PerfMetrics.increment("notification.subscription.failures");
             throw new SubscriptionFailure(SubscriptionFailure.Code.INTERNAL_ERROR, failure.commitOutcomeUnknown()
@@ -93,19 +156,42 @@ public final class SubscriptionService {
             throw new SubscriptionFailure(SubscriptionFailure.Code.INTERNAL_ERROR,
                     "the change could not be stored; it was not applied", failure);
         }
-        return switch (result) {
-            case Applied applied -> {
-                applyCommitted(applied.change());
-                yield new Registration(applied.created(), readyState(applied.state()));
-            }
-            case Unchanged unchanged -> new Registration(false, readyState(unchanged.state()));
-            case Rejected rejected -> throw switch (rejected.reason()) {
-                case SUBSCRIBER_EXISTS -> new SubscriptionFailure(SubscriptionFailure.Code.SUBSCRIBER_EXISTS,
-                        "subscriber " + subscriberId + " is already registered with a different SKU set");
-                case UNKNOWN_SKU -> new SubscriptionFailure(SubscriptionFailure.Code.UNKNOWN_SKU,
-                        "SKU " + rejected.detail() + " is not in the catalog");
-            };
+    }
+
+    private static SubscriptionFailure failure(String subscriberId, Rejected rejected) {
+        return switch (rejected.reason()) {
+            case INVALID_REQUEST -> new SubscriptionFailure(SubscriptionFailure.Code.INVALID_REQUEST, rejected.detail());
+            case SUBSCRIBER_NOT_FOUND -> new SubscriptionFailure(SubscriptionFailure.Code.SUBSCRIBER_NOT_FOUND,
+                    "subscriber " + subscriberId + " is not registered");
+            case SUBSCRIBER_EXISTS -> new SubscriptionFailure(SubscriptionFailure.Code.SUBSCRIBER_EXISTS,
+                    "subscriber " + subscriberId + " is already registered with a different SKU set");
+            case SUBSCRIBER_CANCELLED -> new SubscriptionFailure(SubscriptionFailure.Code.SUBSCRIBER_CANCELLED,
+                    "subscriber " + subscriberId + " is cancelled; register it again first");
+            case LAST_SKU -> new SubscriptionFailure(SubscriptionFailure.Code.LAST_SKU,
+                    "subscriber " + subscriberId + " must keep at least one SKU; cancel it instead");
+            case UNKNOWN_SKU -> new SubscriptionFailure(SubscriptionFailure.Code.UNKNOWN_SKU,
+                    "SKU " + rejected.detail() + " is not in the catalog");
         };
+    }
+
+    private String firstUnknown(SortedSet<String> skus) {
+        return skus.stream().filter(sku -> !knownSkus.contains(sku)).findFirst().orElse(null);
+    }
+
+    private static SortedSet<String> skuSet(Collection<String> skus) {
+        SortedSet<String> set = new TreeSet<>();
+        if (skus == null) return set;
+        for (String sku : skus) {
+            if (sku == null) throw new SubscriptionFailure(SubscriptionFailure.Code.INVALID_REQUEST, "SKU lists must not contain null");
+            set.add(sku);
+        }
+        return set;
+    }
+
+    /** {@code state}, remembering its channel for the dispatcher; an update or cancel never provisions a topic. */
+    private SubscriberState withKnownChannel(SubscriberState state) {
+        channels.remember(state.subscriberId(), state.channelTopic(), state.channelReady());
+        return state;
     }
 
     /** The subscriber's committed state; never waits. */
@@ -119,18 +205,21 @@ public final class SubscriptionService {
         }
     }
 
-    /** Applies a committed change to the index, filling any gap from the history first. */
+    /** Applies a committed change to the index; on a gap, the index catches up through its one catch-up path. */
     private void applyCommitted(ChangeRow change) {
+        if (index.apply(change) == SubscriptionIndex.Applied.GAP) catchUp(change.version());
+    }
+
+    /**
+     * Brings the index to at least {@code version} from the committed history ({@link SubscriptionIndex#catchUpTo}).
+     * A failure only delays it: the next selection's version check catches the index up anyway (N5).
+     */
+    private void catchUp(long version) {
+        if (index.version() >= version) return;
         try {
-            if (index.apply(change) != SubscriptionIndex.Applied.GAP) return;
-            List<ChangeRow> missing = store.changesAfter(index.version(), change.version());
-            if (!index.apply(missing)) {
-                System.err.println("[notification] Subscription history has a gap before version " + change.version()
-                        + "; the next selection catches up");
-            }
+            index.catchUpTo(version, store::changesAfter);
         } catch (RuntimeException failure) {
-            // The change is committed; the next selection's version check catches the index up (N5).
-            System.err.println("[notification] Subscription index not caught up to " + change.version() + ": " + failure);
+            System.err.println("[notification] Subscription index not caught up to " + version + ": " + failure);
         }
     }
 

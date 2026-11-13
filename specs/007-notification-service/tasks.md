@@ -330,7 +330,7 @@ These rules bind every task below.
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T081 [P] [US4] Write `server/tests/unit/notification/SubscriptionChangeRulesTest.java`:
+- [X] T081 [P] [US4] Write `server/tests/unit/notification/SubscriptionChangeRulesTest.java`:
   - add only, remove only, and add plus remove;
   - adding held SKUs and removing absent ones is a no-op;
   - a removal that would leave zero SKUs is `LAST_SKU`;
@@ -339,26 +339,26 @@ These rules bind every task below.
   - registering after a cancel is a new `REGISTER`;
   - an SKU in both lists is `INVALID_REQUEST`;
   - the validation precedence is 400 → 404 → 409 → `UNKNOWN_SKU`.
-- [ ] T082 [P] [US4] Extend `server/tests/database/JdbcSubscriptionStoreTest.java` for `UPDATE` and `CANCEL`:
+- [X] T082 [P] [US4] Extend `server/tests/database/JdbcSubscriptionStoreTest.java` for `UPDATE` and `CANCEL`:
   - `subscription_change` versions are contiguous;
   - `resulting_skus` is correct;
   - `subscription` rows match `resulting_skus`;
   - a no-op writes no row;
   - `notification.subscription.beforeCommit:throw` leaves no row, the clock unchanged, and the index untouched.
-- [ ] T083 [P] [US4] Write `server/tests/database/SelectionLockingTest.java`, with two connections on the test schema:
+- [X] T083 [P] [US4] Write `server/tests/database/SelectionLockingTest.java`, with two connections on the test schema:
   - a selection holding the clock `FOR SHARE` blocks a change's `FOR UPDATE` until it commits;
   - a selection started after a change commits records the change's version and sees its rows;
   - two concurrent changes get consecutive versions in commit order;
   - two selections do not block each other.
-- [ ] T084 [P] [US4] Write `server/tests/integration/SubscriptionChangeConsistencyTest.java`, covering spec US4 acceptance scenarios 1–8 on `InProcessCheckout` + `InProcessNotification`:
+- [X] T084 [P] [US4] Write `server/tests/integration/SubscriptionChangeConsistencyTest.java`, covering spec US4 acceptance scenarios 1–8 on `InProcessCheckout` + `InProcessNotification`:
   - a confirmed register, add, remove, or cancel before a Complete is reflected in that sale;
   - an already-selected notification survives a cancellation;
   - a failed change has no effect;
   - concurrent changes during sales leave every selection equal to the history replayed to its version;
   - after a restart, the rebuilt index equals the database;
   - with two `InProcessNotification` instances sharing one schema, each selection catches up to the locked version.
-- [ ] T085 [P] [US4] Extend `server/tests/contract/NotificationSubscribersEndpointTest.java` with every row for `PATCH /notifications/subscribers/{id}` and `DELETE /notifications/subscribers/{id}`: 200 with a new version, 200 no-op, 409 `LAST_SKU`, 409 `SUBSCRIBER_CANCELLED`, 404 `SUBSCRIBER_NOT_FOUND`, 400 `INVALID_REQUEST`, 400 `UNKNOWN_SKU`, and an idempotent repeated DELETE.
-- [ ] T086 [P] [US4] Write `subscriber-client/test/HistoryReconcileTest.java`, covering history mode on synthetic exports:
+- [X] T085 [P] [US4] Extend `server/tests/contract/NotificationSubscribersEndpointTest.java` with every row for `PATCH /notifications/subscribers/{id}` and `DELETE /notifications/subscribers/{id}`: 200 with a new version, 200 no-op, 409 `LAST_SKU`, 409 `SUBSCRIBER_CANCELLED`, 404 `SUBSCRIBER_NOT_FOUND`, 400 `INVALID_REQUEST`, 400 `UNKNOWN_SKU`, and an idempotent repeated DELETE.
+- [X] T086 [P] [US4] Write `subscriber-client/test/HistoryReconcileTest.java`, covering history mode on synthetic exports:
   - a selection that matches the replayed history passes;
   - a selection missing a subscriber, or containing an extra one, fails as a selection mismatch;
   - a sale whose version is below the version confirmed before its Complete, per `changes.jsonl`, fails the causality check;
@@ -366,19 +366,19 @@ These rules bind every task below.
 
 ### Implementation for User Story 4
 
-- [ ] T087 [US4] Extend `server/notification/src/database/JdbcSubscriptionStore.java` with `update(subscriberId, add, remove)` and `cancel(subscriberId)`, following the same change transaction (`UPDATE` and `CANCEL` rows, `subscription` row inserts and deletes, `subscriber.updated_version`, and `status = 'CANCELLED'` with `skus` cleared on cancel).
-- [ ] T088 [US4] Extend `server/notification/src/notification/SubscriptionService.java` with `update` and `cancel`, following T081's rules and applying the change to the index only after commit. Make the index's catch-up path the single way to recover from ambiguous commits and from changes committed by other processes.
-- [ ] T089 [US4] Extend `server/notification/src/api/NotificationHttpHandler.java` with `PATCH` and `DELETE` per the contract, and extend `spec/notification-openapi.yaml` with both operations and their errors.
-- [ ] T090 [US4] Add `POST /notifications/ops/faults` to `server/notification/src/api/OpsHttpHandler.java`. When `NOTIFICATION_TEST_FAULTS=1`, it sets `System.setProperty(FaultHooks.PROPERTY, value)`, or clears it for an empty value, and answers `{"faults": "<value>"}`. Otherwise it answers 404. Add `server/tests/contract/OpsFaultsEndpointTest.java` for both modes.
-- [ ] T091 [US4] Create `subscriber-client/src/ChangeScenarioMain.java`, implementing the steps of research N12 with the options in the contract:
+- [X] T087 [US4] Extend `server/notification/src/database/JdbcSubscriptionStore.java` with `update(subscriberId, add, remove)` and `cancel(subscriberId)`, following the same change transaction (`UPDATE` and `CANCEL` rows, `subscription` row inserts and deletes, `subscriber.updated_version`, and `status = 'CANCELLED'` with `skus` cleared on cancel).
+- [X] T088 [US4] Extend `server/notification/src/notification/SubscriptionService.java` with `update` and `cancel`, following T081's rules and applying the change to the index only after commit. Make the index's catch-up path the single way to recover from ambiguous commits and from changes committed by other processes.
+- [X] T089 [US4] Extend `server/notification/src/api/NotificationHttpHandler.java` with `PATCH` and `DELETE` per the contract, and extend `spec/notification-openapi.yaml` with both operations and their errors.
+- [X] T090 [US4] Add `POST /notifications/ops/faults` to `server/notification/src/api/OpsHttpHandler.java`. When `NOTIFICATION_TEST_FAULTS=1`, it sets `System.setProperty(FaultHooks.PROPERTY, value)`, or clears it for an empty value, and answers `{"faults": "<value>"}`. Otherwise it answers 404. Add `server/tests/contract/OpsFaultsEndpointTest.java` for both modes.
+- [X] T091 [US4] Create `subscriber-client/src/ChangeScenarioMain.java`, implementing the steps of research N12 with the options in the contract:
   - register 10 subscribers;
   - for each of register, add, remove, cancel, and re-register: confirm, then complete a sale of an affected SKU through `POST /transactions`, `/items`, and `/complete`, recording `(confirmedVersion, transactionId)`;
   - a burst of 50 random changes, with `--with-load` waiting for an external Load Client;
   - three failed changes through `--faults-endpoint`, using `notification.subscription.beforeCommit:throw`;
   - one request of each kind that FR-006 rejects;
   - writing `changes.jsonl`.
-- [ ] T092 [US4] Implement `--mode=history` in `subscriber-client/src/Reconciler.java`: replay `history.tsv` to each selection's version, require each recorded selection to equal it, apply the causality check from `changes.jsonl`, require failed changes to be absent, then use the recorded selections as the owed set for the delivery and receipt checks.
-- [ ] T093 [US4] Run the US4 tests (`server/run-tests.sh unit database contract integration` and `subscriber-client/run-tests.sh`). Execute quickstart scenario E twice, once alone and once with `--with-load` and a parallel default Load Client, into `load-client/reports/notification-service/change-scenario/`, with `README.md` recording the SC-004 results.
+- [X] T092 [US4] Implement `--mode=history` in `subscriber-client/src/Reconciler.java`: replay `history.tsv` to each selection's version, require each recorded selection to equal it, apply the causality check from `changes.jsonl`, require failed changes to be absent, then use the recorded selections as the owed set for the delivery and receipt checks.
+- [X] T093 [US4] Run the US4 tests (`server/run-tests.sh unit database contract integration` and `subscriber-client/run-tests.sh`). Execute quickstart scenario E twice, once alone and once with `--with-load` and a parallel default Load Client, into `load-client/reports/notification-service/change-scenario/`, with `README.md` recording the SC-004 results.
 
 **Checkpoint**: subscription management is complete and verified against the selection rule.
 

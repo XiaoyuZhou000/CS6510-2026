@@ -126,6 +126,34 @@ public final class SubscriptionIndex {
     }
 
     /**
+     * The single catch-up path (T088): when the index is behind {@code version}, applies the committed rows in
+     * {@code (index version, version]} read through {@code changes}, in order, and returns the resulting snapshot. An
+     * index already at or past {@code version} is returned unchanged. Every way the index can fall behind ends here: a
+     * change whose commit outcome was unknown, a change another Notification process committed, and a gap left by
+     * concurrent changes of this process.
+     *
+     * @throws IllegalStateException if the rows read leave a hole in the history
+     */
+    public Snapshot catchUpTo(long version, SelectionStore.ChangeSource changes) {
+        Snapshot snapshot = current.get();
+        if (snapshot.version() >= version) return snapshot;
+        synchronized (this) {
+            snapshot = current.get();
+            if (snapshot.version() < version) {
+                List<ChangeRow> rows = new ArrayList<>(changes.changesAfter(snapshot.version(), version));
+                if (!apply(rows)) {
+                    throw new IllegalStateException("subscription history has a gap after version " + version());
+                }
+                if (current.get().version() < version) {
+                    throw new IllegalStateException("subscription history ends at version " + version()
+                            + ", before version " + version);
+                }
+            }
+            return current.get();
+        }
+    }
+
+    /**
      * The snapshot at exactly {@code lockedVersion}, the clock version a selection holds {@code FOR SHARE}: when the
      * index is behind, it first applies the rows in {@code (version, lockedVersion]} read through {@code changes}.
      *
@@ -135,18 +163,7 @@ public final class SubscriptionIndex {
     public Snapshot atVersion(long lockedVersion, SelectionStore.ChangeSource changes) {
         Snapshot snapshot = current.get();
         if (snapshot.version() == lockedVersion) return snapshot;
-        if (snapshot.version() < lockedVersion) {
-            synchronized (this) {
-                snapshot = current.get();
-                if (snapshot.version() < lockedVersion) {
-                    List<ChangeRow> rows = new ArrayList<>(changes.changesAfter(snapshot.version(), lockedVersion));
-                    if (!apply(rows)) {
-                        throw new IllegalStateException("subscription history has a gap after version " + version());
-                    }
-                }
-                snapshot = current.get();
-            }
-        }
+        if (snapshot.version() < lockedVersion) snapshot = catchUpTo(lockedVersion, changes);
         if (snapshot.version() != lockedVersion) {
             throw new IllegalStateException("subscription index is at version " + snapshot.version()
                     + " but the locked clock is at " + lockedVersion);

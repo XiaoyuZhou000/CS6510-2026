@@ -70,9 +70,12 @@ class ReconcilerTest {
     }
 
     @Test
-    void historyModeIsNotYetSupported(@TempDir Path dir) throws Exception {
+    void aFixedRunAlsoPassesHistoryModeAndAnotherModeIsRejected(@TempDir Path dir) throws Exception {
+        // Every selection of a fixed run is at the ready version, which is the history replayed to that version.
         RunData data = RunData.load(SyntheticRun.create(dir));
-        assertThrows(UnsupportedOperationException.class, () -> Reconciler.reconcile(data, Reconciler.HISTORY));
+        Reconciler.Result history = Reconciler.reconcile(data, Reconciler.HISTORY);
+        assertEquals("PASS", history.verdict(), history.toJson());
+        assertEquals(Reconciler.owed(data).keySet(), Reconciler.owed(data, Reconciler.HISTORY).keySet());
         assertThrows(IllegalArgumentException.class, () -> Reconciler.reconcile(data, "other"));
     }
 

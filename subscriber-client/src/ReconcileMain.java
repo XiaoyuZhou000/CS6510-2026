@@ -9,7 +9,8 @@ import java.util.Map;
  * <p>Writes {@code DIR/reconciliation.json} ({@code verdict}, {@code mode}, {@code counts} per category,
  * {@code totals}, and {@code samples}, the first 20 failing keys per category), and with {@code --report-out} the
  * notification report as FILE and its Markdown rendering. Exit codes: 0 PASS, 1 FAIL, 2 invalid arguments, an
- * unreadable run directory, or an unsupported mode.
+ * unknown mode, or an unreadable run directory (including a fixed-mode run without {@code snapshot.json} and
+ * {@code ready.json}). History mode also reads {@code changes.jsonl}, written by {@code ChangeScenarioMain}.
  */
 public final class ReconcileMain {
     private ReconcileMain() { }
@@ -36,9 +37,6 @@ public final class ReconcileMain {
             if (reportOut != null) NotificationReport.write(reportOut.toAbsolutePath(), NotificationReport.build(data, result));
             print(result);
             return result.passed() ? 0 : 1;
-        } catch (UnsupportedOperationException e) {
-            System.err.println("Unsupported: " + e.getMessage());
-            return 2;
         } catch (IllegalArgumentException e) {
             return usage(e.getMessage());
         } catch (IOException e) {

@@ -13,7 +13,7 @@ import java.util.stream.Stream;
  * Everything the reconciler and the notification report read from one run directory (research N11):
  *
  * <pre>
- * DIR/subscribers/   snapshot.json, ready.json, receipts/*.jsonl  (or these directly in DIR)
+ * DIR/subscribers/   snapshot.json, ready.json, receipts/*.jsonl, changes.jsonl  (or these directly in DIR)
  * DIR/exports/       sales.tsv, sale-events.tsv, selections.tsv, notifications.tsv, history.tsv, parked-events.tsv
  * DIR/run.json       run identity, written by the harness (optional)
  * DIR/backlog.tsv    backlog samples, written by the harness (optional)
@@ -44,8 +44,13 @@ public final class RunData {
                           long completedAtMs, long receivedAtMs, long channelOffset, boolean undecodable) { }
 
     public final Path dir;
+    /** The subscriber folder: {@code DIR/subscribers} when it exists, else {@code DIR}. */
+    public final Path subscribersDir;
+    /** {@code snapshot.json} and {@code ready.json}; null when absent (a change-scenario run has neither). */
     public final RunFiles.Snapshot snapshot;
     public final RunFiles.Ready ready;
+    /** The change driver's {@code changes.jsonl} records (T091), in file order; empty when absent. */
+    public final List<Map<String, Object>> changes;
     public final List<SaleLine> sales;
     public final List<SaleEvent> saleEvents;
     public final List<Selection> selections;
@@ -59,9 +64,17 @@ public final class RunData {
     @SuppressWarnings("unchecked")
     private RunData(Path dir) throws IOException {
         this.dir = dir;
-        Path subscribers = Files.exists(dir.resolve("subscribers").resolve("snapshot.json")) ? dir.resolve("subscribers") : dir;
-        snapshot = RunFiles.readSnapshot(subscribers);
-        ready = RunFiles.readReady(subscribers);
+        Path subscribers = Files.isDirectory(dir.resolve("subscribers")) ? dir.resolve("subscribers") : dir;
+        subscribersDir = subscribers;
+        snapshot = Files.exists(subscribers.resolve("snapshot.json")) ? RunFiles.readSnapshot(subscribers) : null;
+        ready = Files.exists(subscribers.resolve("ready.json")) ? RunFiles.readReady(subscribers) : null;
+        changes = new ArrayList<>();
+        Path changesFile = subscribers.resolve("changes.jsonl");
+        if (Files.exists(changesFile)) {
+            for (String line : Files.readAllLines(changesFile, StandardCharsets.UTF_8)) {
+                if (!line.isBlank()) changes.add(Json.parseObject(line));
+            }
+        }
         Path exports = dir.resolve("exports");
 
         sales = new ArrayList<>();

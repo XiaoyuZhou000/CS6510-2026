@@ -9,6 +9,7 @@ import database.SubscriptionStore.Status;
 import database.SubscriptionStore.SubscriberState;
 import database.SubscriptionStore.Unchanged;
 import faults.FaultHooks;
+import notification.SubscriptionFailure;
 import org.junit.jupiter.api.Test;
 import support.NotificationTestSchema;
 
@@ -170,6 +171,103 @@ class JdbcSubscriptionStoreTest {
             assertEquals(Optional.of(new SubscriptionStore.Channel("s2", "t2", false)), store.channel("s2"));
             store.markChannelReady("s2");
             assertTrue(store.channel("s2").orElseThrow().ready());
+        }
+    }
+
+    /** T082: UPDATE and CANCEL rows take contiguous versions, and the subscription rows follow resulting_skus. */
+    @Test
+    void updatesAndCancelsTakeContiguousVersionsAndTheSubscriptionRowsFollowTheResultingSkus() throws Exception {
+        try (NotificationTestSchema schema = NotificationTestSchema.create()) {
+            JdbcSubscriptionStore store = new JdbcSubscriptionStore(schema.pool());
+            store.register("s1", skus("A", "B"), "t1", null, AT);
+            store.register("s2", skus("B"), "t2", null, AT);
+
+            Applied added = assertInstanceOf(Applied.class, store.update("s1", skus("C"), skus("A"), null, AT));
+            assertFalse(added.created());
+            assertEquals(new ChangeRow(3, "s1", ChangeType.UPDATE, List.of("C"), List.of("A"), List.of("B", "C")), added.change());
+            assertEquals(new SubscriberState("s1", Status.ACTIVE, List.of("B", "C"), "t1", false, 1, 3), added.state());
+            assertEquals(3, schema.queryLong("SELECT added_version FROM subscription WHERE subscriber_id = 's1' AND sku = 'C'"));
+            assertEquals(1, schema.queryLong("SELECT added_version FROM subscription WHERE subscriber_id = 's1' AND sku = 'B'"),
+                    "a kept SKU keeps the version that added it");
+
+            Applied cancelled = assertInstanceOf(Applied.class, store.cancel("s2", AT));
+            assertEquals(new ChangeRow(4, "s2", ChangeType.CANCEL, List.of(), List.of("B"), List.of()), cancelled.change());
+            assertEquals(new SubscriberState("s2", Status.CANCELLED, List.of(), "t2", false, 2, 4), cancelled.state());
+            assertEquals("CANCELLED", schema.queryString("SELECT status FROM subscriber WHERE subscriber_id = 's2'"));
+
+            Applied again = assertInstanceOf(Applied.class, store.register("s2", skus("D"), "t2", null, AT));
+            assertEquals(5, again.change().version());
+            assertInstanceOf(Applied.class, store.update("s1", skus(), skus("B"), null, AT));
+
+            assertEquals(6, schema.subscriptionVersion());
+            assertEquals(6, schema.subscriptionChanges());
+            assertEquals(1, schema.queryLong("SELECT MIN(version) FROM subscription_change"));
+            assertEquals(6, schema.queryLong("SELECT MAX(version) FROM subscription_change"), "versions are contiguous");
+            assertEquals("[\"C\"]", schema.queryString("SELECT resulting_skus FROM subscription_change WHERE version = 6"));
+            // Every subscriber's subscription rows equal the resulting_skus of its latest change.
+            for (String subscriber : List.of("s1", "s2")) {
+                String latest = schema.queryString("SELECT resulting_skus FROM subscription_change WHERE subscriber_id = ? "
+                        + "ORDER BY version DESC LIMIT 1", subscriber);
+                assertEquals(latest, NotificationJson.skuArray(store.find(subscriber).orElseThrow().skus()), subscriber);
+            }
+            assertEquals(Map.of("s1", List.of("C"), "s2", List.of("D")), store.loadIndex().skusBySubscriber());
+            assertEquals(6, store.find("s1").orElseThrow().updatedVersion());
+        }
+    }
+
+    @Test
+    void aNoOpOrARejectedUpdateOrCancelWritesNoRow() throws Exception {
+        try (NotificationTestSchema schema = NotificationTestSchema.create()) {
+            JdbcSubscriptionStore store = new JdbcSubscriptionStore(schema.pool());
+            store.register("s1", skus("A", "B"), "t1", null, AT);
+            store.register("s2", skus("C"), "t2", null, AT);
+            store.cancel("s2", AT);
+
+            Unchanged noOp = assertInstanceOf(Unchanged.class, store.update("s1", skus("A"), skus("Z"), null, AT));
+            assertEquals(1, noOp.state().updatedVersion(), "a no-op answers the current version");
+            Unchanged repeat = assertInstanceOf(Unchanged.class, store.cancel("s2", AT));
+            assertEquals(3, repeat.state().updatedVersion(), "a repeated cancel answers the version of the first");
+            assertEquals(Rejection.LAST_SKU,
+                    assertInstanceOf(Rejected.class, store.update("s1", skus(), skus("A", "B"), null, AT)).reason());
+            assertEquals(Rejection.SUBSCRIBER_CANCELLED,
+                    assertInstanceOf(Rejected.class, store.update("s2", skus("A"), skus(), null, AT)).reason());
+            assertEquals(Rejection.SUBSCRIBER_NOT_FOUND,
+                    assertInstanceOf(Rejected.class, store.update("nobody", skus("A"), skus(), null, AT)).reason());
+            assertEquals(Rejection.SUBSCRIBER_NOT_FOUND, assertInstanceOf(Rejected.class, store.cancel("nobody", AT)).reason());
+            assertEquals(Rejection.UNKNOWN_SKU,
+                    assertInstanceOf(Rejected.class, store.update("s1", skus("Z"), skus(), "Z", AT)).reason());
+
+            assertEquals(3, schema.subscriptionVersion());
+            assertEquals(3, schema.subscriptionChanges());
+            assertEquals(List.of("A", "B"), store.find("s1").orElseThrow().skus());
+        }
+    }
+
+    @Test
+    void anInjectedFailureBeforeAnUpdateOrCancelCommitsLeavesNoRowTheClockAndTheIndexUnchanged() throws Exception {
+        try (NotificationTestSchema schema = NotificationTestSchema.create();
+             support.InProcessNotification notification = support.InProcessNotification.over(schema)) {
+            notification.publishCatalog("v1", List.of("A", "B", "C"));
+            notification.awaitCatalog(java.time.Duration.ofSeconds(10));
+            notification.service().register("s1", List.of("A", "B"));
+            var before = notification.index().snapshot();
+            String previous = System.getProperty(FaultHooks.PROPERTY);
+            System.setProperty(FaultHooks.PROPERTY, "notification.subscription.beforeCommit:throw");
+            try {
+                for (Runnable change : List.<Runnable>of(
+                        () -> notification.service().update("s1", List.of("C"), List.of("A")),
+                        () -> notification.service().cancel("s1"))) {
+                    SubscriptionFailure failure = assertThrows(SubscriptionFailure.class, change::run);
+                    assertEquals(SubscriptionFailure.Code.INTERNAL_ERROR, failure.code());
+                }
+            } finally {
+                restore(previous);
+            }
+            assertEquals(1, schema.subscriptionVersion());
+            assertEquals(1, schema.subscriptionChanges());
+            assertEquals(2, schema.queryLong("SELECT COUNT(*) FROM subscription WHERE subscriber_id = 's1'"));
+            assertEquals("ACTIVE", schema.queryString("SELECT status FROM subscriber WHERE subscriber_id = 's1'"));
+            assertEquals(before, notification.index().snapshot(), "the index is untouched");
         }
     }
 

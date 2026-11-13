@@ -23,7 +23,10 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li>{@code POST /notifications/subscribers}: register; 201 for a new or re-registered subscriber, 200 for an
  *       idempotent repeat;</li>
- *   <li>{@code GET /notifications/subscribers/{subscriberId}}: the committed subscriber view, or 404.</li>
+ *   <li>{@code GET /notifications/subscribers/{subscriberId}}: the committed subscriber view, or 404;</li>
+ *   <li>{@code PATCH /notifications/subscribers/{subscriberId}}: add and remove SKUs; 200 at the new version, or at
+ *       the current one for a no-op (T089);</li>
+ *   <li>{@code DELETE /notifications/subscribers/{subscriberId}}: cancel; 200, idempotent.</li>
  * </ul>
  *
  * <p>Validation precedence: request shape (400: malformed JSON is {@code INVALID_REQUEST}, then
@@ -56,11 +59,13 @@ public final class NotificationHttpHandler implements HttpHandler {
             }
             Matcher byId = BY_ID.matcher(path);
             if (byId.matches()) {
-                if ("GET".equals(method)) {
-                    get(exchange, HttpSupport.urlDecode(byId.group(1)));
-                    return;
+                String subscriberId = HttpSupport.urlDecode(byId.group(1));
+                switch (method) {
+                    case "GET" -> get(exchange, subscriberId);
+                    case "PATCH" -> update(exchange, subscriberId);
+                    case "DELETE" -> cancel(exchange, subscriberId);
+                    default -> exchange.sendResponseHeaders(405, -1);
                 }
-                exchange.sendResponseHeaders(405, -1);
                 return;
             }
             HttpSupport.respondError(exchange, 404, "NOT_FOUND", "No such route");
@@ -99,6 +104,43 @@ public final class NotificationHttpHandler implements HttpHandler {
         } finally {
             PerfMetrics.record("notification.http.register", System.nanoTime() - started);
         }
+    }
+
+    /** {@code PATCH}: {@code {"add": [...], "remove": [...]}}, either list optional but not both empty. */
+    private void update(HttpExchange exchange, String subscriberId) throws IOException {
+        long started = System.nanoTime();
+        try {
+            Map<String, Object> body = body(exchange);
+            List<String> add = skuList(body, "add");
+            List<String> remove = skuList(body, "remove");
+            HttpSupport.respond(exchange, 200, view(subscriptions.update(subscriberId, add, remove)));
+        } finally {
+            PerfMetrics.record("notification.http.update", System.nanoTime() - started);
+        }
+    }
+
+    /** {@code DELETE}: cancel; a repeat answers the same view and version. Any request body is ignored. */
+    private void cancel(HttpExchange exchange, String subscriberId) throws IOException {
+        long started = System.nanoTime();
+        try {
+            HttpSupport.readBody(exchange);
+            HttpSupport.respond(exchange, 200, view(subscriptions.cancel(subscriberId)));
+        } finally {
+            PerfMetrics.record("notification.http.cancel", System.nanoTime() - started);
+        }
+    }
+
+    /** An optional array of SKU strings; absent or null is empty. */
+    private static List<String> skuList(Map<String, Object> body, String field) {
+        Object raw = body.get(field);
+        List<String> skus = new ArrayList<>();
+        if (raw == null) return skus;
+        if (!(raw instanceof List<?> list)) throw new InvalidRequest(field + " must be an array of SKU strings");
+        for (Object sku : list) {
+            if (!(sku instanceof String text)) throw new InvalidRequest(field + " must be an array of SKU strings");
+            skus.add(text);
+        }
+        return skus;
     }
 
     private void get(HttpExchange exchange, String subscriberId) throws IOException {

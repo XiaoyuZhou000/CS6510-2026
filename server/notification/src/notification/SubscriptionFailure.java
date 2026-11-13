@@ -6,7 +6,8 @@ package notification;
  */
 public final class SubscriptionFailure extends RuntimeException {
     public enum Code {
-        INVALID_SUBSCRIBER_ID, MISSING_SKUS, UNKNOWN_SKU, SUBSCRIBER_EXISTS, SUBSCRIBER_NOT_FOUND,
+        INVALID_REQUEST, INVALID_SUBSCRIBER_ID, MISSING_SKUS, UNKNOWN_SKU, SUBSCRIBER_EXISTS, SUBSCRIBER_NOT_FOUND,
+        SUBSCRIBER_CANCELLED, LAST_SKU,
         /** Catalog not loaded, database unavailable, or a commit that failed or whose outcome is unknown. */
         INTERNAL_ERROR
     }

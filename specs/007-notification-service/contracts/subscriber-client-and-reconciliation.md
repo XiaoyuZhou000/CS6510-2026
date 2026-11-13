@@ -44,6 +44,19 @@ Exit code 0 means a clean stop; non-zero means a registration failure or an unre
 
 `--subscribers=N` (default 10), `--seed`, `--base-url`, `--bootstrap`, `--out`, `--with-load` (wait for an external Load Client run), and `--faults-endpoint` (to inject `notification.subscription.beforeCommit`). It performs the steps of research N12 and writes `changes.jsonl`. Each completed sale it makes is recorded with the version confirmed just before its Complete request was sent.
 
+With `--with-load` it waits for `OUT/load.started` before its burst of changes and for `OUT/load.done` after it; the harness creates both. It consumes each registered subscriber's channel into `OUT/receipts/`, as `SubscriberMain` does, and exits 0 only when every request got its expected answer and the run drained.
+
+`changes.jsonl` holds one JSON object per line, distinguished by `kind`:
+
+| `kind` | Fields | Checked by `--mode=history` |
+|---|---|---|
+| `change` | `step`, `op` (`REGISTER`/`UPDATE`/`CANCEL`), `subscriberId`, `add`, `remove`, `status`, `error`, `version` (2xx only), `confirmedAtMs` | a 2xx `version` must be a history row of that subscriber |
+| `sale` | `step`, `transactionId`, `skus`, `confirmedVersion` (the highest version confirmed before Complete was sent), `completeStatus` | the sale must be completed, and its selection's version at least `confirmedVersion` |
+| `guard` | `subscriberId`, `allowedVersions`, `reason`: the target of failed or rejected requests | no history row of the subscriber outside `allowedVersions` |
+| `run`, `pool`, `faults`, `end` | the run's settings, the SKU pool, each fault change, and the drain result | not checked |
+
+Failed and rejected requests target guarded subscribers only, so "failed changes appear nowhere" is an exact check.
+
 ## Evidence export (`db/export-notification-evidence.ps1 -RunDir DIR`)
 
 Each source is exported by its owner's credentials, to tab-separated files under `DIR/exports/` (FR-024):

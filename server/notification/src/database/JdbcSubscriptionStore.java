@@ -17,20 +17,24 @@ import java.util.Optional;
 import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.Function;
 
 /**
- * {@link SubscriptionStore} on Notification's pool (007 T049). A registration is one contended unit of work:
+ * {@link SubscriptionStore} on Notification's pool (007 T049, T087). Register, update, and cancel are the same
+ * contended unit of work:
  *
  * <ol>
  *   <li>{@code SELECT version FROM subscription_clock WHERE id = 1 FOR UPDATE} gives {@code V};</li>
  *   <li>{@code SELECT … FROM subscriber WHERE subscriber_id = ? FOR UPDATE}, and its {@code subscription} rows;</li>
- *   <li>reject or no-op (rollback), or apply: insert or update {@code subscriber} at {@code V + 1}, insert the
- *       {@code subscription} rows in one statement, insert the {@code subscription_change} row at {@code V + 1},
- *       and set the clock to {@code V + 1};</li>
+ *   <li>{@link SubscriptionChangeRules} decides: reject or no-op (rollback), or apply. Applying writes
+ *       {@code subscriber} at {@code V + 1} (insert, reactivate, {@code updated_version}, or {@code status =
+ *       'CANCELLED'}), inserts and deletes {@code subscription} rows (one statement each), inserts the
+ *       {@code subscription_change} row at {@code V + 1}, and sets the clock to {@code V + 1};</li>
  *   <li>{@code FaultHooks.hit("notification.subscription.beforeCommit")}, then commit.</li>
  * </ol>
  *
- * <p>Seven statements and one commit for an applied change, within the plan's ≤ 9.</p>
+ * <p>At most eight statements and one commit for an applied change (an update that both adds and removes), within the
+ * plan's ≤ 9.</p>
  */
 public final class JdbcSubscriptionStore implements SubscriptionStore {
     private static final String LOCK_CLOCK = "SELECT version FROM subscription_clock WHERE id = 1 FOR UPDATE";
@@ -43,6 +47,11 @@ public final class JdbcSubscriptionStore implements SubscriptionStore {
             + "channel_ready, created_version, updated_version, created_at, updated_at) VALUES (?, 'ACTIVE', ?, FALSE, ?, ?, ?, ?)";
     private static final String REACTIVATE = "UPDATE subscriber SET status = 'ACTIVE', updated_version = ?, updated_at = ? "
             + "WHERE subscriber_id = ?";
+    private static final String TOUCH = "UPDATE subscriber SET updated_version = ?, updated_at = ? WHERE subscriber_id = ?";
+    private static final String CANCEL_SUBSCRIBER = "UPDATE subscriber SET status = 'CANCELLED', updated_version = ?, "
+            + "updated_at = ? WHERE subscriber_id = ?";
+    private static final String DELETE_SOME = "DELETE FROM subscription WHERE subscriber_id = ? AND sku IN (";
+    private static final String DELETE_ALL = "DELETE FROM subscription WHERE subscriber_id = ?";
     private static final String INSERT_CHANGE = "INSERT INTO subscription_change (version, subscriber_id, change_type, "
             + "added_skus, removed_skus, resulting_skus, committed_at) VALUES (?, ?, ?, ?, ?, ?, ?)";
     private static final String ADVANCE_CLOCK = "UPDATE subscription_clock SET version = ? WHERE id = 1";
@@ -64,58 +73,134 @@ public final class JdbcSubscriptionStore implements SubscriptionStore {
     @Override
     public ChangeResult register(String subscriberId, SortedSet<String> skus, String channelTopic,
                                  String firstUnknownSku, Instant at) {
-        Objects.requireNonNull(subscriberId, "subscriberId");
         Objects.requireNonNull(channelTopic, "channelTopic");
         if (skus == null || skus.isEmpty()) throw new IllegalArgumentException("a registration needs at least one SKU");
-        List<String> requested = List.copyOf(new TreeSet<>(skus));
+        SortedSet<String> requested = new TreeSet<>(skus);
+        return change(subscriberId, channelTopic, existing -> SubscriptionChangeRules.register(existing, requested,
+                firstUnknownSku), at);
+    }
+
+    @Override
+    public ChangeResult update(String subscriberId, SortedSet<String> add, SortedSet<String> remove,
+                               String firstUnknownSku, Instant at) {
+        SortedSet<String> adding = add == null ? new TreeSet<>() : new TreeSet<>(add);
+        SortedSet<String> removing = remove == null ? new TreeSet<>() : new TreeSet<>(remove);
+        return change(subscriberId, null, existing -> SubscriptionChangeRules.update(existing, adding, removing,
+                firstUnknownSku), at);
+    }
+
+    @Override
+    public ChangeResult cancel(String subscriberId, Instant at) {
+        return change(subscriberId, null, SubscriptionChangeRules::cancel, at);
+    }
+
+    /**
+     * The change transaction shared by register, update, and cancel: lock the clock, lock and read the subscriber,
+     * let {@code rule} decide, then write the subscriber, its subscription rows, one history row, and the clock, and
+     * hit {@code notification.subscription.beforeCommit} before the commit. {@code channelTopic} is used only for a
+     * subscriber's first registration.
+     */
+    private ChangeResult change(String subscriberId, String channelTopic,
+                                Function<Optional<SubscriberState>, SubscriptionChangeRules.Decision> rule, Instant at) {
+        Objects.requireNonNull(subscriberId, "subscriberId");
         Timestamp now = Timestamp.from(at.truncatedTo(ChronoUnit.MILLIS));
         return JdbcUnitOfWork.inContendedTransaction(pool, "notification.subscription.change", connection -> {
             long version = clock(connection, LOCK_CLOCK);
             Optional<SubscriberState> existing = lockSubscriber(connection, subscriberId);
-            if (existing.isPresent() && existing.get().status() == Status.ACTIVE) {
-                if (existing.get().skus().equals(requested)) {
-                    throw JdbcUnitOfWork.rollbackAndReturn(new Unchanged(existing.get()));
-                }
-                throw JdbcUnitOfWork.rollbackAndReturn(new Rejected(Rejection.SUBSCRIBER_EXISTS,
-                        "subscriber " + subscriberId + " is already registered with other SKUs"));
+            SubscriptionChangeRules.Decision decision = rule.apply(existing);
+            if (decision instanceof SubscriptionChangeRules.Reject reject) {
+                throw JdbcUnitOfWork.rollbackAndReturn(new Rejected(reject.reason(), reject.detail()));
             }
-            if (firstUnknownSku != null) {
-                throw JdbcUnitOfWork.rollbackAndReturn(new Rejected(Rejection.UNKNOWN_SKU, firstUnknownSku));
+            if (decision instanceof SubscriptionChangeRules.NoOp) {
+                throw JdbcUnitOfWork.rollbackAndReturn(new Unchanged(existing.orElseThrow(
+                        () -> new IllegalStateException("a no-op needs an existing subscriber"))));
             }
+            SubscriptionChangeRules.Apply apply = (SubscriptionChangeRules.Apply) decision;
             long next = version + 1;
-            SubscriberState state;
-            if (existing.isEmpty()) {
-                try (PreparedStatement insert = connection.prepareStatement(INSERT_SUBSCRIBER)) {
-                    insert.setString(1, subscriberId);
-                    insert.setString(2, channelTopic);
-                    insert.setLong(3, next);
-                    insert.setLong(4, next);
-                    insert.setTimestamp(5, now);
-                    insert.setTimestamp(6, now);
-                    insert.executeUpdate();
-                }
-                state = new SubscriberState(subscriberId, Status.ACTIVE, requested, channelTopic, false, next, next);
-            } else {
-                try (PreparedStatement update = connection.prepareStatement(REACTIVATE)) {
-                    update.setLong(1, next);
-                    update.setTimestamp(2, now);
-                    update.setString(3, subscriberId);
-                    update.executeUpdate();
-                }
-                SubscriberState old = existing.get();
-                state = new SubscriberState(subscriberId, Status.ACTIVE, requested, old.channelTopic(), old.channelReady(),
-                        old.createdVersion(), next);
-            }
-            insertSubscriptions(connection, subscriberId, requested, next);
-            ChangeRow change = new ChangeRow(next, subscriberId, ChangeType.REGISTER, requested, List.of(), requested);
+            SubscriberState state = switch (apply.type()) {
+                case REGISTER -> writeRegistration(connection, subscriberId, existing, channelTopic, apply, next, now);
+                case UPDATE -> writeUpdate(connection, existing.orElseThrow(), apply, next, now);
+                case CANCEL -> writeCancel(connection, existing.orElseThrow(), next, now);
+            };
+            ChangeRow change = new ChangeRow(next, subscriberId, apply.type(), apply.added(), apply.removed(), apply.resulting());
             insertChange(connection, change, now);
             try (PreparedStatement advance = connection.prepareStatement(ADVANCE_CLOCK)) {
                 advance.setLong(1, next);
                 advance.executeUpdate();
             }
             FaultHooks.hit("notification.subscription.beforeCommit");
-            return new Applied(state, change, true);
+            return new Applied(state, change, apply.type() == ChangeType.REGISTER);
         });
+    }
+
+    private static SubscriberState writeRegistration(Connection connection, String subscriberId,
+                                                     Optional<SubscriberState> existing, String channelTopic,
+                                                     SubscriptionChangeRules.Apply apply, long next, Timestamp now)
+            throws SQLException {
+        SubscriberState state;
+        if (existing.isEmpty()) {
+            Objects.requireNonNull(channelTopic, "channelTopic");
+            try (PreparedStatement insert = connection.prepareStatement(INSERT_SUBSCRIBER)) {
+                insert.setString(1, subscriberId);
+                insert.setString(2, channelTopic);
+                insert.setLong(3, next);
+                insert.setLong(4, next);
+                insert.setTimestamp(5, now);
+                insert.setTimestamp(6, now);
+                insert.executeUpdate();
+            }
+            state = new SubscriberState(subscriberId, Status.ACTIVE, apply.resulting(), channelTopic, false, next, next);
+        } else {
+            try (PreparedStatement update = connection.prepareStatement(REACTIVATE)) {
+                update.setLong(1, next);
+                update.setTimestamp(2, now);
+                update.setString(3, subscriberId);
+                update.executeUpdate();
+            }
+            SubscriberState old = existing.get();
+            state = new SubscriberState(subscriberId, Status.ACTIVE, apply.resulting(), old.channelTopic(), old.channelReady(),
+                    old.createdVersion(), next);
+        }
+        insertSubscriptions(connection, subscriberId, apply.resulting(), next);
+        return state;
+    }
+
+    private static SubscriberState writeUpdate(Connection connection, SubscriberState old, SubscriptionChangeRules.Apply apply,
+                                               long next, Timestamp now) throws SQLException {
+        touch(connection, TOUCH, old.subscriberId(), next, now);
+        if (!apply.added().isEmpty()) insertSubscriptions(connection, old.subscriberId(), apply.added(), next);
+        if (!apply.removed().isEmpty()) {
+            StringBuilder sql = new StringBuilder(DELETE_SOME);
+            for (int i = 0; i < apply.removed().size(); i++) sql.append(i == 0 ? "?" : ", ?");
+            try (PreparedStatement delete = connection.prepareStatement(sql.append(")").toString())) {
+                delete.setString(1, old.subscriberId());
+                for (int i = 0; i < apply.removed().size(); i++) delete.setString(i + 2, apply.removed().get(i));
+                delete.executeUpdate();
+            }
+        }
+        return new SubscriberState(old.subscriberId(), Status.ACTIVE, apply.resulting(), old.channelTopic(), old.channelReady(),
+                old.createdVersion(), next);
+    }
+
+    private static SubscriberState writeCancel(Connection connection, SubscriberState old, long next, Timestamp now)
+            throws SQLException {
+        touch(connection, CANCEL_SUBSCRIBER, old.subscriberId(), next, now);
+        try (PreparedStatement delete = connection.prepareStatement(DELETE_ALL)) {
+            delete.setString(1, old.subscriberId());
+            delete.executeUpdate();
+        }
+        return new SubscriberState(old.subscriberId(), Status.CANCELLED, List.of(), old.channelTopic(), old.channelReady(),
+                old.createdVersion(), next);
+    }
+
+    private static void touch(Connection connection, String sql, String subscriberId, long version, Timestamp now)
+            throws SQLException {
+        try (PreparedStatement update = connection.prepareStatement(sql)) {
+            update.setLong(1, version);
+            update.setTimestamp(2, now);
+            update.setString(3, subscriberId);
+            update.executeUpdate();
+        }
     }
 
     @Override

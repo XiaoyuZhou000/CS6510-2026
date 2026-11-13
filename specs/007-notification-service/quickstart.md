@@ -64,7 +64,7 @@ Run it twice with the same seed: the two `snapshot.json` files are byte-identica
 subscriber-client/run.sh ChangeScenarioMain --subscribers=10 --seed=7 --out=runs/e --faults-endpoint=http://localhost:8084/notifications/ops/faults
 ```
 
-Run it with Notification started with `NOTIFICATION_TEST_FAULTS=1`. Optionally add `--with-load` with a parallel default Load Client run. Then export and run `ReconcileMain --mode=history`. **Expected**:
+Run it with Notification started with `NOTIFICATION_TEST_FAULTS=1`. Optionally add `--with-load` with a parallel default Load Client run (the driver waits for `load.started` and `load.done` in its `--out` folder). Then export and run `ReconcileMain --mode=history`. `load-client/reports/notification-service/change-scenario/scenario-e.ps1 -RunName <name> [-WithLoad]` does all of this, including the restart check. **Expected**:
 - every selection equals the history replayed to its version;
 - every sale's version is at least the version confirmed before its Complete;
 - failed changes appear nowhere;

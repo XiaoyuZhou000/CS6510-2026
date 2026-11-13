@@ -38,7 +38,7 @@ public final class NotificationReport {
     }
 
     public static Map<String, Object> build(RunData data, Reconciler.Result result) {
-        Map<String, Reconciler.Owed> owed = Reconciler.owed(data);
+        Map<String, Reconciler.Owed> owed = Reconciler.owed(data, result.mode());
         Map<String, Map<String, Integer>> sales = Reconciler.completedSales(data);
         long firstCompletion = Long.MAX_VALUE;
         long lastCompletion = Long.MIN_VALUE;
@@ -109,15 +109,15 @@ public final class NotificationReport {
         }
         boolean deadlineMet = missing == 0 && drainSeconds != null && drainSeconds <= DEADLINE_SECONDS;
 
-        Map<String, Object> settings = data.snapshot.settings();
+        Map<String, Object> settings = data.snapshot == null ? null : data.snapshot.settings();
         Map<String, Object> loadClient = data.run == null ? null : Json.getObject(data.run, "loadClient");
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("run", Json.object(
                 "id", runText(data, "id", data.dir.getFileName().toString()),
                 "startedAt", runText(data, "startedAt", null),
                 "deploymentCommit", runText(data, "deploymentCommit", null),
-                "subscribers", (long) data.snapshot.subscribers().size(),
-                "seed", data.snapshot.seed(),
+                "subscribers", Reconciler.subscriberCount(data),
+                "seed", data.snapshot == null ? null : data.snapshot.seed(),
                 "skusPerSubscriber", settings == null ? null : settings.get("skusPerSubscriber"),
                 "skuDistribution", settings == null ? null : settings.get("skuDistribution"),
                 "loadClient", Json.object(

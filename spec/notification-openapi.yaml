@@ -30,7 +30,7 @@ servers:
 
 tags:
   - name: subscribers
-    description: Register and read subscribers
+    description: Register, read, change, and cancel subscribers
 
 paths:
   /notifications/subscribers:
@@ -121,6 +121,102 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+    patch:
+      tags: [subscribers]
+      summary: Add and remove SKUs of an active subscriber
+      description: >
+        Adds the SKUs in add and removes the SKUs in remove, in one change that
+        takes effect when it commits. At least one list must be non-empty, and
+        an SKU may not be in both. Adding held SKUs and removing absent ones is
+        a no-op (200 with the current view and no new version). The result must
+        keep at least one SKU; cancel the subscriber instead. Repeating a
+        request after a 500 is safe.
+      parameters:
+        - $ref: "#/components/parameters/SubscriberId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionChange"
+      responses:
+        "200":
+          description: >
+            The change committed at subscriptionVersion, or a no-op answered
+            with the current view and version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriberView"
+        "400":
+          description: >
+            INVALID_REQUEST (malformed JSON, a list that is not an array of SKU
+            strings, both lists empty, or an SKU in both), INVALID_SUBSCRIBER_ID,
+            or UNKNOWN_SKU (an SKU outside the catalog; the message names it)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: SUBSCRIBER_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: >
+            SUBSCRIBER_CANCELLED (register the subscriber again first) or
+            LAST_SKU (the result would hold no SKU)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: >
+            INTERNAL_ERROR - the catalog is not loaded yet, the database is
+            unavailable, or the commit failed or its outcome is unknown; the
+            change was not applied or its outcome is unknown
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    delete:
+      tags: [subscribers]
+      summary: Cancel every subscription of a subscriber
+      description: >
+        Cancels the subscriber at a new version, keeping its identity and
+        channel for a later registration. Notifications already selected for it
+        are still delivered. A repeated DELETE answers the same view and
+        version.
+      parameters:
+        - $ref: "#/components/parameters/SubscriberId"
+      responses:
+        "200":
+          description: Cancelled (status CANCELLED, skus empty), or a repeat of an earlier cancel
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriberView"
+        "400":
+          description: INVALID_SUBSCRIBER_ID - the path does not hold a valid subscriber ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: SUBSCRIBER_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: >
+            INTERNAL_ERROR - the database is unavailable, or the commit failed
+            or its outcome is unknown; repeating the request is safe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
 
 components:
   parameters:
@@ -149,6 +245,21 @@ components:
           items:
             type: string
           example: ["SKU-000017", "SKU-001234"]
+
+    SubscriptionChange:
+      type: object
+      description: At least one list must be non-empty, and an SKU may not be in both
+      properties:
+        add:
+          type: array
+          items:
+            type: string
+          example: ["SKU-000500"]
+        remove:
+          type: array
+          items:
+            type: string
+          example: ["SKU-000017"]
 
     SubscriberView:
       type: object
@@ -192,6 +303,8 @@ components:
             - UNKNOWN_SKU
             - SUBSCRIBER_EXISTS
             - SUBSCRIBER_NOT_FOUND
+            - SUBSCRIBER_CANCELLED
+            - LAST_SKU
             - INTERNAL_ERROR
         message:
           type: string

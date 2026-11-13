@@ -15,8 +15,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Static gate over every production source in the five build roots (common and the four services, 007). */
 class LayerDependencyTest {
     private static final Pattern PACKAGE = Pattern.compile("(?m)^package\\s+([a-zA-Z0-9_.]+)\\s*;");
+    // A literal holding only the keyword, such as the HTTP method "DELETE" (007 T089), is not SQL.
     private static final Pattern SQL = Pattern.compile(
-            "(?i)\"\\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\\b");
+            "(?i)\"\\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\\b(?!\")");
     private static final Pattern DATABASE_MEMBER = Pattern.compile(
             "(?m)^\\s*(?:private|protected|public)\\s+(?:final\\s+)?(?:database\\.)?"
                     + "(?:CatalogStore|TransactionStore|InventoryStore|CheckoutCompletionStore|PopularWindowStore|"

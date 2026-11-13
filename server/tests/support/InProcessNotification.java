@@ -97,8 +97,13 @@ public final class InProcessNotification implements AutoCloseable {
 
     /** Over the schema's default pool and a new bus with the five fixed topics, unprefixed. */
     public static InProcessNotification over(NotificationTestSchema schema) throws Exception {
+        return over(schema, Map.of());
+    }
+
+    /** As {@link #over(NotificationTestSchema)}, with {@code NOTIFICATION_*} settings such as {@code NOTIFICATION_TEST_FAULTS}. */
+    public static InProcessNotification over(NotificationTestSchema schema, Map<String, String> settings) throws Exception {
         TopicNames topics = TopicNames.unprefixed();
-        return new InProcessNotification(schema.pool(), InMemoryEventBus.withCatalogTopics(topics, 6510), topics, Map.of());
+        return new InProcessNotification(schema.pool(), InMemoryEventBus.withCatalogTopics(topics, 6510), topics, settings);
     }
 
     /** Over a given pool and a bus another component shares; {@code topics} names that bus's topics. */
@@ -216,7 +221,7 @@ public final class InProcessNotification implements AutoCloseable {
             server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
             server.createContext(NotificationHttpHandler.CONTEXT, new NotificationHttpHandler(components.service));
             NotificationStatus status = components.status;
-            server.createContext(OpsHttpHandler.CONTEXT, new OpsHttpHandler(status::read));
+            server.createContext(OpsHttpHandler.CONTEXT, new OpsHttpHandler(status::read, config.testFaults()));
             server.start();
             components.server = server;
             running.add(() -> server.stop(0));

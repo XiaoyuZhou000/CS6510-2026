@@ -89,7 +89,7 @@ public final class NotificationMain {
             NotificationStatus statusView = new NotificationStatus(new NotificationStatusQueries(pool), index, knownSkus,
                     dispatcher, () -> sales);
             server.createContext(NotificationHttpHandler.CONTEXT, new NotificationHttpHandler(service));
-            server.createContext(OpsHttpHandler.CONTEXT, new OpsHttpHandler(statusView::read));
+            server.createContext(OpsHttpHandler.CONTEXT, new OpsHttpHandler(statusView::read, settings.testFaults()));
             MetricsReporter reporter = MetricsReporter.start("notification");
             StatusReporter status = StatusReporter.start("notification", () -> statusView.read().line());
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {

@@ -413,6 +413,16 @@ class NotificationDispatcherTest {
         }
 
         @Override
+        public ChangeResult update(String id, SortedSet<String> add, SortedSet<String> remove, String unknown, Instant at) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ChangeResult cancel(String id, Instant at) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public Optional<SubscriberState> find(String subscriberId) { throw new UnsupportedOperationException(); }
 
         @Override

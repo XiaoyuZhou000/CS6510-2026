@@ -18,10 +18,11 @@ public final class NotificationErrorMapper {
     public static ApiError map(RuntimeException failure) {
         if (failure instanceof SubscriptionFailure subscription) {
             return switch (subscription.code()) {
-                case INVALID_SUBSCRIBER_ID, MISSING_SKUS, UNKNOWN_SKU ->
+                case INVALID_REQUEST, INVALID_SUBSCRIBER_ID, MISSING_SKUS, UNKNOWN_SKU ->
                         new ApiError(400, subscription.code().name(), subscription.getMessage());
                 case SUBSCRIBER_NOT_FOUND -> new ApiError(404, subscription.code().name(), subscription.getMessage());
-                case SUBSCRIBER_EXISTS -> new ApiError(409, subscription.code().name(), subscription.getMessage());
+                case SUBSCRIBER_EXISTS, SUBSCRIBER_CANCELLED, LAST_SKU ->
+                        new ApiError(409, subscription.code().name(), subscription.getMessage());
                 case INTERNAL_ERROR -> new ApiError(500, INTERNAL_ERROR, subscription.getMessage());
             };
         }
