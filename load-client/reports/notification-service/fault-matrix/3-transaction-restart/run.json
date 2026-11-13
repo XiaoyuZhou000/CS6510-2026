@@ -1,0 +1,68 @@
+{
+    "harness":  "benchmark-notification",
+    "id":  "fault-matrix/3-transaction-restart",
+    "startedAt":  "2026-11-13T05:55:58.3590901+00:00",
+    "deploymentCommit":  "bc85a457228d41b0982cb055686942f14c4018c9",
+    "gitDirty":  true,
+    "workload":  "default",
+    "command":  "java -cp out Main",
+    "loadClient":  {
+                       "stations":  10,
+                       "durationSeconds":  60
+                   },
+    "subscribers":  100,
+    "seed":  20261111,
+    "skusPerSubscriber":  20,
+    "faults":  "none",
+    "faultSubscriber":  null,
+    "disruption":  {
+                       "kind":  "transaction-restart",
+                       "afterSeconds":  20,
+                       "outageSeconds":  30,
+                       "injected":  true,
+                       "events":  [
+                                      {
+                                          "utcMs":  1794549486422,
+                                          "step":  "Transaction stopped (pid 20800)"
+                                      },
+                                      {
+                                          "utcMs":  1794549486998,
+                                          "step":  "Transaction restarted (pid 46248)"
+                                      }
+                                  ]
+                   },
+    "backgroundCompletions":  10,
+    "drainSeconds":  2.1,
+    "drainDeadlineSeconds":  300,
+    "extraEnv":  {
+
+                 },
+    "idleGate":  {
+                     "idleCpuCores":  2,
+                     "blockingProcesses":  [
+                                               "WardogsClient-Win64-Shipping",
+                                               "ROTTR",
+                                               "Arknights"
+                                           ],
+                     "backgroundCpuCores":  0.214,
+                     "blockingSeen":  [
+
+                                      ],
+                     "heaviest":  [
+                                      "claude=0.11",
+                                      "rundll32=0.02",
+                                      "chrome=0.02"
+                                  ],
+                     "passed":  true
+                 },
+    "subscriberExitCode":  0,
+    "validatorExitCode":  0,
+    "result":  {
+                   "clientOk":  true,
+                   "subscriberReady":  true,
+                   "drained":  true,
+                   "validatorPassed":  true,
+                   "exported":  true,
+                   "reconciliationPassed":  true
+               }
+}

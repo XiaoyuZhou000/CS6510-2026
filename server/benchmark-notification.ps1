@@ -13,6 +13,14 @@
     4. Starts SubscriberMain (--subscribers, --seed, --skus-per-subscriber) with <run>/subscribers as its run
        directory, and waits for ready.json.
     5. (-Fault reject|stall arrives with T120; until then only -Fault none is accepted.)
+       -Disruption injects one fault of quickstart scenario F (T103), -DisruptAfterSeconds into the load:
+         notification-selection-crash  ops/faults notification.selection.afterCommit:halt, then restart Notification;
+         notification-send-crash       ops/faults notification.delivery.afterSend:halt, then restart Notification;
+         transaction-restart           stop Transaction (a forced kill, as on Windows every stop is) and start it;
+         broker-outage                 deploy/kafka/stop-broker.ps1, -OutageSeconds, start-broker.ps1 -NoTopics;
+         subscriber-outage             stop SubscriberMain (stop file), -OutageSeconds, restart it with --resume;
+         malformed-sale                support.PublishRawRecord sends a malformed record to the sale topic.
+       The Notification crashes set NOTIFICATION_TEST_FAULTS=1 for the run. Each step is logged in run.json.
     6. Runs the unchanged Load Client, `java -cp out Main` (default) or `java -cp out Main --stations=100
        --duration=120` (stress), sampling every 2 s into backlog.tsv: Transaction's unpublished SaleCompleted rows
        and pending checkout attempts, Notification's sale-consumer lag and pending notifications (ops/status), and the
@@ -46,7 +54,11 @@ param(
     [string]$KafkaHome,
     [hashtable]$ExtraEnv = @{},
     [ValidateRange(0, 64)][double]$IdleCpuCores = 0,
-    [string[]]$BlockingProcess = @()
+    [string[]]$BlockingProcess = @(),
+    [ValidateSet('none', 'notification-selection-crash', 'notification-send-crash', 'transaction-restart',
+        'broker-outage', 'subscriber-outage', 'malformed-sale')][string]$Disruption = 'none',
+    [ValidateRange(1, 600)][int]$DisruptAfterSeconds = 20,
+    [ValidateRange(1, 600)][int]$OutageSeconds = 30
 )
 
 $ErrorActionPreference = 'Stop'
@@ -121,6 +133,111 @@ function Get-ServiceRow([string]$Service, [string]$Query) {
 
 function Get-OpsStatus {
     try { return Invoke-RestMethod -Uri 'http://127.0.0.1:8084/notifications/ops/status' -TimeoutSec 3 } catch { return $null }
+}
+
+$disruptionEvents = New-Object System.Collections.Generic.List[object]
+function Add-DisruptionEvent([string]$Step) {
+    $disruptionEvents.Add([ordered]@{ utcMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); step = $Step })
+    Write-Host "[disruption] $Step"
+}
+
+# Keeps a stopped process's logs under a numbered name, so the restarted process starts fresh ones.
+function Save-ServiceLogs([string]$Service, [string]$Suffix) {
+    foreach ($stream in @('stdout', 'stderr')) {
+        $log = Join-Path $out "$Service-$stream.log"
+        if (Test-Path $log) { Move-Item $log (Join-Path $out "$Service-$stream.$Suffix.log") }
+    }
+}
+
+function Start-SubscriberApp([string[]]$Arguments, [string]$LogSuffix) {
+    $process = Start-Process -FilePath $JavaExe -ArgumentList (($Arguments | ForEach-Object { '"' + $_ + '"' }) -join ' ') `
+        -WorkingDirectory $out -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput (Join-Path $out "subscriber-stdout$LogSuffix.log") `
+        -RedirectStandardError (Join-Path $out "subscriber-stderr$LogSuffix.log")
+    $null = $process.Handle
+    return $process
+}
+
+# One scenario F fault (T103), injected during the load and recovered from before it returns.
+function Invoke-Disruption([string]$Kind) {
+    switch ($Kind) {
+        { $_ -in @('notification-selection-crash', 'notification-send-crash') } {
+            $hook = if ($Kind -eq 'notification-selection-crash') { 'notification.selection.afterCommit' } else { 'notification.delivery.afterSend' }
+            $process = $script:running['notification']
+            $body = @{ faults = "${hook}:halt" } | ConvertTo-Json -Compress
+            # Under load the halt can fire before Notification answers this request; the wait below proves it fired.
+            try {
+                $null = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8084/notifications/ops/faults' -ContentType 'application/json' -Body $body -TimeoutSec 5
+            } catch [System.Net.WebException] {
+                Write-Host "[disruption] ops/faults reply lost ($($_.Exception.Status)); waiting for the halt"
+            }
+            Add-DisruptionEvent "fault ${hook}:halt set on Notification (pid $($process.Id))"
+            # Not Wait-Until, which fails as soon as a service it watches has exited.
+            $haltDeadline = (Get-Date).AddSeconds(60)
+            while (-not $process.HasExited -and (Get-Date) -lt $haltDeadline) {
+                Start-Sleep -Milliseconds 200
+                $process.Refresh()
+            }
+            if (-not $process.HasExited) { throw "Notification did not halt at $hook within 60 s" }
+            $process.WaitForExit()
+            Add-DisruptionEvent "Notification exited with code $($process.ExitCode)"
+            $script:running.Remove('notification')
+            Save-ServiceLogs 'notification' 'crash1'
+            Start-ReadyService 'notification' 'Notification catalog loaded' {
+                $ops = Get-OpsStatus
+                $null -ne $ops -and $ops.catalogLoaded -eq $true
+            }
+            Add-DisruptionEvent "Notification restarted without the fault (pid $($script:running['notification'].Id))"
+        }
+        'transaction-restart' {
+            $process = $script:running['transaction']
+            Stop-ProcessTree $process.Id
+            $process.WaitForExit()
+            Add-DisruptionEvent "Transaction stopped (pid $($process.Id))"
+            $script:running.Remove('transaction')
+            Save-ServiceLogs 'transaction' 'restart1'
+            Start-ReadyService 'transaction' 'Transaction HTTP' { Test-Http 'http://127.0.0.1:8081/transactions/readiness-probe' @(404) }
+            Add-DisruptionEvent "Transaction restarted (pid $($script:running['transaction'].Id))"
+        }
+        'broker-outage' {
+            & (Join-Path $kafkaDir 'stop-broker.ps1') *> (Join-Path $out 'broker-stop.txt')
+            Add-DisruptionEvent 'broker stopped'
+            Start-Sleep -Seconds $OutageSeconds
+            & (Join-Path $kafkaDir 'start-broker.ps1') -KafkaHome $KafkaHome -NoTopics *> (Join-Path $out 'broker-start.txt')
+            if ($LASTEXITCODE -ne 0) { throw "start-broker.ps1 failed; see $out/broker-start.txt" }
+            Add-DisruptionEvent "broker started after $OutageSeconds s"
+        }
+        'subscriber-outage' {
+            $process = $script:subscriber
+            New-Item -ItemType File -Force -Path (Join-Path $subscriberDir 'stop') | Out-Null
+            if (-not $process.WaitForExit(30000)) { throw 'SubscriberMain did not stop within 30 s' }
+            $process.WaitForExit()
+            $script:running.Remove('subscriber')
+            Add-DisruptionEvent "SubscriberMain stopped with code $($process.ExitCode)"
+            Start-Sleep -Seconds $OutageSeconds
+            Remove-Item (Join-Path $subscriberDir 'stop') -Force -ErrorAction SilentlyContinue
+            $resumed = Start-SubscriberApp ($subscriberArgs + '--resume') '.resume1'
+            $script:subscriber = $resumed
+            $script:running['subscriber'] = $resumed
+            Wait-Until 'SubscriberMain resumed' 60 {
+                (Test-Path (Join-Path $out 'subscriber-stdout.resume1.log')) -and
+                (Select-String -Path (Join-Path $out 'subscriber-stdout.resume1.log') -Pattern 'resumed' -Quiet)
+            }
+            Add-DisruptionEvent "SubscriberMain resumed after $OutageSeconds s (pid $($resumed.Id))"
+        }
+        'malformed-sale' {
+            $prefix = [Environment]::GetEnvironmentVariable('KAFKA_TOPIC_PREFIX', 'Process')
+            $topic = "${prefix}selfcheckout.sale-completed.v1"
+            $publishArgs = @('-cp', ((Join-Path $server 'out/test'), (Join-Path $server 'out/common.jar'),
+                (Join-Path $server 'lib/messaging/*') -join ';'), 'support.PublishRawRecord', $topic, 'scenario-f-malformed',
+                'malformed SaleCompleted of quickstart scenario F item 6') | ForEach-Object { '"' + $_ + '"' }
+            $publish = Start-Process -FilePath $JavaExe -ArgumentList ($publishArgs -join ' ') -WorkingDirectory $server `
+                -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput (Join-Path $out 'publish-raw.txt') `
+                -RedirectStandardError (Join-Path $out 'publish-raw-stderr.txt')
+            if ($publish.ExitCode -ne 0) { throw "PublishRawRecord failed; see $out/publish-raw-stderr.txt" }
+            Add-DisruptionEvent "malformed record published to $topic with key scenario-f-malformed"
+        }
+    }
 }
 
 function Get-SubscriberStatus {
@@ -198,6 +315,9 @@ try {
         if (-not (Test-Path (Join-Path $subscriberClient "out/$main.class"))) { throw 'subscriber-client is not built; run subscriber-client/build.sh' }
     }
     if (-not (Test-Path (Join-Path $clientDir 'out/Main.class'))) { throw 'load-client is not built; run load-client/build.sh' }
+    if ($Disruption -eq 'malformed-sale' -and -not (Test-Path (Join-Path $server 'out/test/support/PublishRawRecord.class'))) {
+        throw '-Disruption malformed-sale needs support.PublishRawRecord; run server/build-tests.sh'
+    }
     if (-not (Test-KafkaBroker -KafkaHome $KafkaHome)) {
         throw "The broker does not answer on $($script:KafkaBootstrap); start it with deploy/kafka/start-broker.ps1"
     }
@@ -209,6 +329,7 @@ try {
     # 2. The run's environment, then the baseline (which also removes the subscriber directory).
     Set-ProcessEnv 'PERF_METRICS' 'true'
     foreach ($entry in $ExtraEnv.GetEnumerator()) { Set-ProcessEnv ([string]$entry.Key) ([string]$entry.Value) }
+    if ($Disruption -like 'notification-*') { Set-ProcessEnv 'NOTIFICATION_TEST_FAULTS' '1' }
     & (Join-Path $dbDir 'reset-baseline.ps1') -MySqlExe $mysql -KafkaHome $KafkaHome -RunDir $subscriberDir *> (Join-Path $out 'reset-baseline.txt')
     if ($LASTEXITCODE -ne 0) { throw "db/reset-baseline.ps1 failed; see $out/reset-baseline.txt" }
 
@@ -255,11 +376,20 @@ try {
     $client = Start-Process -FilePath $JavaExe -ArgumentList $clientArgs -WorkingDirectory $clientDir -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $out 'client-stdout.txt') -RedirectStandardError (Join-Path $out 'client-stderr.txt')
     $null = $client.Handle
+    $loadStarted = Get-Date
+    $disrupted = $Disruption -eq 'none'
     while (-not $client.HasExited) {
         Start-Sleep -Seconds 2
         $null = Add-BacklogSample 'load'
+        if (-not $disrupted -and ((Get-Date) - $loadStarted).TotalSeconds -ge $DisruptAfterSeconds) {
+            $disrupted = $true
+            $null = Add-BacklogSample 'disruption'
+            Invoke-Disruption $Disruption
+            $null = Add-BacklogSample 'disruption'
+        }
         $client.Refresh()
     }
+    if (-not $disrupted) { Write-Host "The load ended before -DisruptAfterSeconds; nothing was injected" -ForegroundColor Red }
     $client.WaitForExit()
     $clientEnded = Get-Date
     $result.clientOk = $client.ExitCode -eq 0
@@ -350,6 +480,11 @@ $runInfo = [ordered]@{
     skusPerSubscriber = $SkusPerSubscriber
     faults = 'none'
     faultSubscriber = $null
+    disruption = if ($Disruption -eq 'none') { $null } else {
+        [ordered]@{ kind = $Disruption; afterSeconds = $DisruptAfterSeconds; outageSeconds = $OutageSeconds
+            # ToArray, not @(): Windows PowerShell 5.1 fails on @(<generic list>) inside a hashtable literal.
+            injected = $disruptionEvents.Count -gt 0; events = $disruptionEvents.ToArray() }
+    }
     backgroundCompletions = $background
     drainSeconds = $drainElapsedSeconds
     drainDeadlineSeconds = $DrainSeconds

@@ -25,6 +25,10 @@ public interface NotificationStore {
     /** Rows by state and the failure totals over all rows. */
     record Counts(long pending, long delivered, long parked, long chargedFailures, long unchargedFailures) { }
 
+    /** A parked notification, as {@code GET /notifications/ops/parked} lists it. */
+    record Parked(String notificationId, String saleId, String sku, String subscriberId, int chargedFailures,
+                  String lastError, Instant parkedAt) { }
+
     /** Marks these {@code PENDING} rows {@code DELIVERED} at {@code at}; returns the rows changed. */
     int markDelivered(Collection<String> notificationIds, Instant at);
 
@@ -48,6 +52,9 @@ public interface NotificationStore {
 
     /** Moves parked rows, all or one subscriber's, back to {@code PENDING}, due at {@code now}; returns the count. */
     int retryParked(Optional<String> subscriberId, Instant now);
+
+    /** Up to {@code limit} parked rows, all or one subscriber's, oldest {@code parked_at} first. */
+    List<Parked> listParked(Optional<String> subscriberId, int limit);
 
     Counts counts();
 }

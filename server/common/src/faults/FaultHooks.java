@@ -4,6 +4,8 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 /**
@@ -25,12 +27,25 @@ public final class FaultHooks {
     private static final Pattern CHANNEL_FLAG =
             Pattern.compile("^notification\\.channel\\.(reject|stall):[A-Za-z0-9_-]{1,40}$");
     private static volatile Parsed parsed = new Parsed(null, Map.of(), Set.of());
+    private static final Map<String, AtomicLong> FIRED = new ConcurrentHashMap<>();
 
     private FaultHooks() { }
 
     public static void hit(String name) {
         Action action = current().actions().get(name);
-        if (action != null) action.run(name);
+        if (action != null) {
+            FIRED.computeIfAbsent(name, ignored -> new AtomicLong()).incrementAndGet();
+            action.run(name);
+        }
+    }
+
+    /**
+     * How many times hook {@code name} fired with an action set, in this JVM, so an in-process test can act right
+     * after an armed fault took effect. Hooks without an action are not counted.
+     */
+    public static long fired(String name) {
+        AtomicLong count = FIRED.get(name);
+        return count == null ? 0 : count.get();
     }
 
     /** Whether the flag entry {@code flag}, for example {@code notification.channel.reject:sub-1}, is set. */

@@ -2,6 +2,9 @@ package database;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -42,6 +45,36 @@ public final class NotificationStatusQueries {
                     + " parked_events=" + parkedEvents + " charged_failures=" + chargedFailures
                     + " uncharged_failures=" + unchargedFailures;
         }
+    }
+
+    /** A record Notification's consumers parked in {@code dead_letter_event} (FR-016), without its bytes. */
+    public record ParkedEvent(String eventId, String topic, int partition, long offset, String eventType,
+                              Integer schemaVersion, String reason, String detail, Instant firstParkedAt,
+                              Instant lastParkedAt, int parkCount) { }
+
+    private static final String PARKED_EVENTS = "SELECT event_id, topic, partition_no, record_offset, event_type, "
+            + "schema_version, reason, detail, first_parked_at, last_parked_at, park_count FROM dead_letter_event "
+            + "ORDER BY first_parked_at, dead_letter_id LIMIT ?";
+
+    /** Up to {@code limit} parked records, oldest first, for {@code GET /notifications/ops/parked}. */
+    public List<ParkedEvent> parkedEvents(int limit) {
+        if (limit <= 0) return List.of();
+        return JdbcUnitOfWork.read(pool, "notification.parkedEvents", connection -> {
+            try (PreparedStatement select = connection.prepareStatement(PARKED_EVENTS)) {
+                select.setInt(1, limit);
+                List<ParkedEvent> parked = new ArrayList<>();
+                try (ResultSet row = select.executeQuery()) {
+                    while (row.next()) {
+                        int version = row.getInt(6);
+                        Integer schemaVersion = row.wasNull() ? null : version;
+                        parked.add(new ParkedEvent(row.getString(1), row.getString(2), row.getInt(3), row.getLong(4),
+                                row.getString(5), schemaVersion, row.getString(7), row.getString(8),
+                                row.getTimestamp(9).toInstant(), row.getTimestamp(10).toInstant(), row.getInt(11)));
+                    }
+                }
+                return parked;
+            }
+        });
     }
 
     public Status read() {

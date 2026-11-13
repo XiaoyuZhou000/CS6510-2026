@@ -71,8 +71,12 @@ public final class NotificationMain {
             SubscriptionService service = new SubscriptionService(subscriptions, index, knownSkus, channels, names, clock);
             service.loadIndex();
 
+            NotificationStatusQueries statusQueries = new NotificationStatusQueries(pool);
+            reportParkedAtStart(statusQueries);
+
             KafkaRecordSender channelSender = ChannelSender.lazy(environment);
-            NotificationDispatcher dispatcher = new NotificationDispatcher(new JdbcNotificationStore(pool), channels,
+            JdbcNotificationStore notifications = new JdbcNotificationStore(pool);
+            NotificationDispatcher dispatcher = new NotificationDispatcher(notifications, channels,
                     new ChannelFaults(channelSender), new ChargingTracker(), NotificationDispatcher.Settings.of(settings), clock);
             JdbcDeadLetterStore deadLetters = new JdbcDeadLetterStore(pool, "notification.deadLetter");
             ConsumerLoop.Settings consumerSettings = ConsumerLoop.Settings.defaults()
@@ -86,10 +90,10 @@ public final class NotificationMain {
 
             HttpServer server = HttpServer.create(new InetSocketAddress(settings.httpPort()), 0);
             server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-            NotificationStatus statusView = new NotificationStatus(new NotificationStatusQueries(pool), index, knownSkus,
-                    dispatcher, () -> sales);
+            NotificationStatus statusView = new NotificationStatus(statusQueries, index, knownSkus, dispatcher, () -> sales);
+            ParkedOperations parked = new ParkedOperations(notifications, statusQueries, dispatcher, clock);
             server.createContext(NotificationHttpHandler.CONTEXT, new NotificationHttpHandler(service));
-            server.createContext(OpsHttpHandler.CONTEXT, new OpsHttpHandler(statusView::read, settings.testFaults()));
+            server.createContext(OpsHttpHandler.CONTEXT, new OpsHttpHandler(statusView::read, parked, settings.testFaults()));
             MetricsReporter reporter = MetricsReporter.start("notification");
             StatusReporter status = StatusReporter.start("notification", () -> statusView.read().line());
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -113,6 +117,23 @@ public final class NotificationMain {
         } catch (Exception failure) {
             pool.close();
             throw failure;
+        }
+    }
+
+    /**
+     * T102: what an earlier run parked is still parked, so its alarm is raised again at start from the database
+     * counts (the status line and {@code ops/status} keep it until the rows are retried and delivered).
+     */
+    private static void reportParkedAtStart(NotificationStatusQueries queries) {
+        try {
+            NotificationStatusQueries.Status durable = queries.read();
+            if (durable.parked() > 0 || durable.parkedEvents() > 0) {
+                System.err.println("[notification] ALARM at start: " + durable.parked() + " notifications and "
+                        + durable.parkedEvents() + " records are parked; list them with GET /notifications/ops/parked "
+                        + "and retry notifications with POST /notifications/ops/parked/retry");
+            }
+        } catch (RuntimeException failure) {
+            System.err.println("[notification] Could not read the parked counts at start: " + failure);
         }
     }
 }

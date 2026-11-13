@@ -392,29 +392,29 @@ These rules bind every task below.
 
 ### Tests for User Story 5 ⚠️
 
-- [ ] T094 [P] [US5] Write `server/tests/integration/NotificationCrashMatrixTest.java`, with one test per row of the fault and recovery matrix in [contracts/notification-delivery.md](contracts/notification-delivery.md#fault-and-recovery-matrix), using `FaultInjection` with `transaction.sale.beforeT3Commit`, `transaction.sale.afterT3Commit`, `notification.selection.beforeCommit`, `notification.selection.afterCommit`, and `notification.delivery.afterSend`, plus a duplicated `SaleCompleted` and a lost publish confirmation. Each test asserts one `sale_selection`, one notification row per key, and the expected redelivery count after recovery.
-- [ ] T095 [P] [US5] Write `server/tests/unit/notification/ChargingRuleTest.java`:
+- [X] T094 [P] [US5] Write `server/tests/integration/NotificationCrashMatrixTest.java`, with one test per row of the fault and recovery matrix in [contracts/notification-delivery.md](contracts/notification-delivery.md#fault-and-recovery-matrix), using `FaultInjection` with `transaction.sale.beforeT3Commit`, `transaction.sale.afterT3Commit`, `notification.selection.beforeCommit`, `notification.selection.afterCommit`, and `notification.delivery.afterSend`, plus a duplicated `SaleCompleted` and a lost publish confirmation. Each test asserts one `sale_selection`, one notification row per key, and the expected redelivery count after recovery.
+- [X] T095 [P] [US5] Write `server/tests/unit/notification/ChargingRuleTest.java`:
   - a failure while another channel confirmed a send after the attempt started is charged;
   - a failure with no other confirmation is uncharged;
   - the 8th charged failure parks the row;
   - uncharged failures never park;
   - the stall alarm is raised after 60 s with no confirmed send while rows are pending, and cleared on the next confirmation.
-- [ ] T096 [P] [US5] Write `server/tests/database/ParkingAndOperatorRetryTest.java`: `retryParked(all)` and `retryParked(subscriber)` return the exact counts, reset `charged_failures`, increment `operator_retries`, set `next_attempt_at = now`, and keep `notification_id`; `DELIVERED` rows are never touched.
-- [ ] T097 [P] [US5] Write `server/tests/messaging/NotificationBrokerRestartTest.java` (live Kafka): with 5 subscribers and sales in flight, stop the broker for 30 s through `KafkaTestSupport`, then start it. Every owed notification is delivered exactly once in effect, `charged_failures` is 0 on every row, no row is `PARKED`, and Transaction's `saleEventsUnpublished` returns to 0.
-- [ ] T098 [P] [US5] Write `server/tests/messaging/SaleEventParkingLiveTest.java` (live Kafka): `PublishRawRecord` sends a malformed `SaleCompleted` and an unsupported-version record to `selfcheckout.sale-completed.v1`. Both are parked in Notification's `dead_letter_event` after 5 attempts, `ops/status` shows `parkedEvents = 2` and an alarm, and valid sales on other and the same partitions keep flowing.
-- [ ] T099 [P] [US5] Write `server/tests/integration/TransactionRestartSaleEventsTest.java`: completions committed while the dispatcher is stopped, followed by a Transaction crash and restart, are published by the sweep and selected once each (US5 scenario 5).
-- [ ] T100 [P] [US5] Write `subscriber-client/test/SubscriberResumeLiveTest.java` (live Kafka, skipped when `KAFKA_TEST_BOOTSTRAP` is unset): publish 100 records to a test channel, stop `SubscriberThread` after 40, publish 60 more, and resume. All 160 are recorded once, plus at most one poll batch flagged as redeliveries (US5 scenario 6).
+- [X] T096 [P] [US5] Write `server/tests/database/ParkingAndOperatorRetryTest.java`: `retryParked(all)` and `retryParked(subscriber)` return the exact counts, reset `charged_failures`, increment `operator_retries`, set `next_attempt_at = now`, and keep `notification_id`; `DELIVERED` rows are never touched.
+- [X] T097 [P] [US5] Write `server/tests/messaging/NotificationBrokerRestartTest.java` (live Kafka): with 5 subscribers and sales in flight, stop the broker for 30 s through `KafkaTestSupport`, then start it. Every owed notification is delivered exactly once in effect, `charged_failures` is 0 on every row, no row is `PARKED`, and Transaction's `saleEventsUnpublished` returns to 0.
+- [X] T098 [P] [US5] Write `server/tests/messaging/SaleEventParkingLiveTest.java` (live Kafka): `PublishRawRecord` sends a malformed `SaleCompleted` and an unsupported-version record to `selfcheckout.sale-completed.v1`. Both are parked in Notification's `dead_letter_event` after 5 attempts, `ops/status` shows `parkedEvents = 2` and an alarm, and valid sales on other and the same partitions keep flowing.
+- [X] T099 [P] [US5] Write `server/tests/integration/TransactionRestartSaleEventsTest.java`: completions committed while the dispatcher is stopped, followed by a Transaction crash and restart, are published by the sweep and selected once each (US5 scenario 5).
+- [X] T100 [P] [US5] Write `subscriber-client/test/SubscriberResumeLiveTest.java` (live Kafka, skipped when `KAFKA_TEST_BOOTSTRAP` is unset): publish 100 records to a test channel, stop `SubscriberThread` after 40, publish 60 more, and resume. All 160 are recorded once, plus at most one poll batch flagged as redeliveries (US5 scenario 6).
 
 ### Implementation for User Story 5
 
-- [ ] T101 [US5] Add `GET /notifications/ops/parked?subscriberId=&limit=` and `POST /notifications/ops/parked/retry` (body `{"subscriberId": optional}`, answering `{"retried": n}`) to `server/notification/src/api/OpsHttpHandler.java`, using `JdbcNotificationStore.retryParked` and listing parked events from `dead_letter_event`. Retried rows re-enter `NotificationDispatcher` through the sweep.
-- [ ] T102 [US5] Harden recovery at startup in `server/notification/src/notification/NotificationDispatcher.java` and `NotificationMain.java`:
+- [X] T101 [US5] Add `GET /notifications/ops/parked?subscriberId=&limit=` and `POST /notifications/ops/parked/retry` (body `{"subscriberId": optional}`, answering `{"retried": n}`) to `server/notification/src/api/OpsHttpHandler.java`, using `JdbcNotificationStore.retryParked` and listing parked events from `dead_letter_event`. Retried rows re-enter `NotificationDispatcher` through the sweep.
+- [X] T102 [US5] Harden recovery at startup in `server/notification/src/notification/NotificationDispatcher.java` and `NotificationMain.java`:
   - on start, the sweep immediately takes all due `PENDING` rows;
   - channels with `channel_ready = FALSE` are re-provisioned before sending;
   - alarms for parked rows and parked events are restored from the database counts, so they survive a restart.
 
   Extend `server/tests/integration/NotificationCrashMatrixTest.java` with a restart while rows are parked.
-- [ ] T103 [US5] Run `server/run-tests.sh integration messaging database unit` and `subscriber-client/run-tests.sh` (the US5 tests). Execute quickstart scenario F items 1–6 with `server/benchmark-notification.ps1 -Workload default -Subscribers 100`, injecting each fault manually through `ops/faults` or the 006 restart procedures, into `load-client/reports/notification-service/fault-matrix/<item>/`, with `README.md` recording each reconciliation verdict and redelivery count.
+- [X] T103 [US5] Run `server/run-tests.sh integration messaging database unit` and `subscriber-client/run-tests.sh` (the US5 tests). Execute quickstart scenario F items 1–6 with `server/benchmark-notification.ps1 -Workload default -Subscribers 100`, injecting each fault manually through `ops/faults` or the 006 restart procedures, into `load-client/reports/notification-service/fault-matrix/<item>/`, with `README.md` recording each reconciliation verdict and redelivery count.
 
 **Checkpoint**: exactly-once effective notification holds through every injected fault.
 

@@ -141,6 +141,29 @@ public final class JdbcNotificationStore implements NotificationStore {
     }
 
     @Override
+    public List<Parked> listParked(Optional<String> subscriberId, int limit) {
+        if (limit <= 0) return List.of();
+        String sql = "SELECT notification_id, sale_id, sku, subscriber_id, charged_failures, last_error, parked_at "
+                + "FROM notification WHERE state = 'PARKED'" + (subscriberId.isPresent() ? " AND subscriber_id = ?" : "")
+                + " ORDER BY parked_at, notification_id LIMIT ?";
+        return JdbcUnitOfWork.read(pool, "notification.delivery.listParked", connection -> {
+            try (PreparedStatement select = connection.prepareStatement(sql)) {
+                int parameter = 1;
+                if (subscriberId.isPresent()) select.setString(parameter++, subscriberId.get());
+                select.setInt(parameter, limit);
+                List<Parked> parked = new ArrayList<>();
+                try (ResultSet rows = select.executeQuery()) {
+                    while (rows.next()) {
+                        parked.add(new Parked(rows.getString(1), rows.getString(2), rows.getString(3), rows.getString(4),
+                                rows.getInt(5), rows.getString(6), rows.getTimestamp(7).toInstant()));
+                    }
+                }
+                return parked;
+            }
+        });
+    }
+
+    @Override
     public Counts counts() {
         return JdbcUnitOfWork.read(pool, "notification.delivery.counts", connection -> {
             long pending = 0, delivered = 0, parked = 0, charged = 0, uncharged = 0;

@@ -11,6 +11,7 @@ import database.JdbcSubscriptionStore;
 import database.NotificationStatusQueries;
 import events.ConsumerLoop;
 import events.EventTypes;
+import events.ParkingPolicy;
 import events.TopicNames;
 import messaging.CatalogSkuConsumer;
 import messaging.SaleCompletedConsumer;
@@ -22,6 +23,7 @@ import notification.KnownSkus;
 import notification.NotificationConfig;
 import notification.NotificationDispatcher;
 import notification.NotificationStatus;
+import notification.ParkedOperations;
 import notification.SaleSelectionHandler;
 import notification.SubscriptionIndex;
 import notification.SubscriptionService;
@@ -70,6 +72,7 @@ public final class InProcessNotification implements AutoCloseable {
         public ConsumerLoop catalogConsumer;
         public ConsumerLoop saleConsumer;
         public NotificationStatus status;
+        public ParkedOperations parked;
         public HttpServer server;
     }
 
@@ -79,6 +82,7 @@ public final class InProcessNotification implements AutoCloseable {
     public final NotificationConfig config;
     /** Every channel send, after the fault wrapper, on its way to the bus. */
     public final CountingRecordSender channelSends;
+    private final ParkingPolicy policy;
     private final AtomicBoolean provisioningFails = new AtomicBoolean();
     private final List<Component> running = new ArrayList<>();
     private volatile Running current;
@@ -91,6 +95,7 @@ public final class InProcessNotification implements AutoCloseable {
         this.bus = bus;
         this.topics = topics;
         this.config = NotificationConfig.fromEnvironment(environment);
+        this.policy = ParkingPolicy.fromEnvironment(environment);
         this.channelSends = new CountingRecordSender(bus);
         startComponents();
     }
@@ -128,8 +133,17 @@ public final class InProcessNotification implements AutoCloseable {
 
     /** Stop as a crash would, then start over the same pool and bus. */
     public synchronized void crash() {
+        crash(() -> { });
+    }
+
+    /**
+     * Stop as a crash would, run {@code whileDown} (for example clearing the fault that caused the crash, as a
+     * restarted process starts without it), then start over the same pool and bus.
+     */
+    public synchronized void crash(Runnable whileDown) {
         ensureOpen();
         stopAll(true);
+        whileDown.run();
         startComponents();
     }
 
@@ -203,25 +217,28 @@ public final class InProcessNotification implements AutoCloseable {
         });
         JdbcDeadLetterStore deadLetters = new JdbcDeadLetterStore(pool, "notification.deadLetter");
         components.catalogConsumer = CatalogSkuConsumer.create(topics, bus::stream, components.knownSkus, deadLetters,
-                ConsumerLoop.Settings.defaults());
+                ConsumerLoop.Settings.defaults().withPolicy(policy));
         ConsumerLoop catalog = components.catalogConsumer;
         catalog.start();
         running.add(() -> catalog.stop(Duration.ofSeconds(5)));
         SaleSelectionHandler selection = new SaleSelectionHandler(new JdbcSelectionStore(pool, clock), components.index,
                 dispatcher::accept);
         components.saleConsumer = SaleCompletedConsumer.create(topics, bus::stream, selection, deadLetters,
-                ConsumerLoop.Settings.defaults().withThreads(config.saleConsumerThreads()));
+                ConsumerLoop.Settings.defaults().withPolicy(policy).withThreads(config.saleConsumerThreads()));
         ConsumerLoop sales = components.saleConsumer;
         sales.start();
         running.add(() -> sales.stop(Duration.ofSeconds(5)));
-        components.status = new NotificationStatus(new NotificationStatusQueries(pool), components.index,
-                components.knownSkus, dispatcher, () -> sales);
+        NotificationStatusQueries statusQueries = new NotificationStatusQueries(pool);
+        components.status = new NotificationStatus(statusQueries, components.index, components.knownSkus, dispatcher,
+                () -> sales);
+        components.parked = new ParkedOperations(new JdbcNotificationStore(pool), statusQueries, dispatcher, clock);
         try {
             HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
             server.createContext(NotificationHttpHandler.CONTEXT, new NotificationHttpHandler(components.service));
             NotificationStatus status = components.status;
-            server.createContext(OpsHttpHandler.CONTEXT, new OpsHttpHandler(status::read, config.testFaults()));
+            server.createContext(OpsHttpHandler.CONTEXT, new OpsHttpHandler(status::read, components.parked,
+                    config.testFaults()));
             server.start();
             components.server = server;
             running.add(() -> server.stop(0));

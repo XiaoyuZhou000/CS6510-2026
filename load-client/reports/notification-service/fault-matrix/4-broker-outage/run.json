@@ -1,0 +1,68 @@
+{
+    "harness":  "benchmark-notification",
+    "id":  "fault-matrix/4-broker-outage",
+    "startedAt":  "2026-11-13T05:59:08.7294583+00:00",
+    "deploymentCommit":  "bc85a457228d41b0982cb055686942f14c4018c9",
+    "gitDirty":  true,
+    "workload":  "default",
+    "command":  "java -cp out Main",
+    "loadClient":  {
+                       "stations":  10,
+                       "durationSeconds":  60
+                   },
+    "subscribers":  100,
+    "seed":  20261111,
+    "skusPerSubscriber":  20,
+    "faults":  "none",
+    "faultSubscriber":  null,
+    "disruption":  {
+                       "kind":  "broker-outage",
+                       "afterSeconds":  20,
+                       "outageSeconds":  30,
+                       "injected":  true,
+                       "events":  [
+                                      {
+                                          "utcMs":  1794549707327,
+                                          "step":  "broker stopped"
+                                      },
+                                      {
+                                          "utcMs":  1794549751497,
+                                          "step":  "broker started after 30 s"
+                                      }
+                                  ]
+                   },
+    "backgroundCompletions":  50,
+    "drainSeconds":  4.1,
+    "drainDeadlineSeconds":  300,
+    "extraEnv":  {
+
+                 },
+    "idleGate":  {
+                     "idleCpuCores":  2,
+                     "blockingProcesses":  [
+                                               "WardogsClient-Win64-Shipping",
+                                               "ROTTR",
+                                               "Arknights"
+                                           ],
+                     "backgroundCpuCores":  0.504,
+                     "blockingSeen":  [
+
+                                      ],
+                     "heaviest":  [
+                                      "BackgroundDownload=0.27",
+                                      "claude=0.12",
+                                      "rundll32=0.02"
+                                  ],
+                     "passed":  true
+                 },
+    "subscriberExitCode":  0,
+    "validatorExitCode":  0,
+    "result":  {
+                   "clientOk":  true,
+                   "subscriberReady":  true,
+                   "drained":  true,
+                   "validatorPassed":  true,
+                   "exported":  true,
+                   "reconciliationPassed":  true
+               }
+}

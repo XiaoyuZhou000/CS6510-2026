@@ -1,0 +1,64 @@
+{
+    "harness":  "benchmark-notification",
+    "id":  "fault-matrix/6-malformed-sale",
+    "startedAt":  "2026-11-13T05:46:06.6074564+00:00",
+    "deploymentCommit":  "bc85a457228d41b0982cb055686942f14c4018c9",
+    "gitDirty":  true,
+    "workload":  "default",
+    "command":  "java -cp out Main",
+    "loadClient":  {
+                       "stations":  10,
+                       "durationSeconds":  60
+                   },
+    "subscribers":  100,
+    "seed":  20261111,
+    "skusPerSubscriber":  20,
+    "faults":  "none",
+    "faultSubscriber":  null,
+    "disruption":  {
+                       "kind":  "malformed-sale",
+                       "afterSeconds":  20,
+                       "outageSeconds":  30,
+                       "injected":  true,
+                       "events":  [
+                                      {
+                                          "utcMs":  1794548895281,
+                                          "step":  "malformed record published to selfcheckout.sale-completed.v1 with key scenario-f-malformed"
+                                      }
+                                  ]
+                   },
+    "backgroundCompletions":  0,
+    "drainSeconds":  2.1,
+    "drainDeadlineSeconds":  300,
+    "extraEnv":  {
+
+                 },
+    "idleGate":  {
+                     "idleCpuCores":  2,
+                     "blockingProcesses":  [
+                                               "WardogsClient-Win64-Shipping",
+                                               "ROTTR",
+                                               "Arknights"
+                                           ],
+                     "backgroundCpuCores":  0.43,
+                     "blockingSeen":  [
+
+                                      ],
+                     "heaviest":  [
+                                      "steamwebhelper=0.14",
+                                      "chrome=0.13",
+                                      "rundll32=0.02"
+                                  ],
+                     "passed":  true
+                 },
+    "subscriberExitCode":  0,
+    "validatorExitCode":  0,
+    "result":  {
+                   "clientOk":  true,
+                   "subscriberReady":  true,
+                   "drained":  true,
+                   "validatorPassed":  true,
+                   "exported":  true,
+                   "reconciliationPassed":  false
+               }
+}

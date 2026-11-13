@@ -25,6 +25,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -36,7 +37,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * <ul>
  *   <li><b>Intake</b>: rows handed over after a selection commit (the immediate path), and a sweep every
  *       {@code NOTIFICATION_SWEEP_MS} of up to 1,000 {@code PENDING} rows that are due, oldest first. A row is
- *       tracked from intake until its outcome is written, so the sweep never sends it twice meanwhile.</li>
+ *       tracked from intake until its outcome is written, so the sweep never sends it twice meanwhile. The first
+ *       round after a start sweeps at once, and while sweeps come back full (a backlog, for example after a
+ *       restart) the next one runs as soon as fewer than half that many rows are tracked, not a second later.
+ *       {@link #requestSweep()} (an operator retry) sweeps in the next round.</li>
  *   <li><b>Lanes</b>: one FIFO per subscriber, with at most {@code NOTIFICATION_LANE_IN_FLIGHT} sends in flight,
  *       served round-robin. A lane holds at most four times that many queued rows; further rows of a full lane wait
  *       in the table and the sweep leaves that subscriber out, so a stalled channel never crowds out the others.</li>
@@ -47,7 +51,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li><b>Failure</b>: charged when another channel confirmed a send after this attempt started
  *       ({@link ChargingTracker}), else uncharged; batched like the marks, with the backoff
  *       {@code min(200 ms × 2^n, 5 s)}. The {@code NOTIFICATION_PARK_AFTER_CHARGED}-th charged failure parks the
- *       row and raises an alarm.</li>
+ *       row and logs an alarm; {@link NotificationStatus} keeps the alarm from the database count while rows stay
+ *       parked.</li>
  *   <li><b>Stall alarm</b>: no confirmed send on any channel for 60 s while work is outstanding (a broker-wide
  *       outage); nothing is parked for it.</li>
  * </ul>
@@ -127,7 +132,10 @@ public final class NotificationDispatcher implements AutoCloseable {
     private final AtomicLong confirmed = new AtomicLong();
     private Instant marksSince;
     private Instant failuresSince;
+    private final AtomicBoolean sweepRequested = new AtomicBoolean();
     private Instant nextSweepAt = Instant.MIN;
+    private boolean lastSweepFull;
+    private boolean started;
     private Instant outstandingSince;
     private boolean failedSinceConfirm;
     private volatile boolean stalled;
@@ -199,8 +207,18 @@ public final class NotificationDispatcher implements AutoCloseable {
     public void runOnce() {
         Instant now = clock.instant();
         drainCompletions();
-        if (!now.isBefore(nextSweepAt)) {
-            sweep(now);
+        boolean requested = sweepRequested.getAndSet(false);
+        boolean backlog = lastSweepFull && tracked.size() < settings.sweepLimit() / 2;
+        if (requested || backlog || !now.isBefore(nextSweepAt)) {
+            int fetched = sweep(now);
+            if (!started) {
+                started = true;
+                if (fetched > 0) {
+                    System.out.println("[notification] Dispatcher took " + fetched + (fetched >= settings.sweepLimit()
+                            ? "+" : "") + " due notifications at start");
+                }
+            }
+            lastSweepFull = fetched >= settings.sweepLimit();
             nextSweepAt = now.plus(settings.sweepInterval());
         }
         drainIntake();
@@ -217,15 +235,26 @@ public final class NotificationDispatcher implements AutoCloseable {
 
     public boolean stalled() { return stalled; }
 
-    /** The current alarms, for the status line and {@code ops/status}. */
+    /**
+     * Asks for a sweep in the next round instead of at the next interval, for example after an operator retry moved
+     * parked rows back to {@code PENDING}.
+     */
+    public void requestSweep() {
+        sweepRequested.set(true);
+        wake();
+    }
+
+    /**
+     * The alarms only this process knows, for the status line and {@code ops/status}: the stall alarm. Parked rows
+     * and parked records are alarmed from the database counts ({@link NotificationStatus}), so those alarms survive
+     * a restart and clear once an operator retry delivered the rows.
+     */
     public List<String> alarms() {
         List<String> alarms = new ArrayList<>();
         if (stalled) {
             alarms.add("DELIVERY_STALLED: no confirmed send on any channel for " + stalledFor.toSeconds()
                     + " s while notifications are pending");
         }
-        long parkedNow = parked.get();
-        if (parkedNow > 0) alarms.add("NOTIFICATIONS_PARKED: " + parkedNow + " notifications parked since start");
         return alarms;
     }
 
@@ -301,7 +330,8 @@ public final class NotificationDispatcher implements AutoCloseable {
         signal.release();
     }
 
-    private void sweep(Instant now) {
+    /** One sweep; returns the rows it read (0 when the read failed). */
+    private int sweep(Instant now) {
         List<String> full = new ArrayList<>();
         synchronized (this) {
             for (Lane lane : lanes.values()) {
@@ -313,9 +343,10 @@ public final class NotificationDispatcher implements AutoCloseable {
             due = store.selectDue(now, settings.sweepLimit(), full);
         } catch (RuntimeException failure) {
             logStoreError(now, "sweep", failure);
-            return;
+            return 0;
         }
         for (Pending row : due) take(row);
+        return due.size();
     }
 
     private void drainIntake() {

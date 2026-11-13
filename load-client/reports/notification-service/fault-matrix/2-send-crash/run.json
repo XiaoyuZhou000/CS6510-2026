@@ -1,0 +1,72 @@
+{
+    "harness":  "benchmark-notification",
+    "id":  "fault-matrix/2-send-crash",
+    "startedAt":  "2026-11-13T05:51:47.9386861+00:00",
+    "deploymentCommit":  "bc85a457228d41b0982cb055686942f14c4018c9",
+    "gitDirty":  true,
+    "workload":  "default",
+    "command":  "java -cp out Main",
+    "loadClient":  {
+                       "stations":  10,
+                       "durationSeconds":  60
+                   },
+    "subscribers":  100,
+    "seed":  20261111,
+    "skusPerSubscriber":  20,
+    "faults":  "none",
+    "faultSubscriber":  null,
+    "disruption":  {
+                       "kind":  "notification-send-crash",
+                       "afterSeconds":  20,
+                       "outageSeconds":  30,
+                       "injected":  true,
+                       "events":  [
+                                      {
+                                          "utcMs":  1794549296328,
+                                          "step":  "fault notification.delivery.afterSend:halt set on Notification (pid 44564)"
+                                      },
+                                      {
+                                          "utcMs":  1794549296961,
+                                          "step":  "Notification exited with code 137"
+                                      },
+                                      {
+                                          "utcMs":  1794549298049,
+                                          "step":  "Notification restarted without the fault (pid 52412)"
+                                      }
+                                  ]
+                   },
+    "backgroundCompletions":  0,
+    "drainSeconds":  2.1,
+    "drainDeadlineSeconds":  300,
+    "extraEnv":  {
+
+                 },
+    "idleGate":  {
+                     "idleCpuCores":  2,
+                     "blockingProcesses":  [
+                                               "WardogsClient-Win64-Shipping",
+                                               "ROTTR",
+                                               "Arknights"
+                                           ],
+                     "backgroundCpuCores":  0.384,
+                     "blockingSeen":  [
+
+                                      ],
+                     "heaviest":  [
+                                      "claude=0.13",
+                                      "RuntimeBroker=0.11",
+                                      "steamwebhelper=0.06"
+                                  ],
+                     "passed":  true
+                 },
+    "subscriberExitCode":  0,
+    "validatorExitCode":  0,
+    "result":  {
+                   "clientOk":  true,
+                   "subscriberReady":  true,
+                   "drained":  true,
+                   "validatorPassed":  true,
+                   "exported":  true,
+                   "reconciliationPassed":  true
+               }
+}
