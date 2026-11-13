@@ -1,0 +1,19 @@
+=== db/reset-baseline.ps1 -RunDir runs/smoke
+[PASS] reset-baseline exit code: 0 (output in reset-baseline.txt)
+[PASS] run directory removed: <scratch>\quickstart-1\runs\smoke
+=== start Inventory, Transaction, Analytics, Notification, then Nginx
+=== expected results
+[PASS] GET :8080/notifications/ops/status: status 200, catalogLoaded=True, subscriptionVersion=0, activeSubscribers=0
+[PASS] deploy/kafka/status.ps1 lists five topics: selfcheckout.catalog.v1 (1), selfcheckout.checkout.v1 (16), selfcheckout.checkout-outcome.v1 (16), selfcheckout.scan-accepted.v1 (1), selfcheckout.sale-completed.v1 (16)
+[PASS] status.ps1 reports the four groups: inventory-checkout=stable/lag 0, transaction-checkout-outcome=stable/lag 0, analytics-scan-ingest=stable/lag 0, notification-sale-completed=stable/lag 0
+[PASS] GET /items: status 200
+[PASS] GET /inventory/low-stock: status 200, {"threshold":50,"generatedAt":"2026-11-13T10:42:10.811808200Z","alerts":[]}
+[PASS] GET /analytics/popular-items: status 200
+[PASS] GET /transactions/{unknown}: status 404
+[PASS] POST /transactions: status 201
+[PASS] POST /transactions/{id}/items: status 200
+[PASS] GET /transactions/{id}: status 200
+[PASS] POST /transactions/{id}/complete: status 200
+[PASS] Notification selected the smoke sale: salesSelected=1, notifications pending=0
+deployment stopped
+QUICKSTART SECTION 1: PASS

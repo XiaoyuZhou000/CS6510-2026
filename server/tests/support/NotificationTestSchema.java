@@ -25,6 +25,12 @@ public final class NotificationTestSchema extends TestSchema {
         return new NotificationTestSchema(options);
     }
 
+    /** The Notification user may only read and write rows (007 T012); the schema is applied by an administrator. */
+    @Override
+    protected String ownPrivileges() {
+        return "SELECT, INSERT, UPDATE, DELETE";
+    }
+
     @Override
     protected List<String> eventTables() {
         return List.of("dead_letter_event");

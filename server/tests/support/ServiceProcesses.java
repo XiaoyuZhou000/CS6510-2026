@@ -29,10 +29,11 @@ import java.util.concurrent.TimeUnit;
  * }</pre>
  */
 public final class ServiceProcesses {
-    private static final Set<String> SERVICES = Set.of("transaction", "inventory", "analytics");
+    private static final Set<String> SERVICES = Set.of("transaction", "inventory", "analytics", "notification");
     /** Shared-database variables no service may inherit (R3). */
     private static final List<String> SCRUBBED = List.of("DB_NAME", "DB_USER", "DB_PASSWORD", "DB_POOL_SIZE",
-            "DB_POOL_MAX_SIZE", "TRANSACTION_DB_PASSWORD", "INVENTORY_DB_PASSWORD", "ANALYTICS_DB_PASSWORD");
+            "DB_POOL_MAX_SIZE", "TRANSACTION_DB_PASSWORD", "INVENTORY_DB_PASSWORD", "ANALYTICS_DB_PASSWORD",
+            "NOTIFICATION_DB_PASSWORD");
 
     private ServiceProcesses() { }
 
@@ -84,7 +85,8 @@ public final class ServiceProcesses {
 
         public Builder httpPort(int port) {
             this.httpPort = port;
-            environment.put(prefix() + "_PORT", Integer.toString(port));
+            // Notification reads NOTIFICATION_HTTP_PORT (007 NotificationConfig); the 006 services read <SERVICE>_PORT.
+            environment.put(prefix() + (service.equals("notification") ? "_HTTP_PORT" : "_PORT"), Integer.toString(port));
             return this;
         }
 

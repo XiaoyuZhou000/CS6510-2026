@@ -31,6 +31,10 @@ public final class LiveSchemas {
         return connect("analytics");
     }
 
+    public static Connection notification() throws SQLException {
+        return connect("notification");
+    }
+
     /** One deployed service's own connection settings; a missing password skips the test. */
     public record Credentials(String service, String host, int port, String name, String user, String password) {
         @Override
@@ -39,7 +43,7 @@ public final class LiveSchemas {
         }
     }
 
-    /** The settings for {@code transaction}, {@code inventory}, or {@code analytics}. */
+    /** The settings for {@code transaction}, {@code inventory}, {@code analytics}, or {@code notification}. */
     public static Credentials credentials(String service) {
         String prefix = service.toUpperCase(java.util.Locale.ROOT);
         String password = setting(prefix + "_DB_PASSWORD", null);

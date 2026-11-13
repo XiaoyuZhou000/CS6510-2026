@@ -6,6 +6,7 @@ import support.AnalyticsTestSchema;
 import support.CheckoutDeployment;
 import support.InventoryTestSchema;
 import support.KafkaTestSupport;
+import support.NotificationTestSchema;
 import support.ServiceHttp;
 import support.ServiceProcesses;
 import support.TestSchema;
@@ -14,9 +15,12 @@ import support.TransactionTestSchema;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.jar.JarFile;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -126,6 +130,53 @@ class IndependentServiceDeploymentTest {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * 007 US7 scenario 1 (T111, FR-034): {@code ./build.sh notification} builds Notification's jar and none of the
+     * three service jars, {@code run-notification.sh} runs that jar with no peer artifact, and Notification started
+     * alone, with only the broker and MySQL (its own DML-only user), answers {@code ops/status} and its routes.
+     */
+    @Test
+    void notificationBuildsAloneAndStartsWithOnlyTheBrokerAndMySql() throws Exception {
+        Path root = ServiceProcesses.serverRoot();
+        String build = Files.readString(root.resolve("build.sh")).replace("\r\n", "\n");
+        Matcher branch = Pattern.compile("(?ms)^  notification\\)\\n(.*?)^    ;;").matcher(build);
+        assertTrue(branch.find(), "build.sh has a notification branch");
+        List<String> built = new ArrayList<>();
+        Matcher service = Pattern.compile("build_service (\\S+)").matcher(branch.group(1));
+        while (service.find()) built.add(service.group(1));
+        assertEquals(List.of("notification"), built, "./build.sh notification builds no service jar but its own");
+
+        Path jar = root.resolve("out/notification.jar");
+        assertTrue(Files.isRegularFile(jar), jar.toString());
+        try (JarFile artifact = new JarFile(jar.toFile())) {
+            assertEquals("notification.NotificationMain", artifact.getManifest().getMainAttributes().getValue("Main-Class"));
+            assertNotNull(artifact.getEntry("notification/NotificationMain.class"));
+            for (String peer : SERVICES) {
+                assertFalse(artifact.stream().anyMatch(entry -> entry.getName().startsWith(peer + "/")),
+                        jar + " contains classes of " + peer);
+            }
+        }
+        String run = Files.readString(root.resolve("run-notification.sh"));
+        assertTrue(run.contains("jar=out/notification.jar") && run.contains("notification.NotificationMain"),
+                "run-notification.sh runs out/notification.jar");
+        for (String peer : SERVICES) assertFalse(run.contains("out/" + peer + ".jar"), "run-notification.sh uses " + peer);
+
+        KafkaTestSupport.requireBroker();
+        TopicNames names = KafkaTestSupport.runTopics();
+        KafkaTestSupport.createCatalogTopics(names);
+        try (NotificationTestSchema schema = NotificationTestSchema.create(TestSchema.Options.defaults().withOwnUser());
+             ServiceProcesses.ServiceProcess notification = ServiceProcesses.service("notification")
+                     .env("NOTIFICATION_DB_POOL_MAX_SIZE", "20").database(schema)
+                     .httpPort(ServiceProcesses.freePort()).kafka(names).start()) {
+            notification.awaitHttp("/notifications/ops/status", 200, Duration.ofSeconds(60));
+            ServiceHttp http = new ServiceHttp(notification.httpPort());
+            Map<String, Object> status = ServiceHttp.json(http.get("/notifications/ops/status"));
+            assertEquals(0, ((Number) status.get("subscriptionVersion")).intValue(), status.toString());
+            assertEquals(404, http.get("/notifications/subscribers/nobody").statusCode(), "the subscriber routes answer");
+            assertTrue(notification.isAlive(), "Notification stays running" + System.lineSeparator() + notification.output());
         }
     }
 

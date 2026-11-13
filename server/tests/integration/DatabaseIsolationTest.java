@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import support.AnalyticsTestSchema;
 import support.InventoryTestSchema;
 import support.LiveSchemas;
+import support.NotificationTestSchema;
 import support.SqlScripts;
 import support.TestSchema;
 import support.TransactionTestSchema;
@@ -49,7 +50,23 @@ class DatabaseIsolationTest {
             "analytics", List.of("SELECT COUNT(*) FROM %s.accepted_scan",
                     "INSERT INTO %s.product_name (sku, name) VALUES ('SKU-ISOLATION', 'x')",
                     "UPDATE %s.scan_sequence SET last_position = last_position WHERE sequence_key = 1",
-                    "DELETE FROM %s.product_name WHERE sku = 'SKU-ISOLATION'"));
+                    "DELETE FROM %s.product_name WHERE sku = 'SKU-ISOLATION'"),
+            "notification", List.of("SELECT COUNT(*) FROM %s.subscriber",
+                    "INSERT INTO %s.subscriber (subscriber_id, status, channel_topic, channel_ready, created_version, "
+                            + "updated_version, created_at, updated_at) VALUES ('isolation', 'ACTIVE', 'x', FALSE, 0, 0, NOW(3), NOW(3))",
+                    "UPDATE %s.subscription_clock SET version = version WHERE id = 1",
+                    "DELETE FROM %s.subscriber WHERE subscriber_id = 'isolation'"));
+
+    /** 007 (T110): the four service users, Notification's included. */
+    private static final List<String> WITH_NOTIFICATION = List.of("transaction", "inventory", "analytics", "notification");
+    /**
+     * Schema changes, which no service user may make in another schema and the DML-only Notification user may not make
+     * in its own (007 T012). Each is harmless if a regression allowed it: an empty table, a drop of a table that does
+     * not exist, and a comment on the event table every schema has.
+     */
+    private static final List<String> DDL = List.of("CREATE TABLE %s.isolation_probe (id INT)",
+            "DROP TABLE IF EXISTS %s.isolation_probe_absent",
+            "ALTER TABLE %s.`dead_letter_event` COMMENT = 'isolation'");
 
     /**
      * Every table each schema script creates, including the event tables (006 FR-004, SC-011): a read probe and a
@@ -60,7 +77,8 @@ class DatabaseIsolationTest {
     private static final Map<String, List<String>> EVENT_TABLES = Map.of(
             "transaction", List.of("outbox_event", "dead_letter_event"),
             "inventory", List.of("outbox_event", "dead_letter_event"),
-            "analytics", List.of("dead_letter_event", "consumer_offset"));
+            "analytics", List.of("dead_letter_event", "consumer_offset"),
+            "notification", List.of("dead_letter_event"));
 
     private static synchronized List<String> tables(String service) throws Exception {
         if (!TABLES.containsKey(service)) {
@@ -184,6 +202,115 @@ class DatabaseIsolationTest {
             }
         }
         assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    /**
+     * 007 US7 scenario 2 (T110, FR-035): Notification's user is denied every statement on the other three schemas, each
+     * of the other three users is denied every statement on Notification's schema, and Notification's user reads and
+     * writes its own rows but cannot change its own schema. Nothing a denied statement touched changed.
+     */
+    @Test
+    void theNotificationUserAndTheOtherThreeAreDeniedEachOthersSchemas() throws Exception {
+        TestSchema.Options options = TestSchema.Options.defaults().withOwnUser();
+        try (TransactionTestSchema transaction = TransactionTestSchema.create(options);
+             InventoryTestSchema inventory = InventoryTestSchema.create(options);
+             AnalyticsTestSchema analytics = AnalyticsTestSchema.create(options);
+             NotificationTestSchema notification = NotificationTestSchema.create(options)) {
+            inventory.seed(3, 10);
+            transaction.insertOpenTransaction("kept");
+            analytics.seedName("SKU-000001", "Item 1");
+            notification.update("INSERT INTO subscriber (subscriber_id, status, channel_topic, channel_ready, "
+                    + "created_version, updated_version, created_at, updated_at) "
+                    + "VALUES ('kept', 'ACTIVE', 'selfcheckout.notify.kept', TRUE, 1, 1, NOW(3), NOW(3))");
+            notification.update("UPDATE subscription_clock SET version = 1 WHERE id = 1");
+            Map<String, TestSchema> schemas = Map.of("transaction", transaction, "inventory", inventory,
+                    "analytics", analytics, "notification", notification);
+            for (String host : List.of("localhost", "127.0.0.1")) {
+                assertEquals(List.of("GRANT USAGE ON *.* TO `" + notification.user() + "`@`" + host + "`",
+                        "GRANT SELECT, INSERT, UPDATE, DELETE ON `" + notification.name() + "`.* TO `"
+                                + notification.user() + "`@`" + host + "`"),
+                        grants(notification, host), "the disposable Notification user holds bootstrap's DML-only grant");
+            }
+
+            Map<String, Long> before = notificationRowCounts(schemas);
+            List<String> violations = new ArrayList<>();
+            for (String owner : WITH_NOTIFICATION) {
+                TestSchema own = schemas.get(owner);
+                try (Connection connection = connect(own.host(), own.port(), own.name(), own.user(), own.password())) {
+                    for (String other : WITH_NOTIFICATION) {
+                        // Notification against the other three, and the other three against Notification.
+                        if (other.equals(owner) || !(owner.equals("notification") || other.equals("notification"))) continue;
+                        String schema = "`" + schemas.get(other).name() + "`";
+                        List<String> statements = new ArrayList<>(probes(other));
+                        statements.addAll(DDL);
+                        for (String probe : statements) violations.addAll(expectDenied(connection, owner, String.format(probe, schema)));
+                    }
+                }
+            }
+            try (Connection connection = connect(notification.host(), notification.port(), notification.name(),
+                    notification.user(), notification.password())) {
+                for (String probe : DDL) {
+                    violations.addAll(expectDenied(connection, "notification (own schema)",
+                            String.format(probe, "`" + notification.name() + "`")));
+                }
+                for (String probe : probes("notification")) {
+                    try (Statement statement = connection.createStatement()) {
+                        statement.execute(String.format(probe, "`" + notification.name() + "`"));
+                    }
+                }
+            }
+            assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+            assertEquals(before, notificationRowCounts(schemas), "denied statements changed no data");
+        }
+    }
+
+    /** The same in both directions with the deployed users of {@code db/bootstrap.ps1}, when all four passwords are set. */
+    @Test
+    void theDeployedNotificationUserAndTheOtherThreeAreDeniedEachOthersSchemas() throws Exception {
+        Map<String, LiveSchemas.Credentials> credentials = new LinkedHashMap<>();
+        for (String service : WITH_NOTIFICATION) credentials.put(service, LiveSchemas.credentials(service));
+        List<String> violations = new ArrayList<>();
+        for (String owner : WITH_NOTIFICATION) {
+            LiveSchemas.Credentials own = credentials.get(owner);
+            try (Connection connection = connect(own.host(), own.port(), own.name(), own.user(), own.password())) {
+                for (String other : WITH_NOTIFICATION) {
+                    if (other.equals(owner) || !(owner.equals("notification") || other.equals("notification"))) continue;
+                    String schema = "`" + credentials.get(other).name() + "`";
+                    for (String probe : probes(other)) violations.addAll(expectDenied(connection, owner, String.format(probe, schema)));
+                }
+                try (Statement statement = connection.createStatement();
+                     ResultSet row = statement.executeQuery(String.format(PROBES.get(owner).get(0), "`" + own.name() + "`"))) {
+                    assertTrue(row.next(), owner + " reads its own schema");
+                }
+            }
+        }
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    private static List<String> grants(TestSchema schema, String host) throws SQLException {
+        List<String> grants = new ArrayList<>();
+        try (Statement statement = schema.admin().createStatement();
+             ResultSet row = statement.executeQuery("SHOW GRANTS FOR '" + schema.user() + "'@'" + host + "'")) {
+            while (row.next()) grants.add(row.getString(1));
+        }
+        return grants;
+    }
+
+    private static Map<String, Long> notificationRowCounts(Map<String, TestSchema> schemas) throws SQLException {
+        Map<String, Long> counts = rowCounts(schemas);
+        TestSchema notification = schemas.get("notification");
+        counts.put("subscriber", notification.queryLong("SELECT COUNT(*) FROM subscriber"));
+        counts.put("subscription_version", notification.queryLong("SELECT version FROM subscription_clock WHERE id = 1"));
+        counts.put("tables", notification.queryLong("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?",
+                notification.name()));
+        counts.put("dead_letter_comment", notification.queryLong("SELECT COUNT(*) FROM information_schema.tables "
+                + "WHERE table_schema = ? AND table_name = 'dead_letter_event' AND table_comment = 'isolation'",
+                notification.name()));
+        for (String other : SERVICES) {
+            counts.put(other + " tables", schemas.get(other).queryLong(
+                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?", schemas.get(other).name()));
+        }
+        return counts;
     }
 
     /** The disposable user holds exactly bootstrap's grants: usage, plus ALL PRIVILEGES on its own schema. */

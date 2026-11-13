@@ -2,6 +2,7 @@ package integration;
 
 import api.json.Json;
 import events.TopicNames;
+import org.apache.kafka.clients.admin.Admin;
 import org.junit.jupiter.api.Test;
 import support.KafkaTestSupport;
 import support.LiveSchemas;
@@ -24,6 +25,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -90,9 +92,10 @@ public final class ResetBaselineTest {
     }
 
     /**
-     * The whole baseline procedure (D13, FR-059): {@code db/reset-baseline.ps1} resets the broker and all three
-     * schemas; afterwards every topic is empty with its partitions, and every schema holds exactly the baseline
-     * with no outbox, parked, or offset row. Destructive like the test below, and it restarts the broker, so it
+     * The whole baseline procedure (D13, FR-059; 007 FR-036, T112): {@code db/reset-baseline.ps1 -RunDir <tmp>} resets
+     * the broker and all four schemas; afterwards every topic is empty with its partitions, exactly the five fixed
+     * topics exist (no {@code selfcheckout.notify.*} channel), every schema holds exactly the baseline with no outbox,
+     * parked, or offset row, Notification's clock is 0 with every table empty, and the run directory is gone. Destructive like the test below, and it restarts the broker, so it
      * also needs {@code KAFKA_TEST_BROKER_CONTROL=1} and {@code KAFKA_HOME}.
      */
     @Test
@@ -102,13 +105,19 @@ public final class ResetBaselineTest {
         assumeTrue(System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("windows"),
             "db/reset-baseline.ps1 runs under Windows PowerShell");
         KafkaTestSupport.requireBrokerControl();
-        for (int port : List.of(8081, 8082, 8083)) {
+        for (int port : List.of(8081, 8082, 8083, 8084)) {
             assertEquals(-1, ServiceProcesses.httpStatus(port, "/"),
                 "Stop the deployment before resetting the baseline: port " + port + " answers");
         }
+        // 007 T112: a channel topic left by an earlier run, and a run directory holding receipts, both go.
+        String leftoverChannel = TopicNames.unprefixed().channel("reset-probe-" + UUID.randomUUID().toString().substring(0, 8));
+        KafkaTestSupport.createTopic(leftoverChannel, 1, "delete");
+        Path runDir = Files.createTempDirectory("reset-run-dir-");
+        Files.createDirectories(runDir.resolve("subscribers/receipts"));
+        Files.writeString(runDir.resolve("subscribers/receipts/sub-0001.jsonl"), "{}\n");
         Path script = ServiceProcesses.serverRoot().getParent().resolve("db/reset-baseline.ps1");
         ProcessBuilder builder = new ProcessBuilder(List.of("powershell", "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-File", script.toString()));
+            "-ExecutionPolicy", "Bypass", "-File", script.toString(), "-RunDir", runDir.toString()));
         String kafkaHome = System.getProperty("KAFKA_HOME", System.getenv("KAFKA_HOME"));
         if (kafkaHome != null && !kafkaHome.isBlank()) builder.environment().put("KAFKA_HOME", kafkaHome);
         String mysql = System.getProperty("MYSQL_EXE", System.getenv("MYSQL_EXE"));
@@ -116,10 +125,15 @@ public final class ResetBaselineTest {
             builder.command().add("-MySqlExe");
             builder.command().add(mysql);
         }
+        // To a file, not a pipe: the broker that the reset restarts inherits the script's output handles, so a pipe
+        // would stay open, and a read of it would never end, for as long as the broker runs.
+        Path log = Files.createTempFile("reset-baseline-", ".log");
         builder.redirectErrorStream(true);
+        builder.redirectOutput(log.toFile());
         Process process = builder.start();
-        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        assertTrue(process.waitFor(600, TimeUnit.SECONDS), "reset-baseline.ps1 did not finish");
+        boolean finished = process.waitFor(600, TimeUnit.SECONDS);
+        String output = new String(Files.readAllBytes(log), StandardCharsets.UTF_8);
+        assertTrue(finished, "reset-baseline.ps1 did not finish:" + System.lineSeparator() + output);
         assertEquals(0, process.exitValue(), "reset-baseline.ps1 failed:" + System.lineSeparator() + output);
         assertExactDatabaseBaseline(false);
         TopicNames production = TopicNames.unprefixed();
@@ -127,6 +141,25 @@ public final class ResetBaselineTest {
             for (int partition = 0; partition < topic.partitions(); partition++) {
                 assertEquals(0, KafkaTestSupport.endOffset(production.name(topic), partition),
                     production.name(topic) + "-" + partition + " is empty after the reset");
+            }
+        }
+
+        // 007 T112: exactly the five fixed topics, no channel topic, Notification at its baseline, no run directory.
+        Set<String> fixed = new HashSet<>();
+        for (TopicNames.Topic topic : TopicNames.Topic.values()) fixed.add(production.name(topic));
+        assertEquals(5, fixed.size(), "five fixed topics");
+        Set<String> topics;
+        try (Admin admin = KafkaTestSupport.admin()) {
+            topics = admin.listTopics().names().get(30, TimeUnit.SECONDS);
+        }
+        assertEquals(fixed, topics, "after the reset the broker holds exactly the five fixed topics");
+        assertFalse(topics.contains(leftoverChannel), leftoverChannel + " was removed");
+        assertFalse(Files.exists(runDir), "the run directory " + runDir + " was removed");
+        try (Connection connection = LiveSchemas.notification(); Statement statement = connection.createStatement()) {
+            assertEquals(0, count(statement, "SELECT version FROM subscription_clock WHERE id = 1"), "subscription clock 0");
+            for (String table : List.of("subscriber", "subscription", "subscription_change", "sale_selection",
+                    "notification", "dead_letter_event")) {
+                assertEmpty(statement, table);
             }
         }
     }

@@ -32,9 +32,9 @@ Every command below runs from the repository root in Windows PowerShell 5.1 or P
 | Start | `./deploy/kafka/start-broker.ps1` | Starts the broker as a hidden background JVM, waits until it answers on `127.0.0.1:19092`, and runs `create-topics.ps1`. `-NoTopics` skips the topic step. If the broker already runs, only the topic step runs. |
 | Stop | `./deploy/kafka/stop-broker.ps1` | Ends the broker JVM. Windows has no signal that asks a background JVM to shut down cleanly, so this is always a forced stop, the same as a crash. |
 | Restart | `stop-broker.ps1`, then `start-broker.ps1` | The log, the topics, and the committed offsets survive |
-| Status | `./deploy/kafka/status.ps1` (or `-Json`) | Prints reachability, each topic's partitions and end offsets, and the lag of `inventory-checkout`, `transaction-checkout-outcome`, and `analytics-scan-ingest`. A group that does not exist yet is reported as `absent`. It takes about 4 s, because each Kafka tool starts its own JVM. |
+| Status | `./deploy/kafka/status.ps1` (or `-Json`) | Prints reachability, each topic's partitions and end offsets, and the lag of `inventory-checkout`, `transaction-checkout-outcome`, `analytics-scan-ingest`, and Notification's `notification-sale-completed`. A group that does not exist yet, such as Notification's while it has never run, is reported as `absent`. It takes about 4 s, because each Kafka tool starts its own JVM. |
 | Create topics | `./deploy/kafka/create-topics.ps1 [-TopicPrefix <p>]` | Idempotent. `-TopicPrefix` matches the services' `KAFKA_TOPIC_PREFIX`. Exits nonzero if an existing topic differs from the catalog. |
-| Reset | `./deploy/kafka/reset-topics.ps1` | Refuses to run while any of ports 8081–8084 answers. Stops the broker, deletes its log directory, and starts it again, which reformats the log and recreates the five fixed topics. Then it verifies that every end offset is 0 and that no consumer group remains. `db/reset-baseline.ps1` calls it. |
+| Reset | `./deploy/kafka/reset-topics.ps1` | Refuses to run while any of ports 8081–8084 answers. Stops the broker, deletes its log directory, and starts it again, which reformats the log and recreates the five fixed topics. Every other topic is gone with the log directory, including each subscriber's channel topic and every test's prefixed topics. Then it verifies that every end offset is 0 and that none of the four consumer groups remains. `db/reset-baseline.ps1` calls it. |
 | Full removal | `stop-broker.ps1`, then delete `KAFKA_DATA_DIR` | Removes every record |
 
 ## State directory
@@ -75,8 +75,11 @@ Clients set the rest (research D1): producers use `acks=all`, `enable.idempotenc
 | `selfcheckout.checkout.v1` | 16 | `delete`, 7 days (`604800000`) | Transaction ID |
 | `selfcheckout.checkout-outcome.v1` | 16 | `delete`, 7 days | Transaction ID |
 | `selfcheckout.scan-accepted.v1` | 1 | `delete`, 7 days | Transaction ID |
+| `selfcheckout.sale-completed.v1` (007) | 16 | `delete`, 7 days | Transaction ID (the sale) |
 
-Every topic also pins `segment.bytes=1073741824` and `segment.ms=9223372036854775807`. Topics are created only by `create-topics.ps1`, and `auto.create.topics.enable=false` makes a misspelled topic fail instead of appearing silently.
+Every topic also pins `segment.bytes=1073741824` and `segment.ms=9223372036854775807`. The fixed topics are created only by `create-topics.ps1`, and `auto.create.topics.enable=false` makes a misspelled topic fail instead of appearing silently.
+
+**Channel topics (007)**: the Notification Service creates one topic per subscriber, `selfcheckout.notify.<subscriberId>.v1`, through the Kafka admin API when it registers that subscriber. Each has one partition, `cleanup.policy=delete`, `retention.ms=-1`, `retention.bytes=-1`, the same never-rolling segment settings, and `segment.index.bytes=1048576`. It holds that subscriber's `SubscriberNotified` events, keyed by subscriber ID. Notification also reads `selfcheckout.catalog.v1` from offset 0 at every start, by manual assignment, so that it knows the catalog's SKUs. `create-topics.ps1` neither creates nor checks them, and nothing deletes one individually (a deletion would stop the broker, above). The baseline reset removes all of them at once with the log directory, and `db/reset-baseline.ps1` then checks that none is left.
 
 ## Windows constraints
 

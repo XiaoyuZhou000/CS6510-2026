@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Replaces benchmark-microservices.ps1, keeping its steps and adding the broker:
-    1. Checks that ports 8080-8083 are free,
+    1. Checks that ports 8080-8084 are free (8084: no stray Notification Service),
        that the service artifacts exist, and that the broker answers with its four topics; builds
        load-client/ if needed.
     2. Applies -ExtraEnv to this process, so the broker restarted by the reset also sees it (for
@@ -429,7 +429,8 @@ try {
     }
 
     # 1. Ports, artifacts, and the broker.
-    $occupied = Get-NetTCPConnection -LocalPort 8080, 8081, 8082, 8083 -State Listen -ErrorAction SilentlyContinue
+    # 8084 too (007 T114): a stray Notification process would consume the run's sale events.
+    $occupied = Get-NetTCPConnection -LocalPort 8080, 8081, 8082, 8083, 8084 -State Listen -ErrorAction SilentlyContinue
     if ($occupied) { throw "Benchmark ports are in use: $(($occupied.LocalPort | Sort-Object -Unique) -join ', ')" }
     foreach ($artifact in @('out/common.jar', 'out/contracts.jar', 'out/transaction.jar', 'out/inventory.jar', 'out/analytics.jar', 'lib/messaging')) {
         if (-not (Test-Path (Join-Path $server $artifact))) { throw "Missing $artifact; run server/build.sh first" }

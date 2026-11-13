@@ -78,7 +78,7 @@ public abstract class TestSchema implements AutoCloseable {
                 try (Statement grants = admin.createStatement()) {
                     for (String from : List.of("localhost", "127.0.0.1")) {
                         grants.executeUpdate("CREATE USER '" + user + "'@'" + from + "' IDENTIFIED BY '" + password + "'");
-                        grants.executeUpdate("GRANT ALL PRIVILEGES ON `" + name + "`.* TO '" + user + "'@'" + from + "'");
+                        grants.executeUpdate("GRANT " + ownPrivileges() + " ON `" + name + "`.* TO '" + user + "'@'" + from + "'");
                     }
                 }
             }
@@ -94,6 +94,14 @@ public abstract class TestSchema implements AutoCloseable {
         }
         this.ownUser = user;
         this.ownPassword = password;
+    }
+
+    /**
+     * What {@code db/bootstrap.sql} grants this service's user on its own schema, so that a disposable own user holds
+     * exactly that. Called from the constructor: an override must return a constant.
+     */
+    protected String ownPrivileges() {
+        return "ALL PRIVILEGES";
     }
 
     private static String setting(String key, String fallback) {

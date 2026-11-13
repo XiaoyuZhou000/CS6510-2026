@@ -6,7 +6,6 @@ import events.TopicNames;
 import faults.FaultHooks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import support.CountingConnections;
 import support.InMemoryEventBus;
 import support.InProcessInventory;
 import support.InProcessNotification;
@@ -17,14 +16,18 @@ import support.ServiceHttp;
 import support.TestSchema;
 import support.TransactionTestSchema;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
 import java.net.http.HttpResponse;
+import java.sql.Connection;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -34,7 +37,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * Transaction (behind its own {@link TransactionHttpHandler}) and Inventory run over one {@link InMemoryEventBus}.
  * <ul>
  *   <li>With Notification stopped, one fixed script of Start, Scan, Lookup, and Complete requests, successes and errors,
- *       gets the same responses (IDs and times normalized), the same Transaction commits, and the same rows as on a
+ *       gets the same responses (IDs and times normalized), the same Transaction commits (apart from the outbox marker's
+ *       timing-dependent batching), and the same rows as on a
  *       deployment that has no Notification at all, as in 006. After Notification starts, every sale is selected
  *       once.</li>
  *   <li>With a slow Notification consumer (each selection waits 2 s before its commit), Complete latency is unchanged
@@ -159,7 +163,8 @@ class NotificationOutageCheckoutTest {
         final InventoryTestSchema inventorySchema;
         final TopicNames names = TopicNames.unprefixed();
         final InMemoryEventBus bus;
-        final CountingConnections counting = new CountingConnections();
+        /** Commits on every thread but the outbox marker (see {@link #countCommitsOutsideTheMarker}). */
+        final AtomicLong commits = new AtomicLong();
         final InProcessInventory inventory;
         final InProcessTransaction transaction;
         final HttpServer server;
@@ -171,8 +176,8 @@ class NotificationOutageCheckoutTest {
             transactionSchema.seedReplica(PRODUCTS, inventorySchema.seed(PRODUCTS, STOCK));
             bus = InMemoryEventBus.withCatalogTopics(names, 6510);
             inventory = InProcessInventory.over(inventorySchema, bus, names);
-            transaction = InProcessTransaction.over(transactionSchema).pool(4, 24).decorator(counting::wrap)
-                    .bus(bus, names).build();
+            transaction = InProcessTransaction.over(transactionSchema).pool(4, 24)
+                    .decorator(this::countCommitsOutsideTheMarker).bus(bus, names).build();
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
             server.createContext("/transactions", new TransactionHttpHandler(transaction.service));
@@ -185,12 +190,32 @@ class NotificationOutageCheckoutTest {
         }
 
         /**
+         * Counts the commits of every thread except the outbox dispatcher's marker. The marker gathers confirmations
+         * for up to {@code OUTBOX_MARK_BATCH_MS} before marking them published, so whether a sale's
+         * {@code CheckoutRequested} and {@code SaleCompleted} rows are marked in one commit or two depends on timing
+         * alone, in either run. The rows themselves are compared, and every one is published before the next request.
+         */
+        private Connection countCommitsOutsideTheMarker(Connection connection) {
+            return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[] {Connection.class},
+                    (proxy, method, args) -> {
+                        if (method.getName().equals("commit") && !Thread.currentThread().getName().endsWith("-outbox-marker")) {
+                            commits.incrementAndGet();
+                        }
+                        try {
+                            return method.invoke(connection, args);
+                        } catch (InvocationTargetException failure) {
+                            throw failure.getCause();
+                        }
+                    });
+        }
+
+        /**
          * One fixed script, each request after the previous one's effects settled (no pending attempt, nothing
          * unpublished), so that the commit count does not depend on batching.
          */
         Observed runScript() throws Exception {
             settle();
-            long commitsBefore = counting.total().commits();
+            long commitsBefore = commits.get();
             List<String> responses = new ArrayList<>();
             List<String> sales = new ArrayList<>();
             Map<String, String> ids = new LinkedHashMap<>();
@@ -220,8 +245,8 @@ class NotificationOutageCheckoutTest {
             sales.add(second);
             record(responses, ids, http.lookup(second), null);
 
-            long commits = counting.total().commits() - commitsBefore;
-            return new Observed(responses, commits, rows(), sales);
+            long scriptCommits = commits.get() - commitsBefore;
+            return new Observed(responses, scriptCommits, rows(), sales);
         }
 
         /** One sale of one unit of {@code sku}, its Complete latency in ms; returns after its effects settled. */

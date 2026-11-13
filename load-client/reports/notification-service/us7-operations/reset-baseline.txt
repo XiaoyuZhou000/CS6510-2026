@@ -1,0 +1,98 @@
+Resetting the broker...
+Broker stopped (pid 9052).
+Formatted C:\Users\18422\cs6510-tools\kafka_2.13-4.1.0\cs6510-data\kraft-logs
+Broker started (pid 51684, flush: broker default (page cache), data: C:\Users\18422\cs6510-tools\kafka_2.13-4.1.0\cs651
+0-data).
+selfcheckout.catalog.v1: 1 partitions, cleanup.policy=compact, retention.ms=-1
+selfcheckout.checkout.v1: 16 partitions, cleanup.policy=delete, retention.ms=604800000
+selfcheckout.checkout-outcome.v1: 16 partitions, cleanup.policy=delete, retention.ms=604800000
+selfcheckout.scan-accepted.v1: 1 partitions, cleanup.policy=delete, retention.ms=604800000
+selfcheckout.sale-completed.v1: 16 partitions, cleanup.policy=delete, retention.ms=604800000
+All topics match the event catalog.
+Broker reset: five empty topics, and no consumer group or committed offset.
+Removing the run directory C:\Users\18422\AppData\Local\Temp\claude\b2ca5daae22d3098\f509e8c0-59c1-4e19-9710-02574d5309
+6c\scratchpad\quickstart-1\runs\smoke...
+Resetting the service schemas...
+Resetting inventory schema 'cs6510_inventory' on 127.0.0.1:3307 as 'cs6510_inventory_svc'...
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\inventory\schema.sql
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\inventory\seed.sql
++---------------+----------------+-------------+---------------------+--------------------------------------+
+| catalog_items | inventory_rows | total_units | checkout_operations | catalog_version                      |
++---------------+----------------+-------------+---------------------+--------------------------------------+
+|          2000 |           2000 |    20000000 |                   0 | daf27003-df4e-11f1-8f43-00fffb1eae59 |
++---------------+----------------+-------------+---------------------+--------------------------------------+
+inventory schema reset.
+Resetting transaction schema 'cs6510_transaction' on 127.0.0.1:3307 as 'cs6510_transaction_svc'...
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\transaction\schema.sql
++--------------+----------------+-------------------+------------------+-----------------+
+| transactions | accepted_scans | checkout_attempts | replica_products | replica_version |
++--------------+----------------+-------------------+------------------+-----------------+
+|            0 |              0 |                 0 |                0 | NULL            |
++--------------+----------------+-------------------+------------------+-----------------+
+transaction schema reset.
+Resetting analytics schema 'cs6510_analytics' on 127.0.0.1:3307 as 'cs6510_analytics_svc'...
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\analytics\schema.sql
++----------------+---------------+---------------+-----------------+-----------------+
+| accepted_scans | last_position | product_names | popular_windows | last_window_end |
++----------------+---------------+---------------+-----------------+-----------------+
+|              0 |             0 |             0 |               0 |               0 |
++----------------+---------------+---------------+-----------------+-----------------+
+analytics schema reset.
+Resetting notification schema 'cs6510_notification' on 127.0.0.1:3307 as 'root'...
+  running E:\Wen\学习\NEU\CS6510\CS6510-2026\db\notification\schema.sql
++----------------------+-------------+---------------+----------------------+-----------------+---------------+---------------+
+| subscription_version | subscribers | subscriptions | subscription_changes | sale_selections | notifications | parked_events |
++----------------------+-------------+---------------+----------------------+-----------------+---------------+---------------+
+|                    0 |           0 |             0 |                    0 |               0 |             0 |             0 |
++----------------------+-------------+---------------+----------------------+-----------------+---------------+---------------+
+notification schema reset.
+Baseline:
+  catalog rows                       2000
+  inventory rows                     2000
+  stock units                        20000000
+  transactions                       0
+  Transaction accepted_scan rows     0
+  Analytics accepted_scan rows       0
+  Analytics last_position            0
+  Notification subscription version  0
+  Notification clock rows            1
+  Notification other rows            0
+All four service schemas are at the baseline.
+Baseline:
+  products                                         2000
+  stock rows                                       2000
+  stock units                                      20000000
+  Inventory checkout operations                    0
+  Inventory outbox rows                            0
+  Inventory parked events                          0
+  transactions                                     0
+  Transaction checkout attempts                    0
+  Transaction accepted scans                       0
+  Transaction outbox rows                          0
+  Transaction parked events                        0
+  Analytics accepted scans                         0
+  Analytics last_position                          0
+  Analytics parked events                          0
+  Analytics stored consumer offsets                0
+  Notification subscription version                0
+  Notification subscribers                         0
+  Notification subscriptions                       0
+  Notification subscription changes                0
+  Notification sale selections                     0
+  Notification notifications                       0
+  Notification parked events                       0
+  fixed topics                                     5
+  channel topics (selfcheckout.notify.*)           0
+  selfcheckout.catalog.v1 partitions               1
+  selfcheckout.catalog.v1 end offsets              0
+  selfcheckout.checkout.v1 partitions              16
+  selfcheckout.checkout.v1 end offsets             0
+  selfcheckout.checkout-outcome.v1 partitions      16
+  selfcheckout.checkout-outcome.v1 end offsets     0
+  selfcheckout.scan-accepted.v1 partitions         1
+  selfcheckout.scan-accepted.v1 end offsets        0
+  selfcheckout.sale-completed.v1 partitions        16
+  selfcheckout.sale-completed.v1 end offsets       0
+Topics: selfcheckout.catalog.v1, selfcheckout.checkout.v1, selfcheckout.checkout-outcome.v1, selfcheckout.scan-accepted
+.v1, selfcheckout.sale-completed.v1
+The broker and all four service schemas are at the baseline.

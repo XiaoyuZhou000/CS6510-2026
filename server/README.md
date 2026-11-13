@@ -7,8 +7,9 @@ Three independently built and deployed services, each with its own MySQL schema 
 | Transaction | `out/transaction.jar`, `transaction.TransactionMain` | 8081 (`TRANSACTION_PORT`) | `POST /transactions`, `POST /transactions/{id}/items`, `POST /transactions/{id}/complete`, `GET /transactions/{id}` | `cs6510_transaction` (`cs6510_transaction_svc`) |
 | Inventory | `out/inventory.jar`, `inventory.InventoryMain` | 8082 (`INVENTORY_PORT`) | `GET /items`, `GET /inventory/low-stock` | `cs6510_inventory` (`cs6510_inventory_svc`) |
 | Analytics | `out/analytics.jar`, `analytics.AnalyticsMain` | 8083 (`ANALYTICS_PORT`) | `GET /analytics/popular-items` | `cs6510_analytics` (`cs6510_analytics_svc`) |
+| Notification (feature 007) | `out/notification.jar`, `notification.NotificationMain` | 8084 (`NOTIFICATION_HTTP_PORT`) | `/notifications/**` ([below](#notification-service-feature-007)) | `cs6510_notification` (`cs6510_notification_svc`, rows only) |
 | Broker | Kafka 4.1.0 at `KAFKA_HOME`, `deploy/kafka/` | 19092 (clients), 19093 (controller) | none | `KAFKA_DATA_DIR` |
-| Gateway | `deploy/nginx.conf` | 8080 | the seven routes above | none |
+| Gateway | `deploy/nginx.conf` | 8080 | the seven routes above, plus `/notifications/` | none |
 
 No service has a gRPC port or reads a peer's host or port; the former gRPC ports 9092 and 9093 are gone.
 
@@ -25,6 +26,8 @@ No service has a gRPC port or reads a peer's host or port; the former gRPC ports
 | `selfcheckout.checkout.v1` | 16 | Transaction | Inventory (`inventory-checkout`) | `CheckoutRequested`, `StockRestorationRequested` |
 | `selfcheckout.checkout-outcome.v1` | 16 | Inventory | Transaction (`transaction-checkout-outcome`) | `StockDeducted`, `StockRejected`, `StockDeductionRefused`, `StockRestored`, `RestorationNotNeeded` |
 | `selfcheckout.scan-accepted.v1` | 1 | Transaction | Analytics (`analytics-scan-ingest`) | `ScanAccepted` |
+| `selfcheckout.sale-completed.v1` (007) | 16 | Transaction | Notification (`notification-sale-completed`) | `SaleCompleted` |
+| `selfcheckout.notify.<subscriberId>.v1` (007) | 1 each | Notification | the subscriber (no group) | `SubscriberNotified` |
 
 A record that cannot be processed after its retries is parked in the consuming service's own `dead_letter_event` table and its offset is committed. The event catalog gives every field, key, and idempotency rule.
 
@@ -46,7 +49,10 @@ From `server/`:
 ./build.sh transaction     # contracts → common → transaction only
 ./build.sh inventory       # contracts → common → inventory only
 ./build.sh analytics       # contracts → common → analytics only
+./build.sh notification    # contracts → common → notification only (007)
 ```
+
+`./build.sh` with no argument builds Notification too.
 
 1. Maven builds `contracts/pom.xml`. It generates the event classes from `contracts/src/main/proto/selfcheckout/events/v1/**`, the authoritative schemas, writes `out/contracts.jar`, and copies the messaging runtime (`kafka-clients` and its compression libraries, `protobuf-java`, `slf4j-simple`) to `lib/messaging/`, which is git-ignored. It deletes any `lib/grpc/` left by an older build and fails if a gRPC jar reaches the classpath.
 2. `javac --release 21` and `jar` build `out/common.jar`, then the requested service jars.
@@ -95,7 +101,9 @@ Every setting comes from the environment. Each service reads only its own `<SERV
 
 **Removed by feature 006**: `INVENTORY_GRPC_PORT`, `ANALYTICS_GRPC_PORT`, `INVENTORY_GRPC_TARGET`, `ANALYTICS_GRPC_TARGET`, `INVENTORY_RPC_DEADLINE_MS`, `ANALYTICS_RPC_DEADLINE_MS`, and `CATALOG_REFRESH_SECONDS`. `architecture.MicroserviceBoundaryTest` fails if a service source or run script reads any of them or a peer's address.
 
-- **Connection budget**: the maximum pools total 64 + 48 + 10 = 122 connections, below MySQL's default `max_connections` of 151. Check this budget before raising any pool.
+Notification's own variables are in [its section](#notification-service-feature-007).
+
+- **Connection budget**: the maximum pools total 64 + 48 + 10 + 20 = 142 connections with Notification (122 without it), below MySQL's default `max_connections` of 151. Check this budget before raising any pool.
 - **Port overrides**: the gateway map in `deploy/nginx.conf` assumes 8081, 8082, and 8083. Update it when you move a service's HTTP port. Services find each other only through the broker, so no other setting changes.
 
 ### Credential handling
@@ -196,6 +204,61 @@ If a query fails, the line reads `status service=<name> unavailable error=<excep
 | Analytics | Eligible windows not yet published | The highest boundary (1,000, 1,500, …) at or below `last_position`, compared with `analytics_checkpoint.last_window_end` |
 
 **Pending work is zero** when there are no pending attempts, no unpublished outbox rows or scans in any service, consumer lag is 0 for all three groups, and Analytics' checkpoint equals its highest eligible boundary. Parked events are reported separately; a benchmark run with any parked event is not comparable.
+
+## Notification Service (feature 007)
+
+Notification selects, once per completed sale, the subscribers of each sold SKU, stores one notification per (sale, SKU, subscriber), and publishes each to that subscriber's own channel topic. It consumes Transaction's `SaleCompleted` events and Inventory's catalog, never calls a peer, and nothing in checkout or Analytics waits for it. The contracts are in [specs/007-notification-service/contracts/](../specs/007-notification-service/contracts/).
+
+**Build and run** from `server/`:
+
+```bash
+./build.sh notification
+./run-notification.sh          # an optional numeric argument overrides NOTIFICATION_HTTP_PORT
+```
+
+`run-notification.sh` checks for `out/notification.jar`, `common.jar`, `contracts.jar`, `lib/messaging/`, and Connector/J, then runs `notification.NotificationMain` with no peer artifact on its classpath. It needs only MySQL and the broker: it starts while the other services are down, and they run without it (`integration.IndependentServiceDeploymentTest`). Start it after Inventory, so that its catalog is loaded before subscribers register; it replays the catalog topic at every start in any case.
+
+**Configuration** (every value from the environment; the defaults apply when unset or blank):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NOTIFICATION_HTTP_PORT` | 8084 | HTTP port; the gateway forwards `/notifications/` here |
+| `NOTIFICATION_DB_URL` | `jdbc:mysql://127.0.0.1:3307/cs6510_notification` | Only its host, port, and schema are read. `DB_HOST`, `DB_PORT`, and `NOTIFICATION_DB_NAME` work as for the other services. |
+| `NOTIFICATION_DB_USER`, `NOTIFICATION_DB_PASSWORD` | `cs6510_notification_svc`, none | Its own account, which may read and write rows only |
+| `NOTIFICATION_DB_POOL_SIZE`, `NOTIFICATION_DB_POOL_MAX_SIZE` | 12, 20 | Its pool, 20 of the 142-connection budget |
+| `NOTIFICATION_SALE_CONSUMER_THREADS` | 4 | Members of the `notification-sale-completed` group in this process |
+| `NOTIFICATION_LANE_IN_FLIGHT` | 64 | Sends in flight per subscriber channel |
+| `NOTIFICATION_PARK_AFTER_CHARGED` | 8 | Failures charged to one channel before its notification is parked |
+| `NOTIFICATION_SWEEP_MS` | 1000 | The dispatcher's sweep for due notifications that no signal reached |
+| `NOTIFICATION_TEST_FAULTS` | unset | `1` enables `POST /notifications/ops/faults` for the fault scenarios; never set it in a deployment |
+| `KAFKA_BOOTSTRAP`, `KAFKA_TOPIC_PREFIX` | as for the other services | |
+
+**Connection budget**: 64 (Transaction) + 48 (Inventory) + 10 (Analytics) + 20 (Notification) = 142 maximum connections, below MySQL's default `max_connections` of 151.
+
+**Password setup**: `db/bootstrap.ps1` creates `cs6510_notification` and `cs6510_notification_svc` with `SELECT, INSERT, UPDATE, DELETE` on that schema only. The password comes only from `NOTIFICATION_DB_PASSWORD`, which must be set before the bootstrap, and the service, the harness, and the live tests read it from the same variable. On Windows, keep it as a user-level environment variable and copy it into each shell; never pass it as a command argument. Because the user cannot change its own tables, `db/reset-service.ps1 -Service notification` (and so `db/reset-all.ps1` and `db/reset-baseline.ps1`) applies `db/notification/schema.sql` with the MySQL admin credentials (`DB_USER`, `DB_PASSWORD`), then reads the baseline as the Notification user. Every statement of the Notification user on another schema, and of another service user on Notification's schema, fails with error 1142 (`integration.DatabaseIsolationTest`).
+
+**Routes**:
+
+| Route | Meaning |
+|---|---|
+| `POST /notifications/subscribers` | Register `{"subscriberId", "skus"}`: 201 for a new or re-registering cancelled subscriber, 200 for a repeat with the same SKUs, 409 `SUBSCRIBER_EXISTS` for an active one with other SKUs ([all codes](../specs/007-notification-service/contracts/notification-http.md)) |
+| `GET`, `PATCH`, `DELETE /notifications/subscribers/{subscriberId}` | Read, change (`{"add": [...], "remove": [...]}`), and cancel a subscription; each change takes effect at its commit |
+| `GET /notifications/ops/status` | `subscriptionVersion`, `indexVersion`, `activeSubscribers`, `catalogLoaded`, `salesSelected`, `notifications` (`pending`, `delivered`, `parked`), `failures` (`charged`, `uncharged`), `parkedEvents`, `alarms`, `saleConsumerLag`, `lastConfirmedSendAt` |
+| `GET /notifications/ops/parked` | Parked notifications and parked sale events |
+| `POST /notifications/ops/parked/retry` | Moves parked notifications back to pending |
+| `POST /notifications/ops/faults` | Only with `NOTIFICATION_TEST_FAULTS=1`; otherwise 404 |
+
+The ops routes are not part of the public contract. While Notification is down, the gateway answers `/notifications/**` with its usual 502 and every other route is unaffected (`integration.GatewayServiceOutageTest`).
+
+**Status line**, every `STATUS_INTERVAL_SECONDS`:
+
+```
+status service=notification pending_work=no subscription_version=100 index_version=100 active_subscribers=100 catalog_loaded=true sales_selected=3872 notifications_pending=0 notifications_delivered=36737 notifications_parked=0 charged_failures=0 uncharged_failures=0 parked_events=0 sale_consumer_lag=0 last_confirmed_send=<time> alarms=none
+```
+
+**Channels**: Notification creates a subscriber's channel topic, `selfcheckout.notify.<subscriberId>.v1` with one partition, when it registers that subscriber. The baseline reset removes every channel topic, because it deletes the broker's whole log directory ([deploy/kafka/README.md](../deploy/kafka/README.md#topics)).
+
+**Restart**: stop it with Ctrl+C and rerun `run-notification.sh`. Sale events wait on their topic, and stored notifications are sent after the restart; a subscriber may receive a notification twice and keeps the first copy by its ID (`integration.RestartDuringWorkloadTest`). The subscriber test application and the reconciler are in [subscriber-client/](../subscriber-client/README.md), and the harness is `server/benchmark-notification.ps1`.
 
 ## Benchmarks
 

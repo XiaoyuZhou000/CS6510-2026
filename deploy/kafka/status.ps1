@@ -1,7 +1,8 @@
 ﻿<#
 .SYNOPSIS
     Prints the broker's operational state (FR-046): reachability, each topic's partitions and end
-    offsets, and the lag of the three consumer groups.
+    offsets, and the lag of the four consumer groups (006's three and Notification's
+    notification-sale-completed, 007).
 
 .DESCRIPTION
     Uses three Kafka tool runs (topics, end offsets, and consumer groups --all-groups). A group that

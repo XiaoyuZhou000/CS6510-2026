@@ -295,7 +295,8 @@ function Write-IdleGateLog([string]$Path, [string]$Text) {
 
 # The services' HTTP and gRPC ports, and the baseline harness's disposable gateway ports. Windows may
 # hand these out as client ports when its dynamic range starts low, and a service then cannot bind.
-$script:BenchmarkPorts = @(8080, 8081, 8082, 8083, 9092, 9093, 18080, 18081, 18082, 18083)
+# 8084 is Notification's (007 T114), so a 006 run refuses to start beside a stray Notification process.
+$script:BenchmarkPorts = @(8080, 8081, 8082, 8083, 8084, 9092, 9093, 18080, 18081, 18082, 18083)
 
 # Connections on a benchmark port that would stop a service from binding it, as "port (process)".
 # Between runs no benchmark process is running, so every such connection belongs to another program.

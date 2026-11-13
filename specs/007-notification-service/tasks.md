@@ -453,17 +453,17 @@ These rules bind every task below.
 
 ### Tests for User Story 7 ⚠️
 
-- [ ] T110 [P] [US7] Extend `server/tests/integration/DatabaseIsolationTest.java`: `cs6510_notification_svc` is denied every statement on the other three schemas, and each of the other three users is denied on `cs6510_notification`.
-- [ ] T111 [P] [US7] Extend `server/tests/integration/IndependentServiceDeploymentTest.java`: `server/build.sh notification` builds without building the service jars, and `server/run-notification.sh` starts with only the broker and MySQL running, answering `ops/status`.
-- [ ] T112 [P] [US7] Extend `server/tests/integration/ResetBaselineTest.java`: after `db/reset-baseline.ps1 -RunDir <tmp>`, Notification has clock 0 and empty tables, no `selfcheckout.notify.*` topic exists, exactly five fixed topics exist with zero end offsets, the run directory is gone, and 006's baseline assertions still hold.
-- [ ] T113 [P] [US7] Extend `server/tests/integration/RestartDuringWorkloadTest.java` with a Notification restart in the middle of a 30-second workload with 10 subscribers. Afterwards, every owed notification is delivered once in effect, and the other services served without error.
+- [X] T110 [P] [US7] Extend `server/tests/integration/DatabaseIsolationTest.java`: `cs6510_notification_svc` is denied every statement on the other three schemas, and each of the other three users is denied on `cs6510_notification`.
+- [X] T111 [P] [US7] Extend `server/tests/integration/IndependentServiceDeploymentTest.java`: `server/build.sh notification` builds without building the service jars, and `server/run-notification.sh` starts with only the broker and MySQL running, answering `ops/status`.
+- [X] T112 [P] [US7] Extend `server/tests/integration/ResetBaselineTest.java`: after `db/reset-baseline.ps1 -RunDir <tmp>`, Notification has clock 0 and empty tables, no `selfcheckout.notify.*` topic exists, exactly five fixed topics exist with zero end offsets, the run directory is gone, and 006's baseline assertions still hold.
+- [X] T113 [P] [US7] Extend `server/tests/integration/RestartDuringWorkloadTest.java` with a Notification restart in the middle of a 30-second workload with 10 subscribers. Afterwards, every owed notification is delivered once in effect, and the other services served without error.
 
 ### Implementation for User Story 7
 
-- [ ] T114 [US7] Extend `deploy/kafka/status.ps1` with the `notification-sale-completed` group lag. Extend `server/benchmark-event-based.ps1` and `server/benchmark-compare.ps1` port checks to include 8084, so 006 harnesses refuse to run beside a stray Notification process.
-- [ ] T115 [P] [US7] Add a Notification section to `server/README.md` (build, run, ports, the configuration table, the connection budget of 64 + 48 + 10 + 20 = 142, status fields, ops endpoints, and `NOTIFICATION_DB_PASSWORD` setup), and update `deploy/kafka/README.md` (the sale topic, channel topics created by Notification, and their removal by the reset).
-- [ ] T116 [P] [US7] Write `subscriber-client/README.md`: build, the options of `SubscriberMain` and `ChangeScenarioMain`, run-directory files, `ReconcileMain` modes and exit codes, the report fields, and its relationship to the unchanged Load Client.
-- [ ] T117 [US7] Run the US7 tests, then execute the baseline and independent-start checks of quickstart §1, recording them in `load-client/reports/notification-service/us7-operations.md`.
+- [X] T114 [US7] Extend `deploy/kafka/status.ps1` with the `notification-sale-completed` group lag. Extend `server/benchmark-event-based.ps1` and `server/benchmark-compare.ps1` port checks to include 8084, so 006 harnesses refuse to run beside a stray Notification process.
+- [X] T115 [P] [US7] Add a Notification section to `server/README.md` (build, run, ports, the configuration table, the connection budget of 64 + 48 + 10 + 20 = 142, status fields, ops endpoints, and `NOTIFICATION_DB_PASSWORD` setup), and update `deploy/kafka/README.md` (the sale topic, channel topics created by Notification, and their removal by the reset).
+- [X] T116 [P] [US7] Write `subscriber-client/README.md`: build, the options of `SubscriberMain` and `ChangeScenarioMain`, run-directory files, `ReconcileMain` modes and exit codes, the report fields, and its relationship to the unchanged Load Client.
+- [X] T117 [US7] Run the US7 tests, then execute the baseline and independent-start checks of quickstart §1, recording them in `load-client/reports/notification-service/us7-operations.md`.
 
 **Checkpoint**: Notification is operated like the other three services.
 

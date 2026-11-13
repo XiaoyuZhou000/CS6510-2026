@@ -25,7 +25,9 @@ $OutputEncoding = New-Object System.Text.UTF8Encoding $false
 $script:KafkaBootstrap = '127.0.0.1:19092'
 $script:KafkaPort = 19092
 $script:KafkaClusterId = 'Y3M2NTEwLWthZmthLTAwMQ'
-$script:KafkaGroups = @('inventory-checkout', 'transaction-checkout-outcome', 'analytics-scan-ingest')
+# 006's three groups, and Notification's sale consumer group (007 T114).
+$script:KafkaGroups = @('inventory-checkout', 'transaction-checkout-outcome', 'analytics-scan-ingest',
+    'notification-sale-completed')
 $script:KafkaToolClasses = @{
     'kafka-storage'         = 'kafka.tools.StorageTool'
     'kafka-topics'          = 'org.apache.kafka.tools.TopicCommand'

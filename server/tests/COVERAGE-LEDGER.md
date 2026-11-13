@@ -577,3 +577,11 @@ architecture/CompositionRootTest (Notification's composition root), messaging/Ev
 ### Signature changes only
 
 `CheckoutAttemptStore.complete` takes the sale's outbox row, and `CheckoutOutcomeHandler` takes `SaleEvents` and the outbox signal, so these call sites pass them without changing what they assert: integration/BoundedWaitTest, performance/TransactionCacheCorrectnessTest, unit/transaction/CheckoutDb, unit/transaction/CheckoutOutcomeHandlerTest, unit/transaction/CheckoutRecoveryWorkerTest, unit/transaction/TransactionServiceTest. Support classes: support/InMemoryEventBus and support/KafkaTestSupport (the fifth topic), support/InProcessTransaction (the sale topic in its dispatcher), integration/PublicRouterTestSupport (the Notification upstream's port).
+
+### Phase 9 (US7, T110–T113)
+
+| Test file (at `4a91686`) | Change | Reason |
+|---|---|---|
+| integration/ResetBaselineTest | `resetBaselineEmptiesEveryTopicAndSchema` also requires port 8084 to be free, passes `-RunDir`, and reads the script's output from a file instead of a pipe; after its unchanged 006 assertions it requires exactly the five fixed topics, no channel topic, Notification at clock 0 with empty tables, and the run directory removed | T112 (FR-036). The file avoids a read that never ends, because the broker restarted by the reset inherits the script's output handles |
+
+Assertions added only: integration/DatabaseIsolationTest (T110: `theNotificationUserAndTheOtherThreeAreDeniedEachOthersSchemas`, and the same against the deployed users), integration/IndependentServiceDeploymentTest (T111: `notificationBuildsAloneAndStartsWithOnlyTheBrokerAndMySql`), integration/RestartDuringWorkloadTest (T113: `restartingNotificationDuringAThirtySecondWorkloadDeliversEveryOwedNotificationOnce`). Support classes: support/TestSchema (`ownPrivileges()`, so that a disposable Notification user holds bootstrap's DML-only grant; the three 006 schemas keep `ALL PRIVILEGES`), support/ServiceProcesses (starts `notification`, with `NOTIFICATION_HTTP_PORT`, and scrubs `NOTIFICATION_DB_PASSWORD` too), support/LiveSchemas (`notification()`).
