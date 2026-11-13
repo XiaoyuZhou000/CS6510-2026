@@ -29,7 +29,7 @@ Start the four services (`server/run-*.sh`) and Nginx. **Expected**:
 
 ## Scenario A — Sale events without Notification Service (US1, SC-001)
 
-Stop Notification. Complete known baskets: 3×A + 1×B; a basket rejected for insufficient stock and then completed; a repeated Complete; and a checkout that completes in the background after the fault `checkout.afterRecordCompletion` (006). Run `db/export-notification-evidence.ps1 -RunDir runs/a` and `ReconcileMain --mode=fixed` with an empty snapshot. **Expected**: one `SaleCompleted` per COMPLETED transaction with matching lines, none for scans, pending or rejected attempts, or repeats; the check passes.
+Stop Notification. Complete known baskets: 3×A + 1×B; a basket rejected for insufficient stock and then completed; a repeated Complete; and a checkout that completes in the background after the fault `checkout.afterRecordCompletion` (006). Run `db/export-notification-evidence.ps1 -RunDir runs/a` and `ReconcileMain --mode=fixed` with an empty snapshot. **Expected**: one `SaleCompleted` per COMPLETED transaction with matching lines, none for scans, pending or rejected attempts, or repeats; the reconciler's `saleEvents` category is zero. Its overall verdict is FAIL with `selectionMismatch` equal to the number of sales, because without Notification no sale has a selection.
 
 ## Scenario B — Notify once per sold SKU (US2)
 

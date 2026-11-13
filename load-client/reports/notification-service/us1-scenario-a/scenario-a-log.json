@@ -1,0 +1,99 @@
+﻿{
+    "baskets":  {
+                    "multiUnit":  "86d97b56-18cd-4679-ab60-45385465a3b8",
+                    "rejectedThenCompleted":  "f02f0088-9dd4-466b-8f7d-795e9115a255",
+                    "scansOnly":  "dcd7a581-cbc8-445e-80fb-495d635dc0e3",
+                    "background":  "e6f72460-940e-4e86-88ff-804ae7a003b5"
+                },
+    "steps":  [
+                  {
+                      "step":  "3xA + 1xB",
+                      "transactionId":  "86d97b56-18cd-4679-ab60-45385465a3b8",
+                      "status":  200,
+                      "body":  {
+                                   "transactionId":  "86d97b56-18cd-4679-ab60-45385465a3b8",
+                                   "stationId":  "station-a1",
+                                   "itemCount":  4,
+                                   "totalAmount":  3.75,
+                                   "startedAt":  "2026-11-13T00:32:13.542Z",
+                                   "completedAt":  "2026-11-13T00:32:13.712Z",
+                                   "lines":  [
+                                                 {
+                                                     "sku":  "SKU-000001",
+                                                     "name":  "Item 1",
+                                                     "unitPrice":  0.85,
+                                                     "quantity":  3
+                                                 },
+                                                 {
+                                                     "sku":  "SKU-000002",
+                                                     "name":  "Item 2",
+                                                     "unitPrice":  1.20,
+                                                     "quantity":  1
+                                                 }
+                                             ]
+                               }
+                  },
+                  {
+                      "step":  "2xR with stock 1 (attempt 1)",
+                      "transactionId":  "f02f0088-9dd4-466b-8f7d-795e9115a255",
+                      "status":  409,
+                      "body":  {
+                                   "error":  "INSUFFICIENT_STOCK",
+                                   "message":  "Insufficient stock for SKU: SKU-000010"
+                               }
+                  },
+                  {
+                      "step":  "2xR with stock 2 (attempt 2)",
+                      "transactionId":  "f02f0088-9dd4-466b-8f7d-795e9115a255",
+                      "status":  200,
+                      "body":  {
+                                   "transactionId":  "f02f0088-9dd4-466b-8f7d-795e9115a255",
+                                   "stationId":  "station-a2",
+                                   "itemCount":  2,
+                                   "totalAmount":  8.00,
+                                   "startedAt":  "2026-11-13T00:32:13.767Z",
+                                   "completedAt":  "2026-11-13T00:32:13.884Z",
+                                   "lines":  [
+                                                 {
+                                                     "sku":  "SKU-000010",
+                                                     "name":  "Item 10",
+                                                     "unitPrice":  4.00,
+                                                     "quantity":  2
+                                                 }
+                                             ]
+                               }
+                  },
+                  {
+                      "step":  "repeated Complete of basket 1",
+                      "transactionId":  "86d97b56-18cd-4679-ab60-45385465a3b8",
+                      "status":  409,
+                      "body":  {
+                                   "error":  "TRANSACTION_NOT_OPEN",
+                                   "message":  "Transaction is not open: 86d97b56-18cd-4679-ab60-45385465a3b8"
+                               }
+                  },
+                  {
+                      "step":  "Complete with the 12 s hook delay",
+                      "transactionId":  "e6f72460-940e-4e86-88ff-804ae7a003b5",
+                      "status":  500,
+                      "body":  {
+                                   "error":  "INTERNAL_ERROR",
+                                   "message":  "Internal server error"
+                               }
+                  }
+              ],
+    "transactions":  [
+                         "86d97b56-18cd-4679-ab60-45385465a3b8\tCOMPLETED",
+                         "dcd7a581-cbc8-445e-80fb-495d635dc0e3\tOPEN",
+                         "e6f72460-940e-4e86-88ff-804ae7a003b5\tCOMPLETED",
+                         "f02f0088-9dd4-466b-8f7d-795e9115a255\tCOMPLETED"
+                     ],
+    "attempts":  [
+                     "86d97b56-18cd-4679-ab60-45385465a3b8\t1\tCOMPLETED\t\tSUCCESS",
+                     "e6f72460-940e-4e86-88ff-804ae7a003b5\t1\tCOMPLETED\t\tSUCCESS",
+                     "f02f0088-9dd4-466b-8f7d-795e9115a255\t1\tREJECTED\tINSUFFICIENT_STOCK\tREJECTED",
+                     "f02f0088-9dd4-466b-8f7d-795e9115a255\t2\tCOMPLETED\t\tSUCCESS"
+                 ],
+    "saleCompletedTopicRecords":  3,
+    "reconcileExitCode":  1
+}

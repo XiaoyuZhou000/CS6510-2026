@@ -168,8 +168,8 @@ These rules bind every task below.
 - [X] T031 [US1] Add `saleEventsUnpublished` (`COUNT(*) FROM outbox_event WHERE event_type = 'SaleCompleted' AND published_at IS NULL`) and `saleEventsTotal` to `server/transaction/src/database/TransactionStatusQueries.java`, show them in the Transaction status line, and extend `server/tests/database/ServiceStatusQueriesTest.java` to cover them.
 - [X] T032 [US1] Add the SC-001 invariant to `db/transaction/validate.sql`: the number of COMPLETED transactions equals the number of `SaleCompleted` outbox rows, and every COMPLETED transaction has exactly one row with `aggregate_key = CONCAT('sale:', transaction_id)`. Make `db/validate-invariants.ps1` report the check and fail on it.
 - [X] T033 [US1] Run `server/run-tests.sh unit database integration messaging architecture performance` and confirm that T020–T026 pass and every 006 test still passes.
-- [ ] T034 [US1] Execute quickstart scenario A by hand with the Notification process absent, and record the commands and results in `load-client/reports/notification-service/us1-scenario-a.md`.
-- [ ] T035 [US1] Run CP1: `server/benchmark-event-based.ps1` with this tree, default twice (`cp1-default-1`, `cp1-default-2`) and stress once (`cp1-stress-1`), under `load-client/reports/notification-service/cp1/`. Add the comparison with CP0 to `checkpoints.md`, and investigate and explain any drop of more than 5% before continuing (the design estimate is ≤ 3%, research N15).
+- [X] T034 [US1] Execute quickstart scenario A by hand with the Notification process absent, and record the commands and results in `load-client/reports/notification-service/us1-scenario-a.md`.
+- [X] T035 [US1] Run CP1: `server/benchmark-event-based.ps1` with this tree, default twice (`cp1-default-1`, `cp1-default-2`) and stress once (`cp1-stress-1`), under `load-client/reports/notification-service/cp1/`. Add the comparison with CP0 to `checkpoints.md`, and investigate and explain any drop of more than 5% before continuing (the design estimate is ≤ 3%, research N15).
 
 **Checkpoint**: completed sales are recorded and published exactly once; checkout behavior is otherwise unchanged.
 
