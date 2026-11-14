@@ -12,7 +12,9 @@
        to have a live member, then starts Nginx with deploy/nginx.conf.
     4. Starts SubscriberMain (--subscribers, --seed, --skus-per-subscriber) with <run>/subscribers as its run
        directory, and waits for ready.json.
-    5. (-Fault reject|stall arrives with T120; until then only -Fault none is accepted.)
+    5. With -Fault reject|stall (T120, SC-006), starts Notification with NOTIFICATION_TEST_FAULTS=1 and sets
+       notification.channel.<fault>:<FaultSubscriber> through ops/faults before the Load Client starts: every send to
+       that channel fails at once (reject) or after 10 s (stall). Step 7 then drains twice (below).
        -Disruption injects one fault of quickstart scenario F (T103), -DisruptAfterSeconds into the load:
          notification-selection-crash  ops/faults notification.selection.afterCommit:halt, then restart Notification;
          notification-send-crash       ops/faults notification.delivery.afterSend:halt, then restart Notification;
@@ -27,7 +29,10 @@
        --duration=120` (stress), sampling every 2 s into backlog.tsv: Transaction's unpublished SaleCompleted rows
        and pending checkout attempts, Notification's sale-consumer lag and pending notifications (ops/status), and the
        subscribers' channel lag (status.json).
-    7. Waits at most -DrainSeconds for the drain (FR-025): two consecutive samples with all of them zero.
+    7. Waits at most -DrainSeconds for the drain (FR-025): two consecutive samples with all of them zero. With a fault,
+       the first drain counts only the other subscribers' pending notifications (the faulted channel's failures stop
+       being charged once no other channel sends, so they never all park); then the harness clears the fault, calls
+       POST /notifications/ops/parked/retry, and waits at most -DrainSeconds again for the full drain.
     8. Saves the broker status, stops the subscriber application (stop file), the services, and Nginx, then runs
        db/validate-invariants.ps1, db/export-notification-evidence.ps1, and ReconcileMain --mode=fixed.
     9. Writes run.json, reconciliation.json, notification-report.json and .md, and moves the Load Client's report,
@@ -64,7 +69,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if ($Fault -ne 'none') { throw "-Fault $Fault is not implemented yet (T120); use -Fault none" }
+if ($Fault -ne 'none') {
+    if ($FaultSubscriber -notmatch '^[A-Za-z0-9_-]{1,40}$') { throw '-FaultSubscriber must be a subscriber ID such as sub-0001' }
+    if ($Disruption -ne 'none') { throw '-Fault and -Disruption cannot be combined' }
+}
+# An isolation run names its fault subscriber, the healthy ones too, so the report measures the same others (T125).
+$namedFaultSubscriber = if ($Fault -ne 'none' -or $PSBoundParameters.ContainsKey('FaultSubscriber')) { $FaultSubscriber } else { $null }
 # Nested names such as scaling/10 or isolation/reject-1 follow the evidence layout.
 if (-not $RunName -or $RunName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$' -or $RunName -match '(^|/)\.\.?(/|$)') {
     throw '-RunName is required: folder names of letters, digits, dot, underscore, and hyphen, separated by /'
@@ -138,6 +148,16 @@ function Get-OpsStatus {
 }
 
 $disruptionEvents = New-Object System.Collections.Generic.List[object]
+$faultEvents = New-Object System.Collections.Generic.List[object]
+
+# T120: sets (or with '' clears) Notification's test faults through ops/faults, and logs the step for run.json.
+function Set-NotificationFaults([string]$Value, [string]$Step) {
+    $body = @{ faults = $Value } | ConvertTo-Json -Compress
+    $null = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8084/notifications/ops/faults' -ContentType 'application/json' `
+        -Body $body -TimeoutSec 10
+    $faultEvents.Add([ordered]@{ utcMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); step = $Step })
+    Write-Host "[fault] $Step"
+}
 function Add-DisruptionEvent([string]$Step) {
     $disruptionEvents.Add([ordered]@{ utcMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); step = $Step })
     Write-Host "[disruption] $Step"
@@ -263,8 +283,9 @@ function Test-GroupsAssigned {
     return $true
 }
 
-# One backlog sample (research N11 "Drain"); returns it with drained = all five values known and zero.
-function Add-BacklogSample([string]$Phase) {
+# One backlog sample (research N11 "Drain"); returns it with drained = all five values known and zero. With
+# -OthersOnly (a faulted run's first drain), notificationsPending counts toward the drain only for the other subscribers.
+function Add-BacklogSample([string]$Phase, [switch]$OthersOnly) {
     $row = Get-ServiceRow 'transaction' ("SELECT (SELECT COUNT(*) FROM outbox_event WHERE event_type = 'SaleCompleted' " +
         "AND published_at IS NULL), (SELECT COUNT(*) FROM checkout_attempt WHERE state = 'PENDING')")
     $ops = Get-OpsStatus
@@ -282,6 +303,12 @@ function Add-BacklogSample([string]$Phase) {
     [IO.File]::AppendAllText($backlogFile, $line + "`n", (New-Object System.Text.UTF8Encoding $false))
     $zero = $true
     foreach ($field in @('saleEventsUnpublished', 'saleConsumerLag', 'notificationsPending', 'channelLag', 'pendingAttempts')) {
+        if ($OthersOnly -and $field -eq 'notificationsPending') {
+            $others = Get-ServiceRow 'notification' ("SELECT COUNT(*) FROM notification WHERE state = 'PENDING' " +
+                "AND subscriber_id <> '$FaultSubscriber'")
+            if ("$($others[0])" -ne '0') { $zero = $false }
+            continue
+        }
         if ("$($sample[$field])" -ne '0') { $zero = $false }
     }
     $sample['drained'] = $zero
@@ -291,6 +318,8 @@ function Add-BacklogSample([string]$Phase) {
 $result = [ordered]@{ clientOk = $false; subscriberReady = $false; drained = $false; validatorPassed = $false
     exported = $false; reconciliationPassed = $false }
 $drainElapsedSeconds = $null
+$firstDrainSeconds = $null
+$secondDrainSeconds = $null
 $clientReportPath = $null
 $report = $null
 $idle = $null
@@ -331,7 +360,7 @@ try {
     # 2. The run's environment, then the baseline (which also removes the subscriber directory).
     Set-ProcessEnv 'PERF_METRICS' 'true'
     foreach ($entry in $ExtraEnv.GetEnumerator()) { Set-ProcessEnv ([string]$entry.Key) ([string]$entry.Value) }
-    if ($Disruption -like 'notification-*') { Set-ProcessEnv 'NOTIFICATION_TEST_FAULTS' '1' }
+    if ($Disruption -like 'notification-*' -or $Fault -ne 'none') { Set-ProcessEnv 'NOTIFICATION_TEST_FAULTS' '1' }
     & (Join-Path $dbDir 'reset-baseline.ps1') -MySqlExe $mysql -KafkaHome $KafkaHome -RunDir $subscriberDir *> (Join-Path $out 'reset-baseline.txt')
     if ($LASTEXITCODE -ne 0) { throw "db/reset-baseline.ps1 failed; see $out/reset-baseline.txt" }
 
@@ -375,6 +404,11 @@ try {
     New-Item -ItemType Directory -Force -Path $reportsDir | Out-Null
     $before = @(Get-ChildItem $reportsDir -Filter 'report-*.json' | ForEach-Object Name)
     $null = Add-BacklogSample 'start'
+    if ($Fault -ne 'none') {
+        # 5. The faulted channel for the whole load (T120, SC-006).
+        $flag = "notification.channel.${Fault}:$FaultSubscriber"
+        Set-NotificationFaults $flag "fault $flag set before the load"
+    }
     if ($Disruption -eq 'notification-stopped') {
         # Scenario G (T109): the whole load runs without Notification. Every stop is a forced kill on Windows; before
         # the load Notification has no sale to work on.
@@ -415,16 +449,47 @@ try {
     $result.clientOk = $client.ExitCode -eq 0
     if (-not $result.clientOk) { Write-Host "Load client exited with code $($client.ExitCode)" -ForegroundColor Red }
 
-    # 7. Drain: two consecutive all-zero samples, within -DrainSeconds.
+    # 7. Drain: two consecutive all-zero samples, within -DrainSeconds. With a fault, the first drain is the other
+    # subscribers'; then the fault is cleared, parked notifications are retried, and the second drain is everyone's.
     $deadline = $clientEnded.AddSeconds($DrainSeconds)
     $zeroInRow = 0
     while ((Get-Date) -lt $deadline) {
-        $sample = Add-BacklogSample 'drain'
+        $sample = Add-BacklogSample 'drain' -OthersOnly:($Fault -ne 'none')
         if ($sample.drained) { $zeroInRow++ } else { $zeroInRow = 0 }
         if ($zeroInRow -ge 2) { $result.drained = $true; $drainElapsedSeconds = [Math]::Round(((Get-Date) - $clientEnded).TotalSeconds, 1); break }
         Start-Sleep -Seconds 2
     }
     if (-not $result.drained) { Write-Host "The run did not drain within $DrainSeconds s" -ForegroundColor Red }
+    if ($Fault -ne 'none') {
+        $firstDrainSeconds = $drainElapsedSeconds
+        $firstDrained = $result.drained
+        $ops = Get-OpsStatus
+        if ($ops) {
+            $faultEvents.Add([ordered]@{ utcMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                step = "after the first drain: pending $($ops.notifications.pending), parked $($ops.notifications.parked), charged $($ops.failures.charged), uncharged $($ops.failures.uncharged)" })
+        }
+        Set-NotificationFaults '' 'fault cleared after the first drain'
+        $retry = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8084/notifications/ops/parked/retry' -ContentType 'application/json' `
+            -Body '{}' -TimeoutSec 30
+        $faultEvents.Add([ordered]@{ utcMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            step = "ops/parked/retry: $($retry | ConvertTo-Json -Compress)" })
+        Write-Host "[fault] parked notifications retried: $($retry | ConvertTo-Json -Compress)"
+        $secondStarted = Get-Date
+        $deadline = $secondStarted.AddSeconds($DrainSeconds)
+        $zeroInRow = 0
+        $result.drained = $false
+        while ((Get-Date) -lt $deadline) {
+            $sample = Add-BacklogSample 'retry-drain'
+            if ($sample.drained) { $zeroInRow++ } else { $zeroInRow = 0 }
+            if ($zeroInRow -ge 2) {
+                $result.drained = $firstDrained
+                $secondDrainSeconds = [Math]::Round(((Get-Date) - $secondStarted).TotalSeconds, 1)
+                break
+            }
+            Start-Sleep -Seconds 2
+        }
+        if ($null -eq $secondDrainSeconds) { Write-Host "The run did not drain within $DrainSeconds s after the retry" -ForegroundColor Red }
+    }
 
     $newReports = @(Get-ChildItem $reportsDir -Filter 'report-*.json' | Where-Object { $before -notcontains $_.Name })
     if ($newReports.Count -eq 1) {
@@ -498,8 +563,12 @@ $runInfo = [ordered]@{
     subscribers = $Subscribers
     seed = if ($Seed) { [long]$Seed } else { $null }
     skusPerSubscriber = $SkusPerSubscriber
-    faults = 'none'
-    faultSubscriber = $null
+    faults = if ($Fault -eq 'none') { 'none' } else { "${Fault}:$FaultSubscriber" }
+    faultSubscriber = $namedFaultSubscriber
+    # The leading comma keeps a one-element array an array.
+    faultEvents = if ($faultEvents.Count -gt 0) { , $faultEvents.ToArray() } else { $null }
+    firstDrainSeconds = $firstDrainSeconds
+    secondDrainSeconds = $secondDrainSeconds
     disruption = if ($Disruption -eq 'none') { $null } else {
         [ordered]@{ kind = $Disruption; afterSeconds = $DisruptAfterSeconds; outageSeconds = $OutageSeconds
             # ToArray, not @(): Windows PowerShell 5.1 fails on @(<generic list>) inside a hashtable literal.

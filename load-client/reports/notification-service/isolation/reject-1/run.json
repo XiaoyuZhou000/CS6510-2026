@@ -1,0 +1,73 @@
+{
+    "harness":  "benchmark-notification",
+    "id":  "isolation/reject-1",
+    "startedAt":  "2026-11-13T12:22:28.6374075+00:00",
+    "deploymentCommit":  "b51830368a6f4e373cafe0315c5fa865239928b8",
+    "gitDirty":  true,
+    "workload":  "default",
+    "command":  "java -cp out Main",
+    "loadClient":  {
+                       "stations":  10,
+                       "durationSeconds":  60
+                   },
+    "subscribers":  100,
+    "seed":  20261111,
+    "skusPerSubscriber":  20,
+    "faults":  "reject:sub-0001",
+    "faultSubscriber":  "sub-0001",
+    "faultEvents":  [
+                        {
+                            "utcMs":  1794572661612,
+                            "step":  "fault notification.channel.reject:sub-0001 set before the load"
+                        },
+                        {
+                            "utcMs":  1794572731345,
+                            "step":  "after the first drain: pending 246, parked 0, charged 116, uncharged 2359"
+                        },
+                        {
+                            "utcMs":  1794572731349,
+                            "step":  "fault cleared after the first drain"
+                        },
+                        {
+                            "utcMs":  1794572731350,
+                            "step":  "ops/parked/retry: {\"retried\":0}"
+                        }
+                    ],
+    "firstDrainSeconds":  2.1,
+    "secondDrainSeconds":  8.2,
+    "disruption":  null,
+    "backgroundCompletions":  0,
+    "drainSeconds":  2.1,
+    "drainDeadlineSeconds":  300,
+    "extraEnv":  {
+
+                 },
+    "idleGate":  {
+                     "idleCpuCores":  2,
+                     "blockingProcesses":  [
+                                               "WardogsClient-Win64-Shipping",
+                                               "ROTTR",
+                                               "Arknights"
+                                           ],
+                     "backgroundCpuCores":  0.092,
+                     "blockingSeen":  [
+
+                                      ],
+                     "heaviest":  [
+                                      "rundll32=0.02",
+                                      "audiodg=0.02",
+                                      "asus_framework=0.01"
+                                  ],
+                     "passed":  true
+                 },
+    "subscriberExitCode":  0,
+    "validatorExitCode":  0,
+    "result":  {
+                   "clientOk":  true,
+                   "subscriberReady":  true,
+                   "drained":  true,
+                   "validatorPassed":  true,
+                   "exported":  true,
+                   "reconciliationPassed":  true
+               }
+}

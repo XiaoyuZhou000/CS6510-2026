@@ -114,6 +114,16 @@ With `--report-out=FILE`, `ReconcileMain` also writes the notification report as
 
 Rates use the active window, from the first to the last completed sale.
 
+## IsolationSummary
+
+```bash
+subscriber-client/run.sh IsolationSummary --dir=load-client/reports/notification-service/isolation
+```
+
+The SC-006 verdict of the isolation runs. Those are `server/benchmark-notification.ps1 -Fault none|reject|stall -FaultSubscriber sub-0001`, run into `isolation/{healthy,reject,stall}-<n>/`. For each mode it takes the median of the runs' `latencyMs.endToEndExcluding.p95` (the p95 end-to-end latency of every subscriber except `sub-0001`) and divides each faulted median by the healthy one. It passes when every mode has at least three runs, both ratios are at most 1.20, and every run reconciled with zero missing and zero duplicate notifications. A faulted run reconciles after the harness clears the fault and retries the parked notifications. It writes `README.md` in that folder. Exit codes: 0 PASS; 1 FAIL; 2 invalid arguments or an unreadable report.
+
+The harness records `faultSubscriber` for the healthy runs too, so their reports also give `endToEndExcluding`, over the same 99 subscribers.
+
 ## DecodeSaleEvents
 
 ```bash

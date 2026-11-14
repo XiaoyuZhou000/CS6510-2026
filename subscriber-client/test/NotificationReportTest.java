@@ -118,6 +118,17 @@ class NotificationReportTest {
         assertEquals("reject:sub-0001", section(report, "run").get("faults"));
     }
 
+    /** A healthy isolation run (T125) names the same subscriber, so its other subscribers are measured the same way. */
+    @Test
+    void healthyIsolationRunsReportLatencyExcludingTheNamedSubscriber(@TempDir Path dir) throws Exception {
+        Map<String, Object> report = report(SyntheticRun.create(dir, "none", "sub-0001"));
+        Map<String, Object> excluding = section(report, "latencyMs", "endToEndExcluding");
+        assertEquals("sub-0001", excluding.get("subscriberId"));
+        assertEquals(30L, excluding.get("p50"));
+        assertEquals(40L, excluding.get("p95"));
+        assertEquals("none", section(report, "run").get("faults"));
+    }
+
     @Test
     void backlogAndDeliveryFailures(@TempDir Path dir) throws Exception {
         Path run = SyntheticRun.create(dir);

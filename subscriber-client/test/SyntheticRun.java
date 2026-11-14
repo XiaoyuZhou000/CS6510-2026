@@ -43,6 +43,11 @@ final class SyntheticRun {
     }
 
     static Path create(Path dir, String faults) throws IOException {
+        return create(dir, faults, faults.contains(":") ? faults.substring(faults.indexOf(':') + 1) : null);
+    }
+
+    /** With {@code faultSubscriber} recorded in {@code run.json} as given, as the harness does for a healthy isolation run. */
+    static Path create(Path dir, String faults, String faultSubscriber) throws IOException {
         Path subscribers = Files.createDirectories(dir.resolve("subscribers"));
         Path exports = Files.createDirectories(dir.resolve("exports"));
         List<String> catalog = new ArrayList<>();
@@ -120,7 +125,6 @@ final class SyntheticRun {
                 T0 + "\tload\t2\t5\t7\t3",
                 (T0 + 2_000) + "\tload\t9\t1\t4\t11",
                 (T0 + 4_000) + "\tdrain\t0\t0\t0\t0"));
-        String faultSubscriber = faults.contains(":") ? faults.substring(faults.indexOf(':') + 1) : null;
         Files.writeString(dir.resolve("run.json"), Json.pretty(Json.object(
                 "id", "synthetic",
                 "startedAt", Instant.ofEpochMilli(T0 - 10_000).toString(),

@@ -1,0 +1,73 @@
+{
+    "harness":  "benchmark-notification",
+    "id":  "isolation/stall-3",
+    "startedAt":  "2026-11-14T00:14:06.3781128+00:00",
+    "deploymentCommit":  "b51830368a6f4e373cafe0315c5fa865239928b8",
+    "gitDirty":  true,
+    "workload":  "default",
+    "command":  "java -cp out Main",
+    "loadClient":  {
+                       "stations":  10,
+                       "durationSeconds":  60
+                   },
+    "subscribers":  100,
+    "seed":  20261111,
+    "skusPerSubscriber":  20,
+    "faults":  "stall:sub-0001",
+    "faultSubscriber":  "sub-0001",
+    "faultEvents":  [
+                        {
+                            "utcMs":  1794615325199,
+                            "step":  "fault notification.channel.stall:sub-0001 set before the load"
+                        },
+                        {
+                            "utcMs":  1794615397046,
+                            "step":  "after the first drain: pending 248, parked 0, charged 369, uncharged 0"
+                        },
+                        {
+                            "utcMs":  1794615397061,
+                            "step":  "fault cleared after the first drain"
+                        },
+                        {
+                            "utcMs":  1794615397062,
+                            "step":  "ops/parked/retry: {\"retried\":0}"
+                        }
+                    ],
+    "firstDrainSeconds":  2.1,
+    "secondDrainSeconds":  14.4,
+    "disruption":  null,
+    "backgroundCompletions":  0,
+    "drainSeconds":  2.1,
+    "drainDeadlineSeconds":  300,
+    "extraEnv":  {
+
+                 },
+    "idleGate":  {
+                     "idleCpuCores":  2,
+                     "blockingProcesses":  [
+                                               "WardogsClient-Win64-Shipping",
+                                               "ROTTR",
+                                               "Arknights"
+                                           ],
+                     "backgroundCpuCores":  0.258,
+                     "blockingSeen":  [
+
+                                      ],
+                     "heaviest":  [
+                                      "claude=0.16",
+                                      "wallpaper32=0.03",
+                                      "rundll32=0.02"
+                                  ],
+                     "passed":  true
+                 },
+    "subscriberExitCode":  0,
+    "validatorExitCode":  0,
+    "result":  {
+                   "clientOk":  true,
+                   "subscriberReady":  true,
+                   "drained":  true,
+                   "validatorPassed":  true,
+                   "exported":  true,
+                   "reconciliationPassed":  true
+               }
+}

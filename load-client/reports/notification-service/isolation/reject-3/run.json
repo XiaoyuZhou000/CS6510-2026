@@ -1,0 +1,73 @@
+{
+    "harness":  "benchmark-notification",
+    "id":  "isolation/reject-3",
+    "startedAt":  "2026-11-13T12:41:51.4494484+00:00",
+    "deploymentCommit":  "b51830368a6f4e373cafe0315c5fa865239928b8",
+    "gitDirty":  true,
+    "workload":  "default",
+    "command":  "java -cp out Main",
+    "loadClient":  {
+                       "stations":  10,
+                       "durationSeconds":  60
+                   },
+    "subscribers":  100,
+    "seed":  20261111,
+    "skusPerSubscriber":  20,
+    "faults":  "reject:sub-0001",
+    "faultSubscriber":  "sub-0001",
+    "faultEvents":  [
+                        {
+                            "utcMs":  1794573828695,
+                            "step":  "fault notification.channel.reject:sub-0001 set before the load"
+                        },
+                        {
+                            "utcMs":  1794573898877,
+                            "step":  "after the first drain: pending 205, parked 0, charged 177, uncharged 1867"
+                        },
+                        {
+                            "utcMs":  1794573898888,
+                            "step":  "fault cleared after the first drain"
+                        },
+                        {
+                            "utcMs":  1794573898890,
+                            "step":  "ops/parked/retry: {\"retried\":0}"
+                        }
+                    ],
+    "firstDrainSeconds":  2.1,
+    "secondDrainSeconds":  10.3,
+    "disruption":  null,
+    "backgroundCompletions":  0,
+    "drainSeconds":  2.1,
+    "drainDeadlineSeconds":  300,
+    "extraEnv":  {
+
+                 },
+    "idleGate":  {
+                     "idleCpuCores":  2,
+                     "blockingProcesses":  [
+                                               "WardogsClient-Win64-Shipping",
+                                               "ROTTR",
+                                               "Arknights"
+                                           ],
+                     "backgroundCpuCores":  1.242,
+                     "blockingSeen":  [
+                                          "Arknights"
+                                      ],
+                     "heaviest":  [
+                                      "Arknights=0.66",
+                                      "WeChatAppEx=0.26",
+                                      "claude=0.14"
+                                  ],
+                     "passed":  false
+                 },
+    "subscriberExitCode":  0,
+    "validatorExitCode":  0,
+    "result":  {
+                   "clientOk":  true,
+                   "subscriberReady":  true,
+                   "drained":  true,
+                   "validatorPassed":  true,
+                   "exported":  true,
+                   "reconciliationPassed":  true
+               }
+}

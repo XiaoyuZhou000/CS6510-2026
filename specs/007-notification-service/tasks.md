@@ -477,29 +477,29 @@ These rules bind every task below.
 
 ### Tests for User Story 8 ⚠️
 
-- [ ] T118 [P] [US8] Extend `server/tests/architecture/ArchitectureDiagramConsistencyTest.java` to read `docs/architecture/notification-service.md` and require four services with their databases, the five fixed topics with producer and consumer edges matching `EventTypes` and `TopicNames`, the channel family `selfcheckout.notify.<subscriberId>.v1` from Notification to the subscriber test application, and no synchronous service-to-service edge.
-- [ ] T119 [P] [US8] Write `subscriber-client/test/IsolationSummaryTest.java` for the `IsolationSummary` tool of T125: the median of three `endToEndExcluding.p95` values per mode, the ratio against the healthy median, and a pass when it is ≤ 1.20 with zero missing or duplicate notifications for the 99.
+- [X] T118 [P] [US8] Extend `server/tests/architecture/ArchitectureDiagramConsistencyTest.java` to read `docs/architecture/notification-service.md` and require four services with their databases, the five fixed topics with producer and consumer edges matching `EventTypes` and `TopicNames`, the channel family `selfcheckout.notify.<subscriberId>.v1` from Notification to the subscriber test application, and no synchronous service-to-service edge.
+- [X] T119 [P] [US8] Write `subscriber-client/test/IsolationSummaryTest.java` for the `IsolationSummary` tool of T125: the median of three `endToEndExcluding.p95` values per mode, the ratio against the healthy median, and a pass when it is ≤ 1.20 with zero missing or duplicate notifications for the 99.
 
 ### Implementation for User Story 8
 
-- [ ] T120 [US8] Implement `-Fault none|reject|stall` and `-FaultSubscriber` in `server/benchmark-notification.ps1`, so step 5 and the second drain of step 7 work:
+- [X] T120 [US8] Implement `-Fault none|reject|stall` and `-FaultSubscriber` in `server/benchmark-notification.ps1`, so step 5 and the second drain of step 7 work:
   - start Notification with `NOTIFICATION_TEST_FAULTS=1`, but only for faulted runs;
   - set `notification.channel.<fault>:<id>` before the Load Client starts, and clear it after the first drain;
   - call `POST /notifications/ops/parked/retry`, then wait for the second drain;
   - record the fault in `run.faults`.
 
   Make `NotificationReport` compute `endToEndExcluding` for the faulted subscriber, over the first drain's receipts of the other subscribers.
-- [ ] T121 [P] [US8] Write `docs/architecture/notification-service.md` (a Mermaid flowchart: gateway → four services; each service → its own database; Kafka with the five fixed topics and the channel family; producer and consumer edges as in the event catalogs; the subscriber test application with N threads; the Load Client), and export it to `docs/architecture/notification-service.svg`.
-- [ ] T122 [US8] Run CP2 (full system with 100 subscribers): `server/benchmark-notification.ps1 -Subscribers 100 -Seed 20261111`, default twice and stress once, under `load-client/reports/notification-service/cp2/`, and compare with CP1 in `checkpoints.md`, investigating any drop of more than 5% in `totalTransactions`.
-- [ ] T123 [US8] Optional CP3: an interleaved A/B with `server/benchmark-compare.ps1` of `NOTIFICATION_SALE_CONSUMER_THREADS` 4 vs 8, `NOTIFICATION_LANE_IN_FLIGHT` 32 vs 64, and a marking interval of 20 ms vs 50 ms, each default × 2 per side, under `cp3-*/`. Adopt a setting only if it improves `totalTransactions` or p95 notification latency by ≥ 5% with no reconciliation failure, and record the decision in `checkpoints.md`.
-- [ ] T124 [US8] Run the scaling evidence: `server/benchmark-notification.ps1 -Workload default -Seed 20261111 -SkusPerSubscriber 20` with `-Subscribers` 10, 25, 50, and 100, each after a fresh baseline, into `load-client/reports/notification-service/scaling/{10,25,50,100}/`.
-- [ ] T125 [US8] Create `subscriber-client/src/IsolationSummary.java` (it reads `isolation/*/notification-report.json` and writes `isolation/README.md` with the per-mode medians, the ratios, and the SC-006 verdict). Run the isolation evidence, 3 × `-Fault none`, 3 × `-Fault reject`, and 3 × `-Fault stall`, interleaved in the order healthy, reject, stall, with `-Subscribers 100 -Seed 20261111 -FaultSubscriber sub-0001 -Workload default`, into `isolation/{healthy,reject,stall}-{1,2,3}/`, then run `IsolationSummary`.
-- [ ] T126 [US8] Run CP4, the official standard reports with 100 subscribers, each after a fresh baseline:
+- [X] T121 [P] [US8] Write `docs/architecture/notification-service.md` (a Mermaid flowchart: gateway → four services; each service → its own database; Kafka with the five fixed topics and the channel family; producer and consumer edges as in the event catalogs; the subscriber test application with N threads; the Load Client), and export it to `docs/architecture/notification-service.svg`.
+- [X] T122 [US8] Run CP2 (full system with 100 subscribers): `server/benchmark-notification.ps1 -Subscribers 100 -Seed 20261111`, default twice and stress once, under `load-client/reports/notification-service/cp2/`, and compare with CP1 in `checkpoints.md`, investigating any drop of more than 5% in `totalTransactions`.
+- [X] T123 [US8] Optional CP3: an interleaved A/B with `server/benchmark-compare.ps1` of `NOTIFICATION_SALE_CONSUMER_THREADS` 4 vs 8, `NOTIFICATION_LANE_IN_FLIGHT` 32 vs 64, and a marking interval of 20 ms vs 50 ms, each default × 2 per side, under `cp3-*/`. Adopt a setting only if it improves `totalTransactions` or p95 notification latency by ≥ 5% with no reconciliation failure, and record the decision in `checkpoints.md`. **Not run**: recorded as skipped, with the reason, in `checkpoints.md` (CP3).
+- [X] T124 [US8] Run the scaling evidence: `server/benchmark-notification.ps1 -Workload default -Seed 20261111 -SkusPerSubscriber 20` with `-Subscribers` 10, 25, 50, and 100, each after a fresh baseline, into `load-client/reports/notification-service/scaling/{10,25,50,100}/`.
+- [X] T125 [US8] Create `subscriber-client/src/IsolationSummary.java` (it reads `isolation/*/notification-report.json` and writes `isolation/README.md` with the per-mode medians, the ratios, and the SC-006 verdict). Run the isolation evidence, 3 × `-Fault none`, 3 × `-Fault reject`, and 3 × `-Fault stall`, interleaved in the order healthy, reject, stall, with `-Subscribers 100 -Seed 20261111 -FaultSubscriber sub-0001 -Workload default`, into `isolation/{healthy,reject,stall}-{1,2,3}/`, then run `IsolationSummary`.
+- [X] T126 [US8] Run CP4, the official standard reports with 100 subscribers, each after a fresh baseline:
   - `-Workload default` → copy its Load Client report to `load-client/reports/notification-service/default-report.json` and its notification report and reconciliation to `default-notification-report.{json,md}` and `default-reconciliation.json`;
   - `-Workload stress` → `stress-report.json`, `stress-notification-report.{json,md}`, and `stress-reconciliation.json`.
 
   Run `db/validate-invariants.ps1` after each, and record it.
-- [ ] T127 [US8] Write `load-client/reports/notification-service/README.md`:
+- [X] T127 [US8] Write `load-client/reports/notification-service/README.md`:
   - an index of every committed run;
   - a table per subscriber count of sales/s, delivered/s, received/s, p50/p95/p99, failures, and maximum backlog;
   - the default and stress `totalTransactions`, throughput, error rates, and p95/p99 compared with `load-client/reports/event-based-architecture/default-report.json` and `stress-report.json`;

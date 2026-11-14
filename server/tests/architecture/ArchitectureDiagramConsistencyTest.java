@@ -32,11 +32,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * consumer edge per event type of {@link EventTypes}, and the consumer groups of the event catalog. Every edge must
  * be one of the allowed kinds, so no edge connects two services or a service to another service's schema. The
  * exported SVG must exist, name every topic and group, and be at least as recent as the Mermaid source.
+ *
+ * <p>007 (T118) adds the same checks for {@code docs/architecture/notification-service.md}: four services and their
+ * schemas, the five fixed topics with every producer and consumer edge of the 006 catalog and 007's sale event
+ * contract, the channel family {@code selfcheckout.notify.<subscriberId>.v1} from Notification to the subscriber test
+ * application, and no synchronous service-to-service edge.</p>
  */
 class ArchitectureDiagramConsistencyTest {
     private static final String DIAGRAM = "docs/architecture/event-based-architecture.md";
     private static final String SVG = "docs/architecture/event-based-architecture.svg";
     private static final List<String> SERVICES = List.of(EventTypes.TRANSACTION, EventTypes.INVENTORY, "analytics");
+    /** 007 (T118): the Notification diagram, its export, its four services, and its two client-side nodes. */
+    private static final String NOTIFICATION_DIAGRAM = "docs/architecture/notification-service.md";
+    private static final String NOTIFICATION_SVG = "docs/architecture/notification-service.svg";
+    private static final List<String> NOTIFICATION_SERVICES = List.of(EventTypes.TRANSACTION, EventTypes.INVENTORY,
+            "analytics", EventTypes.NOTIFICATION);
+    private static final String CHANNEL_FAMILY = "selfcheckout.notify.<subscriberId>.v1";
+    private static final String SUBSCRIBER_APPLICATION = "Subscriber test application";
     private static final Pattern NODE = Pattern.compile("^(\\w+)\\s*[\\[({]+\"(.*)\"[\\])}]+$");
     private static final Pattern SUBGRAPH = Pattern.compile("^subgraph\\s+(\\w+)\\s*\\[\"(.*)\"]$");
     private static final Pattern EDGE = Pattern.compile("^(\\w+)\\s*(?:-->|-\\.->|==>)\\s*(?:\\|\"(.*?)\"\\|\\s*)?(\\w+)$");
@@ -265,6 +277,10 @@ class ArchitectureDiagramConsistencyTest {
 
     /** The gateway's listen port and each service's upstream port, from {@code deploy/nginx.conf}. */
     private static Map<String, String> servicePorts() throws IOException {
+        return servicePorts(SERVICES);
+    }
+
+    private static Map<String, String> servicePorts(List<String> services) throws IOException {
         String config = Files.readString(repositoryRoot().resolve("deploy/nginx.conf"), StandardCharsets.UTF_8);
         Map<String, String> ports = new LinkedHashMap<>();
         Matcher listen = LISTEN.matcher(config);
@@ -272,7 +288,7 @@ class ArchitectureDiagramConsistencyTest {
         ports.put("gateway", listen.group(1));
         Matcher upstream = UPSTREAM.matcher(config);
         while (upstream.find()) ports.put(upstream.group(1), upstream.group(2));
-        for (String service : SERVICES) assertTrue(ports.containsKey(service), "nginx.conf has an upstream for " + service);
+        for (String service : services) assertTrue(ports.containsKey(service), "nginx.conf has an upstream for " + service);
         return ports;
     }
 
@@ -296,13 +312,221 @@ class ArchitectureDiagramConsistencyTest {
         return rows;
     }
 
-    /** Parses the first {@code mermaid} block of the diagram page: node, subgraph, and edge lines. */
+    /**
+     * 007 (T118): {@code topic -> [producer, then for each consumer: consumer service, group or "manual assignment"]}
+     * for the five fixed topics: the 006 event catalog's rows, plus the additions of 007's sale event contract (the
+     * sale topic, and Notification as a second reader of the catalog topic). The channel family is not in it.
+     */
+    private static Map<String, List<String[]>> notificationTopics() throws IOException {
+        Map<String, List<String[]>> topics = new LinkedHashMap<>();
+        for (Map.Entry<String, String[]> row : catalogTopics().entrySet()) {
+            String[] cells = row.getValue();
+            topics.put(row.getKey(), new ArrayList<>(List.of(new String[] {cells[0]},
+                    new String[] {cells[1], cells[2].isEmpty() ? "manual assignment" : cells[2]})));
+        }
+        Path file = repositoryRoot().resolve("specs/007-notification-service/contracts/sale-completed-event.md");
+        boolean inTable = false;
+        for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+            if (line.startsWith("## ")) inTable = line.startsWith("## Topics");
+            if (!inTable || !line.startsWith("| `")) continue;
+            String[] cells = line.split("\\|");
+            String topic = cells[1].trim().replaceAll("`|\\s*\\(.*", "");
+            if (topic.contains(".notify.")) continue;
+            String consumerCell = cells[6].trim().replace("**added**:", "").trim();
+            String consumer = consumerCell.split("\\s+")[0].toLowerCase(Locale.ROOT);
+            // A manual reader's cell may hold other code spans (such as `KnownSkus`), so it is recognized first.
+            Matcher group = Pattern.compile("`([^`]+)`").matcher(consumerCell);
+            String mode = consumerCell.contains("manual assignment") || !group.find() ? "manual assignment" : group.group(1);
+            String[] reader = {consumer, mode};
+            if (topics.containsKey(topic)) {
+                topics.get(topic).add(reader);
+            } else {
+                topics.put(topic, new ArrayList<>(List.of(new String[] {cells[5].trim().toLowerCase(Locale.ROOT)}, reader)));
+            }
+        }
+        return topics;
+    }
+
+    @Test
+    void theNotificationDiagramShowsFourServicesTheirSchemasTheFiveTopicsAndTheChannels() throws Exception {
+        Diagram diagram = diagram(NOTIFICATION_DIAGRAM);
+        Map<String, String> ports = servicePorts(NOTIFICATION_SERVICES);
+        Node gateway = diagram.labelled("Nginx");
+        assertTrue(plain(gateway.label()).contains(ports.get("gateway")), "the gateway shows port " + ports.get("gateway"));
+        for (String service : NOTIFICATION_SERVICES) {
+            Node node = serviceNode(diagram, service);
+            assertTrue(plain(node.label()).contains(ports.get(service)), node.label() + " shows port " + ports.get(service));
+            Node schema = diagram.labelled(schemaName(service));
+            for (String table : eventTables(service)) {
+                assertNotNull(tableNode(diagram, schema, table), schemaName(service) + " shows its " + table + " table");
+            }
+        }
+        Node broker = diagram.labelled("Kafka");
+        TopicNames names = TopicNames.unprefixed();
+        assertEquals(5, names.all().size(), "five fixed topics");
+        assertEquals(new TreeSet<>(names.all()), new TreeSet<>(notificationTopics().keySet()),
+                "the 006 catalog and 007's additions list the topics of TopicNames");
+        for (String topic : names.all()) assertTrue(diagram.within(diagram.labelled(topic), broker), topic + " is inside the broker");
+        Node channels = diagram.labelled(CHANNEL_FAMILY);
+        assertTrue(diagram.within(channels, broker), "the channel family is inside the broker");
+        assertTrue(names.channel("sub-0001").startsWith("selfcheckout.notify.") && names.channel("sub-0001").endsWith(".v1"),
+                "TopicNames names channels as " + CHANNEL_FAMILY);
+    }
+
+    /**
+     * Every event type of {@link EventTypes} on a fixed topic has its producer edge and an edge to each consumer of the
+     * topic naming its group or mode; {@code SubscriberNotified} goes from Notification to the channel family, and the
+     * channels to the subscriber test application, one thread per subscriber.
+     */
+    @Test
+    void everyEventTypeOfTheNotificationDiagramHasItsProducerAndConsumerEdges() throws Exception {
+        Diagram diagram = diagram(NOTIFICATION_DIAGRAM);
+        Map<String, List<String[]>> topics = notificationTopics();
+        Set<String> groups = new TreeSet<>();
+        for (List<String[]> row : topics.values()) {
+            for (String[] reader : row.subList(1, row.size())) if (!reader[1].equals("manual assignment")) groups.add(reader[1]);
+        }
+        assertEquals(new TreeSet<>(Set.of(TopicNames.INVENTORY_CHECKOUT_GROUP, TopicNames.TRANSACTION_CHECKOUT_OUTCOME_GROUP,
+                TopicNames.ANALYTICS_SCAN_INGEST_GROUP, TopicNames.NOTIFICATION_SALE_COMPLETED_GROUP)), groups,
+                "the contracts name the four consumer groups of TopicNames");
+        List<String> violations = new ArrayList<>();
+        for (EventTypes type : EventTypes.values()) {
+            if (type.topic().isEmpty()) continue;
+            String topic = TopicNames.unprefixed().name(type.topic().get());
+            List<String[]> row = topics.get(topic);
+            if (!row.get(0)[0].equals(type.producer())) violations.add(type + ": contract producer " + row.get(0)[0]);
+            Node topicNode = diagram.labelled(topic);
+            if (diagram.between(serviceNode(diagram, type.producer()), topicNode).stream()
+                    .noneMatch(edge -> plain(edge.label()).contains(type.typeName()))) {
+                violations.add("no edge " + type.producer() + " --> " + topic + " labelled " + type.typeName());
+            }
+            for (String[] reader : row.subList(1, row.size())) {
+                List<Edge> consumed = diagram.between(topicNode, serviceNode(diagram, reader[0]));
+                if (consumed.stream().noneMatch(edge -> plain(edge.label()).contains(type.typeName())
+                        && plain(edge.label()).contains(reader[1]))) {
+                    violations.add("no edge " + topic + " --> " + reader[0] + " labelled " + type.typeName() + " and " + reader[1]);
+                }
+            }
+        }
+        Node channels = diagram.labelled(CHANNEL_FAMILY);
+        Node subscribers = diagram.labelled(SUBSCRIBER_APPLICATION);
+        String notified = EventTypes.SUBSCRIBER_NOTIFIED.typeName();
+        assertEquals(EventTypes.NOTIFICATION, EventTypes.SUBSCRIBER_NOTIFIED.producer());
+        if (diagram.between(serviceNode(diagram, EventTypes.NOTIFICATION), channels).stream()
+                .noneMatch(edge -> plain(edge.label()).contains(notified))) {
+            violations.add("no edge notification --> the channel family labelled " + notified);
+        }
+        if (diagram.between(channels, subscribers).stream().noneMatch(edge -> plain(edge.label()).contains(notified)
+                && plain(edge.label()).contains("one thread per subscriber"))) {
+            violations.add("no edge from the channel family to the subscriber test application, one thread per subscriber");
+        }
+        assertTrue(plain(subscribers.label()).contains("N subscriber threads"), subscribers.label());
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    /**
+     * Every edge of the 007 diagram is a client's request to the gateway (the Load Client, or the subscriber test
+     * application registering), a gateway route, a service's use of its own schema, a producer or consumer edge of
+     * the contracts, Notification's publishing to the channel family, or the channels' reading by the subscriber test
+     * application. No edge connects two services or reaches another service's schema.
+     */
+    @Test
+    void theNotificationDiagramHasNoSynchronousServiceToServiceEdge() throws Exception {
+        Diagram diagram = diagram(NOTIFICATION_DIAGRAM);
+        Map<String, List<String[]>> topics = notificationTopics();
+        Node gateway = diagram.labelled("Nginx");
+        Node channels = diagram.labelled(CHANNEL_FAMILY);
+        Node subscribers = diagram.labelled(SUBSCRIBER_APPLICATION);
+        Map<String, String> serviceOf = new LinkedHashMap<>();
+        Map<String, String> schemaOf = new LinkedHashMap<>();
+        for (String service : NOTIFICATION_SERVICES) {
+            serviceOf.put(serviceNode(diagram, service).id(), service);
+            Node schema = diagram.labelled(schemaName(service));
+            schemaOf.put(schema.id(), service);
+            for (Node node : diagram.nodes().values()) if (diagram.within(node, schema)) schemaOf.put(node.id(), service);
+        }
+        Map<String, String> topicOf = new LinkedHashMap<>();
+        for (String topic : topics.keySet()) topicOf.put(diagram.labelled(topic).id(), topic);
+        List<String> violations = new ArrayList<>();
+        int routes = 0;
+        for (Edge edge : diagram.edges()) {
+            String from = edge.from();
+            String to = edge.to();
+            String where = "line " + edge.line() + ": " + from + " --> " + to;
+            if (serviceOf.containsKey(from) && serviceOf.containsKey(to)) {
+                violations.add(where + " connects two services directly");
+            } else if (to.equals(gateway.id())) {
+                if (serviceOf.containsKey(from) || schemaOf.containsKey(from) || topicOf.containsKey(from) || from.equals(channels.id())) {
+                    violations.add(where + ": only a client may call the gateway");
+                }
+            } else if (from.equals(gateway.id())) {
+                if (!serviceOf.containsKey(to)) violations.add(where + ": the gateway routes only to services");
+                routes++;
+            } else if (serviceOf.containsKey(from) && schemaOf.containsKey(to)) {
+                if (!serviceOf.get(from).equals(schemaOf.get(to))) violations.add(where + " reaches another service's schema");
+            } else if (serviceOf.containsKey(from) && topicOf.containsKey(to)) {
+                if (!topics.get(topicOf.get(to)).get(0)[0].equals(serviceOf.get(from))) {
+                    violations.add(where + ": the contracts name another producer of " + topicOf.get(to));
+                }
+            } else if (topicOf.containsKey(from) && serviceOf.containsKey(to)) {
+                List<String[]> readers = topics.get(topicOf.get(from));
+                if (readers.subList(1, readers.size()).stream().noneMatch(reader -> reader[0].equals(serviceOf.get(to)))) {
+                    violations.add(where + ": the contracts name no such consumer of " + topicOf.get(from));
+                }
+            } else if (to.equals(channels.id())) {
+                if (!EventTypes.NOTIFICATION.equals(serviceOf.get(from))) violations.add(where + ": only Notification publishes channels");
+            } else if (from.equals(channels.id())) {
+                if (!to.equals(subscribers.id())) violations.add(where + ": only the subscriber test application reads channels");
+            } else {
+                violations.add(where + " is not a gateway, database, producer, consumer, or channel edge");
+            }
+        }
+        assertEquals(NOTIFICATION_SERVICES.size(), routes, "the gateway routes to each of the four services once");
+        assertTrue(diagram.edges().stream().anyMatch(edge -> edge.from().equals(subscribers.id()) && edge.to().equals(gateway.id())),
+                "the subscriber test application registers through the gateway");
+        for (String service : NOTIFICATION_SERVICES) {
+            boolean uses = diagram.edges().stream().anyMatch(edge -> edge.from().equals(serviceNode(diagram, service).id())
+                    && service.equals(schemaOf.get(edge.to())));
+            if (!uses) violations.add(service + " has no edge to its schema");
+        }
+        assertTrue(violations.isEmpty(), String.join(System.lineSeparator(), violations));
+    }
+
+    /** The 007 SVG exists, names every topic, group, and the channel family, and is at least as recent as its page. */
+    @Test
+    void theNotificationSvgExportIsPresentAndCurrent() throws Exception {
+        Path root = repositoryRoot();
+        Path svg = root.resolve(NOTIFICATION_SVG);
+        assertTrue(Files.isRegularFile(svg), "Missing " + svg);
+        String image = Files.readString(svg, StandardCharsets.UTF_8);
+        assertTrue(image.contains("<svg"), NOTIFICATION_SVG + " is an SVG document");
+        for (String topic : TopicNames.unprefixed().all()) assertTrue(image.contains(topic), NOTIFICATION_SVG + " names " + topic);
+        for (String group : List.of(TopicNames.INVENTORY_CHECKOUT_GROUP, TopicNames.TRANSACTION_CHECKOUT_OUTCOME_GROUP,
+                TopicNames.ANALYTICS_SCAN_INGEST_GROUP, TopicNames.NOTIFICATION_SALE_COMPLETED_GROUP)) {
+            assertTrue(image.contains(group), NOTIFICATION_SVG + " names " + group);
+        }
+        assertTrue(image.contains("selfcheckout.notify."), NOTIFICATION_SVG + " names the channel family");
+        long source = lastChange(root, NOTIFICATION_DIAGRAM);
+        long export = lastChange(root, NOTIFICATION_SVG);
+        assertTrue(export >= source, NOTIFICATION_SVG + " is older than " + NOTIFICATION_DIAGRAM + "; export it again");
+        String text = Files.readString(root.resolve(NOTIFICATION_DIAGRAM), StandardCharsets.UTF_8);
+        assertTrue(MERMAID_CLI.matcher(text).find(), NOTIFICATION_DIAGRAM + " records the pinned Mermaid CLI version");
+        assertTrue(text.contains("event-catalog.md") && text.contains("sale-completed-event.md"),
+                NOTIFICATION_DIAGRAM + " links both event contracts");
+    }
+
+    /** The 006 diagram. */
     private static Diagram diagram() throws IOException {
-        Path file = repositoryRoot().resolve(DIAGRAM);
+        return diagram(DIAGRAM);
+    }
+
+    /** Parses the first {@code mermaid} block of {@code page}: node, subgraph, and edge lines. */
+    private static Diagram diagram(String page) throws IOException {
+        Path file = repositoryRoot().resolve(page);
         assertTrue(Files.isRegularFile(file), "Missing " + file);
         List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
         int start = lines.indexOf("```mermaid");
-        assertTrue(start >= 0, DIAGRAM + " has a mermaid block");
+        assertTrue(start >= 0, page + " has a mermaid block");
         Map<String, Node> nodes = new LinkedHashMap<>();
         List<Edge> edges = new ArrayList<>();
         List<String> stack = new ArrayList<>();
@@ -315,7 +539,7 @@ class ArchitectureDiagramConsistencyTest {
                 continue;
             }
             if (!header) {
-                assertTrue(line.startsWith("flowchart "), DIAGRAM + " is a Mermaid flowchart: " + line);
+                assertTrue(line.startsWith("flowchart "), page + " is a Mermaid flowchart: " + line);
                 header = true;
                 continue;
             }
@@ -324,20 +548,20 @@ class ArchitectureDiagramConsistencyTest {
             Matcher node = NODE.matcher(line);
             Matcher edge = EDGE.matcher(line);
             if (subgraph.matches()) {
-                define(nodes, new Node(subgraph.group(1), subgraph.group(2), parent));
+                define(nodes, new Node(subgraph.group(1), subgraph.group(2), parent), page);
                 stack.add(subgraph.group(1));
             } else if (line.equals("end")) {
-                assertFalse(stack.isEmpty(), DIAGRAM + " line " + (index + 1) + ": end without subgraph");
+                assertFalse(stack.isEmpty(), page + " line " + (index + 1) + ": end without subgraph");
                 stack.remove(stack.size() - 1);
             } else if (edge.matches()) {
                 edges.add(new Edge(edge.group(1), edge.group(3), edge.group(2) == null ? "" : edge.group(2), index + 1));
             } else if (node.matches()) {
-                define(nodes, new Node(node.group(1), node.group(2), parent));
+                define(nodes, new Node(node.group(1), node.group(2), parent), page);
             } else {
-                throw new AssertionError(DIAGRAM + " line " + (index + 1) + " is not a node, subgraph, or edge: " + line);
+                throw new AssertionError(page + " line " + (index + 1) + " is not a node, subgraph, or edge: " + line);
             }
         }
-        assertTrue(stack.isEmpty(), DIAGRAM + " closes every subgraph");
+        assertTrue(stack.isEmpty(), page + " closes every subgraph");
         for (Edge edge : edges) {
             assertTrue(nodes.containsKey(edge.from()) && nodes.containsKey(edge.to()),
                     "line " + edge.line() + " connects an undefined node: " + edge);
@@ -345,14 +569,15 @@ class ArchitectureDiagramConsistencyTest {
         return new Diagram(nodes, edges);
     }
 
-    private static void define(Map<String, Node> nodes, Node node) {
-        assertFalse(nodes.containsKey(node.id()), DIAGRAM + " defines " + node.id() + " twice");
+    private static void define(Map<String, Node> nodes, Node node, String page) {
+        assertFalse(nodes.containsKey(node.id()), page + " defines " + node.id() + " twice");
         nodes.put(node.id(), node);
     }
 
-    /** A label without Mermaid's HTML line breaks and markup. */
+    /** A label without Mermaid's HTML line breaks and markup, with Mermaid's {@code #lt;} and {@code #gt;} decoded. */
     private static String plain(String label) {
-        return label.replaceAll("<br\\s*/?>", " ").replaceAll("<[^>]+>", "").replace("&nbsp;", " ");
+        return label.replaceAll("<br\\s*/?>", " ").replaceAll("<[^>]+>", "").replace("&nbsp;", " ")
+                .replace("#lt;", "<").replace("#gt;", ">");
     }
 
     /**

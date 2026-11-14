@@ -1,0 +1,92 @@
+{
+  "run": {
+    "id": "isolation/reject-2",
+    "startedAt": "2026-11-13T12:32:00.2429355+00:00",
+    "deploymentCommit": "b51830368a6f4e373cafe0315c5fa865239928b8",
+    "subscribers": 100,
+    "seed": 20261111,
+    "skusPerSubscriber": 20,
+    "skuDistribution": "uniform",
+    "loadClient": {
+      "stations": 10,
+      "durationSeconds": 60
+    },
+    "faults": "reject:sub-0001"
+  },
+  "sales": {
+    "completed": 3896,
+    "activeWindowSeconds": 60.046,
+    "perSecond": 64.884,
+    "backgroundCompletions": 0
+  },
+  "notifications": {
+    "owed": 36848,
+    "delivered": 36848,
+    "received": 36848,
+    "redeliveries": 0,
+    "deliveredPerSecond": 608.683,
+    "receivedPerSecond": 609.183
+  },
+  "latencyMs": {
+    "endToEnd": {
+      "p50": 27,
+      "p95": 111,
+      "p99": 209,
+      "max": 72633,
+      "n": 36848
+    },
+    "toDelivered": {
+      "p50": 49,
+      "p95": 139,
+      "p99": 237
+    },
+    "endToEndExcluding": {
+      "subscriberId": "sub-0001",
+      "p50": 27,
+      "p95": 98,
+      "p99": 172
+    }
+  },
+  "deliveryFailures": {
+    "chargedFailures": 193,
+    "unchargedFailures": 2250,
+    "parked": 0,
+    "operatorRetried": 0
+  },
+  "backlog": {
+    "max": {
+      "saleEventsUnpublished": 6,
+      "saleConsumerLag": 0,
+      "notificationsPending": 279,
+      "channelLag": 92
+    },
+    "final": {
+      "saleEventsUnpublished": 0,
+      "saleConsumerLag": 0,
+      "notificationsPending": 0,
+      "channelLag": 0
+    }
+  },
+  "drain": {
+    "finalCompletionAt": "2026-11-13T12:34:53.886Z",
+    "allReceivedAt": "2026-11-13T12:35:06.697Z",
+    "drainSeconds": 12.811,
+    "deadlineSeconds": 60,
+    "deadlineMet": true
+  },
+  "reconciliation": {
+    "verdict": "PASS",
+    "counts": {
+      "saleEvents": 0,
+      "fixedSubscriptions": 0,
+      "history": 0,
+      "selectionMismatch": 0,
+      "missingNotDelivered": 0,
+      "missingDeliveredNotReceived": 0,
+      "unexpected": 0,
+      "duplicate": 0,
+      "quantityMismatch": 0,
+      "parked": 0
+    }
+  }
+}

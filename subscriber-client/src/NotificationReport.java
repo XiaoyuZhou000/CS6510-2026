@@ -143,7 +143,9 @@ public final class NotificationReport {
         endToEndSection.put("n", (long) endToEndSorted.length);
         latency.put("endToEnd", endToEndSection);
         latency.put("toDelivered", percentiles(sorted(toDelivered)));
-        if (faultSubscriber == null || "none".equals(faults)) {
+        // Every isolation run names its fault subscriber, the healthy ones too (with faults "none"), so that SC-006
+        // compares the same 99 subscribers; other runs name none.
+        if (faultSubscriber == null) {
             latency.put("endToEndExcluding", null);
         } else {
             Map<String, Object> excluded = new LinkedHashMap<>();
