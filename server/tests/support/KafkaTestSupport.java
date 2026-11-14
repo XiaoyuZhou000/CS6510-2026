@@ -8,12 +8,16 @@ import messaging.KafkaRecordStream;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.OffsetSpec;
+import org.apache.kafka.clients.admin.TopicDescription;
+import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Assumptions;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -304,16 +308,39 @@ public final class KafkaTestSupport {
         // The partitions' leaders are elected asynchronously; wait until every one is visible.
         long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
         try (Admin admin = admin()) {
+            Map<TopicPartition, OffsetSpec> latest = new HashMap<>();
             while (true) {
                 try {
-                    boolean ready = admin.describeTopics(topics.stream().map(NewTopic::name).toList()).allTopicNames()
-                            .get(5, TimeUnit.SECONDS).values().stream()
+                    Map<String, TopicDescription> descriptions = admin.describeTopics(topics.stream().map(NewTopic::name).toList())
+                            .allTopicNames().get(5, TimeUnit.SECONDS);
+                    boolean ready = descriptions.values().stream()
                             .allMatch(description -> description.partitions().stream().allMatch(p -> p.leader() != null));
-                    if (ready) return;
+                    if (ready) {
+                        for (TopicDescription description : descriptions.values()) {
+                            for (var partition : description.partitions()) {
+                                latest.put(new TopicPartition(description.name(), partition.partition()), OffsetSpec.latest());
+                            }
+                        }
+                        break;
+                    }
                 } catch (Exception notYet) {
                     // Metadata is still propagating.
                 }
                 if (System.nanoTime() > deadline) fail("Test topics have no leaders after 30 s");
+                Thread.sleep(100);
+            }
+            // A leader appears in the metadata before its partition can take writes; until then a produce request gets
+            // NotLeaderOrFollowerException, which on the Windows broker can outlast a test's delivery timeout. A
+            // ListOffsets request goes to the same leader and fails the same way, without writing anything, so every
+            // partition must answer one first (007 T129).
+            deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+            while (true) {
+                try {
+                    admin.listOffsets(latest).all().get(5, TimeUnit.SECONDS);
+                    return;
+                } catch (Exception notYet) {
+                    if (System.nanoTime() > deadline) fail("Test topics' partitions are not ready after 60 s: " + notYet);
+                }
                 Thread.sleep(100);
             }
         } catch (InterruptedException interrupted) {

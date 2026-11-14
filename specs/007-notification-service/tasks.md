@@ -514,10 +514,10 @@ These rules bind every task below.
 
 **Purpose**: Final validation, documentation accuracy, and compliance review.
 
-- [ ] T128 [P] Update `specs/007-notification-service/quickstart.md` so every command matches what was implemented: scenario C is `subscriber-client/run-tests.sh`, scenario G is `server/run-tests.sh` with `STRICT_LIVE_GATES=1`, and the actual script parameters are used. Record a full quickstart pass in `load-client/reports/notification-service/quickstart-validation.md`.
-- [ ] T129 Run the final release gate: `server/build.sh all`, `server/build-tests.sh`, `STRICT_LIVE_GATES=1 server/run-tests.sh`, and `subscriber-client/run-tests.sh` on an idle machine. Save the summaries to `load-client/reports/notification-service/final-gate-tests.txt`, and confirm zero failures and zero skipped live suites.
-- [ ] T130 Perform the constitution compliance review: re-check every row of plan.md's *Constitution Check* (v7.0.0, gates I–XI, constraints, workflow) against the code and the evidence, and append an *Implementation Notes* section to `specs/007-notification-service/plan.md` recording where the implementation refined the plan and confirming that no gate changed.
-- [ ] T131 Re-validate `specs/007-notification-service/checklists/requirements.md` against the final spec, and make sure every FR-001–FR-038 is covered by at least one passing test or committed evidence, listing the mapping in `load-client/reports/notification-service/README.md`'s SC table or an appendix.
+- [X] T128 [P] Update `specs/007-notification-service/quickstart.md` so every command matches what was implemented: scenario C is `subscriber-client/run-tests.sh`, scenario G is `server/run-tests.sh` with `STRICT_LIVE_GATES=1`, and the actual script parameters are used. Record a full quickstart pass in `load-client/reports/notification-service/quickstart-validation.md`.
+- [X] T129 Run the final release gate: `server/build.sh all`, `server/build-tests.sh`, `STRICT_LIVE_GATES=1 server/run-tests.sh`, and `subscriber-client/run-tests.sh` on an idle machine. Save the summaries to `load-client/reports/notification-service/final-gate-tests.txt`, and confirm zero failures and zero skipped live suites.
+- [X] T130 Perform the constitution compliance review: re-check every row of plan.md's *Constitution Check* (v7.0.0, gates I–XI, constraints, workflow) against the code and the evidence, and append an *Implementation Notes* section to `specs/007-notification-service/plan.md` recording where the implementation refined the plan and confirming that no gate changed.
+- [X] T131 Re-validate `specs/007-notification-service/checklists/requirements.md` against the final spec, and make sure every FR-001–FR-038 is covered by at least one passing test or committed evidence, listing the mapping in `load-client/reports/notification-service/README.md`'s SC table or an appendix.
 
 ---
 

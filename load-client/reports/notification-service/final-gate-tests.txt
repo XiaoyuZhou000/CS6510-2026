@@ -1,0 +1,52 @@
+# Final release gate (007 T129), 2026-11-13, on top of commit 0b33d82 with the phase 11 changes
+
+## server/build.sh all
+Built out/transaction.jar (runtime classpath: out/common.jar;out/contracts.jar;lib/messaging/*;lib/mysql-connector-j-9.0.0.jar)
+Built out/inventory.jar (runtime classpath: out/common.jar;out/contracts.jar;lib/messaging/*;lib/mysql-connector-j-9.0.0.jar)
+Built out/analytics.jar (runtime classpath: out/common.jar;out/contracts.jar;lib/messaging/*;lib/mysql-connector-j-9.0.0.jar)
+Built out/notification.jar (runtime classpath: out/common.jar;out/contracts.jar;lib/messaging/*;lib/mysql-connector-j-9.0.0.jar)
+
+## server/build-tests.sh
+Tests compiled. Run with: ./run-tests.sh
+
+## STRICT_LIVE_GATES=1 SERVER_BASE_URL=http://localhost:8080 KAFKA_TEST_BOOTSTRAP=127.0.0.1:19092 KAFKA_TEST_BROKER_CONTROL=1 NGINX_BIN KAFKA_HOME server/run-tests.sh
+resetProducesExactBaselineForFreshServer(): assumption failed: Destructive reset test disabled; pass -DRUN_RESET_BASELINE_TEST=true to enable
+resetBaselineEmptiesEveryTopicAndSchema(): assumption failed: Destructive reset test disabled; pass -DRUN_RESET_BASELINE_TEST=true to enable
+parityGateHasNoPendingOrUnverifiedRows(): assumption failed: No parity gate requested (PARITY_GATE unset)
+[       161 containers found      ]
+[         0 containers skipped    ]
+[       161 containers started    ]
+[         0 containers aborted    ]
+[       161 containers successful ]
+[         0 containers failed     ]
+[       651 tests found           ]
+[         0 tests skipped         ]
+[       651 tests started         ]
+[         3 tests aborted         ]
+[       648 tests successful      ]
+[         0 tests failed          ]
+Summary (excluding direct restoration): 646 tests, 0 failed, 3 skipped
+Direct restoration (SC-016) [messaging.RestorationEventDirectTest]: 5 tests, 0 failed, 0 skipped
+
+## KAFKA_TEST_BOOTSTRAP=127.0.0.1:19092 subscriber-client/run-tests.sh
+[        13 containers found      ]
+[         0 containers skipped    ]
+[        13 containers started    ]
+[         0 containers aborted    ]
+[        13 containers successful ]
+[         0 containers failed     ]
+[        67 tests found           ]
+[         0 tests skipped         ]
+[        67 tests started         ]
+[         0 tests aborted         ]
+[        67 tests successful      ]
+[         0 tests failed          ]
+
+## Earlier runs of this gate on the same day, before the fixes recorded in plan.md (Implementation Notes)
+Run 1: 646 tests, 1 failed (messaging.KafkaTransportLiveTest ordering test: TimeoutException), 3 skipped; subscriber-client 67 of 67.
+Run 2, after the KafkaTestSupport readiness wait: 646 tests, 1 failed (messaging.SaleEventParkingLiveTest: one sale built twice), 3 skipped.
+Run 3, after the channel provisioner's readiness wait and the parking test's fix: above.
+
+## Repeated runs of the fixed tests
+messaging.KafkaTransportLiveTest: before the fix 3 of 5 passed; after it 10 of 10.
+messaging.SaleEventParkingLiveTest: after the fix 12 of 12.

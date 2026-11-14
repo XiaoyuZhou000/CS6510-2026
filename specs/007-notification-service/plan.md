@@ -323,3 +323,54 @@ load-client/                        # unchanged source
 - **Charged vs. uncharged failures**: one in-memory timestamp per channel, justified by keeping broker outages from parking notifications while still parking a genuinely faulty channel (N8). Durable state stays authoritative.
 - **Global subscription clock lock**: it serializes subscription changes, which are rare, and gives every selection an exact, recordable history point. Selections share the lock with one another.
 - **A test-only fault endpoint**: disabled unless `NOTIFICATION_TEST_FAULTS=1`, and needed to start and stop channel faults within one run for SC-006.
+
+## Implementation Notes
+
+*Constitution compliance review at the end of the feature (T130), against constitution v7.0.0. Implementation commits: phases 1–10, `b981692` … `0b33d82`, on `feature/notification-service`.*
+
+**Every gate of the Constitution Check still passes; none changed.** Each row was re-checked against the code and the committed evidence:
+
+| Gate | Re-checked against | Result |
+|---|---|---|
+| I. Independent microservices | `out/notification.jar` with `notification.NotificationMain`, port 8084, its own pool and schema; `./build.sh notification` builds no other service jar (`IndependentServiceDeploymentTest`); `TransactionHasNoRecipientLogicTest`, `LayerDependencyTest`, `MicroserviceBoundaryTest` | PASS |
+| II. Database per service | `DatabaseIsolationTest` (T110): Notification's user is denied every statement on the other three schemas and they on its schema, for disposable and deployed users; its user is DML-only even on its own schema | PASS |
+| III. Event-based communication | `SaleCompleted` only through Transaction's outbox and `selfcheckout.sale-completed.v1`; `OutboxOnlyPublishTest`, `EventSchemaCompatibilityTest`; the diagram test finds no synchronous service-to-service edge (T118) | PASS |
+| IV. External REST API | `ClientAndContractUnchangedTest` (T106): Load Client and `spec/self-checkout-openapi.yaml` byte-identical to `4a91686`; `nginx.conf` differs only by the Notification upstream and location; `spec/notification-openapi.yaml` is additive | PASS |
+| V. Saga coordination | T3 inserts the outbox row in its own commit (statement budget 3 warm, 4 cold, 1 commit); Complete never waits on Notification (`NotificationOutageCheckoutTest`, scenario G) | PASS |
+| VI. Consistency | `db/validate-invariants.ps1` passed after every evidence run, the stock invariant included | PASS |
+| VII. Reliable delivery, analytics accuracy | Every channel publish is backed by a `notification` row and marked after `acks=all`; `AnalyticsUnaffectedByNotificationsTest` (T105); scenario F | PASS |
+| VIII. Performance and operational simplicity | One broker; channels are Kafka topics; the fourth service is the only new infrastructure; documented in `server/README.md` and `deploy/kafka/README.md` | PASS, with the cost below recorded |
+| IX. Verification and evidence | Four subscriber counts, both standard reports, isolation, and a reconciliation that is itself tested (SC-003); `load-client/reports/notification-service/README.md` | PASS |
+| X. Completed-sale events | One `SaleCompleted` per COMPLETED transaction in every run (reconciler `saleEvents` = 0) and in scenario A | PASS |
+| XI. Subscriptions and delivery | Scenarios B, E, F; SC-006 isolation PASS (ratios 1.01 and 0.97) | PASS |
+| Architectural constraints | Incremental evolution of `4a91686`; one baseline resets the broker, all four schemas, and the run directory (`ResetBaselineTest`, quickstart §1) | PASS |
+| Workflow and quality gates | Tests written before each implementation phase; every phase committed locally with its evidence; coverage ledger "Feature 007" section | PASS |
+
+**Where the implementation refined the plan** (none changes a gate):
+
+- **The Notification user is DML-only** (T012). So its `schema.sql` is applied with the MySQL admin credentials by `db/reset-service.ps1` (and so by `reset-all.ps1` and `reset-baseline.ps1`), and the baseline is then read back as the Notification user. Disposable test users get the same grant (`TestSchema.ownPrivileges()`).
+- **Test faults**: channel faults are flags (`notification.channel.reject|stall:<id>`) read by a `ChannelFaults` sender decorator, which only `NotificationMain` constructs. `POST /notifications/ops/faults` exists only with `NOTIFICATION_TEST_FAULTS=1`. The crash points of scenario F use `halt`, which kills the whole JVM, so items 1 and 2 show redeliveries of sends confirmed but not yet marked; every one is kept once by ID.
+- **Charging rule consequence**: a failure is charged only while some other channel confirms sends. After the load ends, a faulted channel's remaining failures are broker-wide, so they are uncharged and never park. The harness's faulted runs therefore drain twice: first the other subscribers, then everyone, after it clears the fault and runs the operator retry. No notification was parked in the isolation runs; all were delivered after the channel recovered.
+- **Healthy isolation runs record their fault subscriber** too, so `endToEndExcluding` measures the same 99 subscribers in all three modes.
+- **Exports** compute epoch times with `TIMESTAMPDIFF` from the stored values. The services write `TIMESTAMP(3)` with `serverTimezone=UTC` into a server whose session zone is UTC−8, which makes `UNIX_TIMESTAMP()` and `NOW()` comparisons wrong. The services are self-consistent, and every comparison is done in one form.
+- **Diagram**: feature 006's diagram stays as it was, checked against 006's topics only. Feature 007's flow is its own page, `docs/architecture/notification-service.md`, with its own consistency checks (T118).
+- **Harness additions**:
+  - `-Disruption` kinds for scenario F;
+  - `notification-stopped` for scenario G;
+  - `-Fault` for scenario H;
+  - `run-evidence.ps1` for lists of runs;
+  - port 8084 added to the 006 harnesses' checks (T114);
+  - `server/build.sh all` accepted as the quickstart writes it.
+- **A channel is ready only once it can take writes** (found by the final gate, T129). On the Windows broker a new topic's leader is visible before its partition accepts writes, and the first sends can fail with `NotLeaderOrFollowerException` for many seconds. `KafkaChannelProvisioner.provision` therefore waits, bounded at 30 s, until the new partition answers a ListOffsets request. If it doesn't, the channel stays not ready and provisioning is retried as before. The benchmarks never showed this, because their channels are created at registration, long before the first sale.
+- **Tests made robust**:
+  - `ResetBaselineTest` reads the reset script's output from a file, because the broker restarted by the reset inherits the pipe.
+  - `NotificationOutageCheckoutTest` counts commits outside the outbox marker, whose batching depends on timing.
+  - `KafkaTestSupport` waits for the same partition readiness after creating test topics. That ended the long-known flaky failure of `KafkaTransportLiveTest`'s ordering test.
+  - `SaleEventParkingLiveTest` named its two same-partition sales after the partition only. When both bad records landed on one partition, about 1 run in 16, it built one sale twice and waited for a tenth delivery that could not come.
+
+**Performance (Gate VIII, recorded, not a deviation)**:
+- **The cost of a fourth service**: the plan estimated at most 3% for the `SaleCompleted` row (research N15), and CP1 measured +0.1%. Running Notification itself on the same host and MySQL server costs about 7% of default throughput and about 30 ms of Complete p95. This was measured against same-day controls without Notification (CP2, `load-client/reports/notification-service/checkpoints.md`). The cost does not grow with the subscriber count.
+- **Correctness is unaffected**: every run reconciles, and checkout keeps no dependency on Notification.
+- **CP3 was not run**: it was the optional tuning of consumer threads, lane cap, and marking interval. `benchmark-compare.ps1` drives only the 006 harness. The marking interval is the setting most worth trying first.
+
+**Out of scope, as planned**: presentation and video; tuning beyond the defaults (CP3).

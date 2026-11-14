@@ -83,7 +83,7 @@ class SaleEventParkingLiveTest {
 
                 await(() -> parkedEvents(schema) == 2, "both bad records are parked");
                 await(() -> valid.stream().allMatch(sale -> selected(schema, sale)), "every valid sale is selected");
-                await(() -> delivered(schema) == valid.size(), "every valid sale is delivered");
+                await(() -> delivered(schema) == valid.size(), () -> "every valid sale is delivered; " + rows(schema));
                 assertEquals(valid.size(), schema.saleSelections(), "only the valid sales are selected");
                 assertEquals(2, sales.parked());
 
@@ -107,7 +107,8 @@ class SaleEventParkingLiveTest {
     private static String sameKeyPartitionSale(String run, String key) {
         int target = partition(key);
         for (int i = 0; ; i++) {
-            String sale = "park-" + run + "-same-" + i;
+            // Named after the bad record it follows, so two bad records on one partition get two different sales.
+            String sale = key + "-same-" + i;
             if (partition(sale) == target) return sale;
         }
     }
@@ -150,10 +151,27 @@ class SaleEventParkingLiveTest {
         }
     }
 
+    /** The notification rows by state with their attempt and failure counts, for a timeout message. */
+    private static String rows(NotificationTestSchema schema) {
+        try {
+            return schema.queryString("SELECT GROUP_CONCAT(CONCAT(state, ' attempts=', attempt_count, ' charged=', "
+                    + "charged_failures, ' uncharged=', uncharged_failures) SEPARATOR '; ') FROM notification") + " | selections: "
+                    + schema.queryString("SELECT GROUP_CONCAT(CONCAT(sale_id, ' version=', subscription_version, ' recipients=', "
+                    + "recipient_count, ' rows=', notification_count) SEPARATOR '; ') FROM sale_selection") + " | clock "
+                    + schema.subscriptionVersion() + ", changes " + schema.subscriptionChanges();
+        } catch (Exception failure) {
+            return "rows unreadable: " + failure;
+        }
+    }
+
     private static void await(BooleanSupplier condition, String what) throws InterruptedException {
+        await(condition, () -> what);
+    }
+
+    private static void await(BooleanSupplier condition, java.util.function.Supplier<String> what) throws InterruptedException {
         long deadline = System.nanoTime() + WAIT.toNanos();
         while (!condition.getAsBoolean()) {
-            assertTrue(System.nanoTime() < deadline, "timed out waiting: " + what);
+            if (System.nanoTime() >= deadline) fail("timed out waiting: " + what.get());
             Thread.sleep(50);
         }
     }

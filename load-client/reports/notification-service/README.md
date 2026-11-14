@@ -96,9 +96,54 @@ In the official default run, with every component healthy and 100 subscribers, t
 | SC-006: one faulted channel does not slow the others | **Met** (ratios 1.01 and 0.97) | [isolation/README.md](isolation/README.md) |
 | SC-007: drain within 60 s | **Met** | Above; [default-notification-report.md](default-notification-report.md) |
 | SC-008: checkout unaffected by a stopped Notification | **Met** | Scenario G ([us6-unchanged/](us6-unchanged/README.md)) |
-| SC-009: 006 suite passes, client and contract unchanged | **Met** | [us6-unchanged/](us6-unchanged/README.md), with the known flaky Kafka timing test noted there |
+| SC-009: 006 suite passes, client and contract unchanged | **Met** | Final gate: 646 tests, 0 failed ([final-gate-tests.txt](final-gate-tests.txt)); hash checks in [us6-unchanged/](us6-unchanged/README.md) |
 | SC-010: reports at three or more subscriber counts | **Met** | Four counts, above |
 | SC-011: two standard reports with notification reports | **Met** | Above; the throughput cost is recorded, not hidden |
 | SC-012: independent operation and credential isolation | **Met** | [us7-operations.md](us7-operations.md) |
 | SC-013: the same seed gives the same subscribers | **Met** | Byte-identical snapshots ([us3-smoke/](us3-smoke/README.md)); all phase 10 runs share seed 20261111 |
 | SC-014: the diagram matches the catalog | **Met** | [notification-service.md](../../../docs/architecture/notification-service.md) and its SVG, checked by `architecture.ArchitectureDiagramConsistencyTest` |
+
+## Appendix: requirement coverage (T131)
+
+Every functional requirement of [spec.md](../../../specs/007-notification-service/spec.md) is covered by at least one passing test or by committed evidence. Server tests are under `server/tests/<package>/`, and subscriber-client tests under `subscriber-client/test/`. All of them pass in the final gate ([final-gate-tests.txt](final-gate-tests.txt)). The spec has not changed since commit `5986398`, so its quality checklist ([checklists/requirements.md](../../../specs/007-notification-service/checklists/requirements.md), 16 of 16 items) still holds as written.
+
+| Requirement | Tests | Evidence |
+|---|---|---|
+| FR-001 Sale exists only after durable COMPLETED | `integration.SaleCompletedEventTest`, `database.JdbcCheckoutAttemptStoreTest` | Scenario A |
+| FR-002 Event recorded in T3's own commit | `architecture.SaleEventOnlyFromT3Test`, `messaging.SaleEventPublishLiveTest`, `performance.OutcomeHandlerStatementBudgetTest`, `unit.transaction.SaleEventsTest` | CP1 |
+| FR-003 Exactly one event per sale | `integration.SaleCompletedEventTest`, `integration.TransactionRestartSaleEventsTest`, `integration.CheckoutMessagesOnlyTest` | Every run's `saleEvents` = 0 |
+| FR-004 No recipient data in Transaction | `architecture.TransactionHasNoRecipientLogicTest`, `messaging.SaleEventContractTest` | — |
+| FR-005 Complete never waits for notification | `integration.NotificationOutageCheckoutTest` | Scenario G ([us6-unchanged/](us6-unchanged/README.md)) |
+| FR-006 Register, add, remove, cancel | `contract.NotificationSubscribersEndpointTest`, `unit.notification.SubscriptionChangeRulesTest`, `database.JdbcSubscriptionStoreTest` | Scenario E |
+| FR-007 Effective at commit | `integration.SubscriptionChangeConsistencyTest`, `database.SelectionLockingTest` | Scenario E |
+| FR-008 Index from committed data only | `unit.notification.SubscriptionIndexTest`, `integration.SubscriptionChangeConsistencyTest` | Scenario E restart check |
+| FR-009 ≥ 100 subscribers, independent channels | `messaging.ChannelIsolationLiveTest`, `unit.notification.NotificationDispatcherTest` | Scaling to 100; isolation (SC-006) |
+| FR-010 Selection rule | `unit.notification.SelectionPlanTest`, `database.SelectionLockingTest` | Scenarios B and E |
+| FR-011 Selection recorded durably | `database.JdbcSelectionStoreTest`, `performance.SelectionStatementBudgetTest` | `selections.tsv` of every run |
+| FR-012 Selections are final | `integration.SubscriptionChangeConsistencyTest`, `HistoryReconcileTest` | Scenario E (cancelled subscriber still receives) |
+| FR-013 One effective notification per (sale, SKU, subscriber) | `integration.NotificationFlowTest`, `ReconcilerTest` | SC-002 runs |
+| FR-014 Stable notification identity | `database.JdbcNotificationStoreTest`, `ReceiptWriterTest` | Receipts' `redelivery` flags (scenario F) |
+| FR-015 At-least-once transport, once in effect | `integration.NotificationCrashMatrixTest`, `messaging.NotificationBrokerRestartTest`, `integration.RestartDuringWorkloadTest` | Scenario F ([fault-matrix/](fault-matrix/README.md)) |
+| FR-016 Durable delivery record | `database.JdbcNotificationStoreTest` | `notifications.tsv` of every run |
+| FR-017 Bounded retry, parking, operator retry | `unit.notification.ChargingRuleTest`, `database.ParkingAndOperatorRetryTest` | Isolation runs (fault, then retry) |
+| FR-018 Unprocessable sale events parked | `messaging.SaleEventParkingLiveTest` | Scenario F item 6 |
+| FR-019 Subscriber test application | `SubscriberThreadTest`, `SubscriberResumeLiveTest` | Every phase 10 run |
+| FR-020 Reproducible assignment | `AssignmentDeterminismTest` | Byte-identical snapshots ([us3-smoke/](us3-smoke/README.md)) |
+| FR-021 Structured receipts | `ReceiptWriterTest`, `SubscriberResumeLiveTest` | `subscribers/receipts/` (on the benchmark machine) |
+| FR-022 Change-scenario driver | `HistoryReconcileTest` | Scenario E ([change-scenario/](change-scenario/README.md)) |
+| FR-023 Registered before the load | `ReconcilerTest` (`fixedSubscriptions`) | `ready.json` before the load in every run |
+| FR-024 Four independent sources | `DecodeSaleEventsTest`, `ReconcilerTest` | `exports/` of every run |
+| FR-025 Drain condition | `NotificationReportTest` | `backlog.tsv` and `drain` of every run |
+| FR-026 Reconciliation verdict | `ReconcilerTest`, `ReconcileFaultInjectionTest` | Scenario C; every `reconciliation.json` |
+| FR-027 History-mode reconciliation | `HistoryReconcileTest` | Scenario E |
+| FR-028 Three or more subscriber counts | — | [scaling/](scaling/) (SC-010) |
+| FR-029 Two genuine reports | — | [default-report.json](default-report.json), [stress-report.json](stress-report.json) (SC-011) |
+| FR-030 Operational status | `contract.OpsFaultsEndpointTest`, `database.ServiceStatusQueriesTest` | `ops/status` sampled in every `backlog.tsv` |
+| FR-031 Existing contract unchanged | `architecture.ClientAndContractUnchangedTest`, the 006 contract suites | Final gate (SC-009) |
+| FR-032 Additive endpoints | `contract.NotificationSubscribersEndpointTest`, `integration.GatewayServiceOutageTest` | `spec/notification-openapi.yaml` |
+| FR-033 No effect on checkout or Analytics | `integration.NotificationOutageCheckoutTest`, `integration.AnalyticsUnaffectedByNotificationsTest` | Scenario G |
+| FR-034 Independent build and run | `integration.IndependentServiceDeploymentTest` | [us7-operations.md](us7-operations.md) |
+| FR-035 Documented operation | `integration.DatabaseIsolationTest` (credentials) | `server/README.md`, `deploy/kafka/README.md`, `subscriber-client/README.md` |
+| FR-036 One baseline for everything | `integration.ResetBaselineTest` | Quickstart §1 ([us7-operations.md](us7-operations.md)) |
+| FR-037 Updated diagram | `architecture.ArchitectureDiagramConsistencyTest` | [notification-service.md](../../../docs/architecture/notification-service.md) |
+| FR-038 Required automated tests | All of the above; `IsolationSummaryTest` for the isolation verdict | — |
